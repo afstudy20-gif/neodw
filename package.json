@@ -1,0 +1,29 @@
+{
+  "name": "neodw",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@cornerstonejs/core": "^4.20.4",
+    "@cornerstonejs/dicom-image-loader": "^4.20.4",
+    "@cornerstonejs/tools": "^4.20.4",
+    "comlink": "^4.4.2",
+    "dicom-parser": "^1.8.21",
+    "jszip": "^3.10.1",
+    "libarchive.js": "^2.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.2"
+  }
+}
