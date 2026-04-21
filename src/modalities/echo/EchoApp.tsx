@@ -1204,6 +1204,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
             if (files.length) void handleFiles(files);
           }}
         >
+         <div className="echo-viewport-area">
           {!activeSeries && !isLoading && (
             <div className={`echo-dropzone ${dragOver ? 'active' : ''}`}>
               <h3>Eko / USG DICOM Yükle</h3>
@@ -1455,8 +1456,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
               >✕</button>
             </div>
           )}
-
-        </div>
+         </div>
 
         {activeSeries && (() => {
           // Only US / XA / IVUS / OCT are true cine modalities. DX, CR, MG, RF
@@ -1523,6 +1523,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
             </div>
           );
         })()}
+        </div>
 
         <aside className="echo-measure-panel">
           <h2>Araçlar &amp; Ölçümler</h2>
