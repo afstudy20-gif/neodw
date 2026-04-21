@@ -336,6 +336,13 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
       }
     }
 
+    // Force an explicit setImageIdIndex so cornerstone actually loads the
+    // pixel data and runs the draw pipeline for frame 0. setStack alone
+    // can register the stack without triggering the first render, leaving
+    // the canvas black until the user clicks play (which itself issues
+    // setImageIdIndex). Observed on DX radiographs.
+    try { await vp.setImageIdIndex(0); } catch { /* ignore */ }
+
     applyLinearInterpolation(vp);
     // Force canvas resolution to match CSS size (fixes browser NEAREST stretching of small GL canvas)
     try { engine.resize(true, true); } catch {}
@@ -419,6 +426,14 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
     const rate = series.cineRate;
     if (rate && rate > 0 && rate < 120) {
       setFps(Math.round(rate));
+    }
+    // Default primary-button tool by modality: radiographs → W/L drag,
+    // ultrasound / cine → pan. Right-click stays on zoom for both.
+    const modU = (series.modality || '').toUpperCase();
+    if (['DX', 'CR', 'MG', 'RF'].includes(modU)) {
+      setActiveTool('window');
+    } else {
+      setActiveTool('pan');
     }
   }, []);
 
@@ -1537,6 +1552,14 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(40, 400)}>Abdomen</button>
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(50, 350)}>Yumuşak</button>
               <button className="echo-tool-btn" onClick={() => resetVoi()}>Otomatik</button>
+            </div>
+            <div className="echo-tool-grid" style={{ marginTop: 4 }}>
+              <button
+                className="echo-tool-btn"
+                style={{ gridColumn: '1 / -1' }}
+                onClick={() => resetVoi()}
+                title="W/L'yi DICOM varsayılanına / auto-hesaba döndür"
+              >W/L Reset</button>
             </div>
           </section>
 
