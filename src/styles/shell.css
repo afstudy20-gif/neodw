@@ -720,6 +720,81 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   font-weight: 600;
 }
 
+.nd-hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+.nd-hero-badges > .nd-privacy-badge,
+.nd-hero-badges > .nd-hero-link,
+.nd-hero-badges > .nd-install-hint {
+  margin-top: 0;
+  max-width: none;
+  flex: 1 1 280px;
+}
+
+.nd-hero-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--nd-line);
+  background: color-mix(in oklch, var(--nd-primary) 10%, var(--nd-panel));
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--nd-ink-2);
+  line-height: 1.45;
+  text-decoration: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.nd-hero-link:hover {
+  background: color-mix(in oklch, var(--nd-primary) 18%, var(--nd-panel));
+  border-color: var(--nd-primary);
+}
+.nd-hero-link svg {
+  color: var(--nd-primary);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.nd-hero-link b {
+  color: var(--nd-ink);
+  display: block;
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+
+.nd-install-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px dashed color-mix(in oklch, var(--nd-primary) 50%, var(--nd-line));
+  background: color-mix(in oklch, var(--nd-primary) 5%, var(--nd-panel));
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--nd-ink-2);
+  line-height: 1.45;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.nd-install-hint:hover {
+  background: color-mix(in oklch, var(--nd-primary) 14%, var(--nd-panel));
+  border-style: solid;
+}
+.nd-install-hint svg {
+  color: var(--nd-primary);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.nd-install-hint b {
+  color: var(--nd-ink);
+  display: block;
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+
 /* Support wrap (Flow-style) */
 .nd-support-wrap {
   margin-top: 40px;

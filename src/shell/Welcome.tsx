@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent as ReactDragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
 import { LANGS, useI18n } from './i18n';
 import { useTheme } from '../theme/ThemeProvider';
 import type { ModalityRoute } from '../App';
@@ -264,6 +264,41 @@ export default function Welcome({ onLaunch }: Props) {
     return () => { cancelled = true; };
   }, []);
 
+  // PWA install prompt capture — surface an in-page hint that mirrors the
+  // address-bar install icon, and trigger prompt() on click when the browser
+  // fires beforeinstallprompt.
+  const installDeferred = useRef<any>(null);
+  const [canInstall, setCanInstall] = useState<boolean>(false);
+  const [installed, setInstalled] = useState<boolean>(false);
+  useEffect(() => {
+    const onBIP = (e: Event) => {
+      e.preventDefault();
+      installDeferred.current = e;
+      setCanInstall(true);
+    };
+    const onInstalled = () => {
+      installDeferred.current = null;
+      setCanInstall(false);
+      setInstalled(true);
+    };
+    window.addEventListener('beforeinstallprompt', onBIP as EventListener);
+    window.addEventListener('appinstalled', onInstalled);
+    // Also detect already-standalone (installed) PWA
+    try {
+      const mql = window.matchMedia('(display-mode: standalone)');
+      if (mql.matches) setInstalled(true);
+    } catch {}
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBIP as EventListener);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+  const promptInstall = async () => {
+    const dp = installDeferred.current;
+    if (!dp) return;
+    try { await dp.prompt(); const res = await dp.userChoice; if (res?.outcome === 'accepted') { installDeferred.current = null; setCanInstall(false); } } catch {}
+  };
+
   // Prevent browser from opening a dragged file in a new tab when the user
   // releases it outside a drop target (default behavior would navigate away
   // from the app). Page-wide dragover + drop preventDefault neutralizes this.
@@ -304,16 +339,6 @@ export default function Welcome({ onLaunch }: Props) {
       <div className="nd-topbar">
         <Wordmark size={17} />
         <div className="nd-topbar-sep" />
-        <a
-          href="https://flow.drtr.uk/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="nd-topbar-link"
-          title="Flow — PRISMA sistematik inceleme akış şeması"
-        >
-          <span className="nd-topbar-link-name">Flow</span>
-          <span className="nd-topbar-link-sub">by drtr.uk · PRISMA flowchart</span>
-        </a>
         <div style={{ flex: 1 }} />
         <div className="mono nd-topbar-status">
           <span className="dot-ok" /> PACS · LOCAL
@@ -351,12 +376,52 @@ export default function Welcome({ onLaunch }: Props) {
               {t('hero.headline')}
             </h1>
 
-            <div className="nd-privacy-badge" role="note" aria-label="privacy">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                <path d="M9 12l2 2 4-4"/>
-              </svg>
-              <span><b>{t('priv.title')}</b> {t('priv.desc')}</span>
+            <div className="nd-hero-badges">
+              <div className="nd-privacy-badge" role="note" aria-label="privacy">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  <path d="M9 12l2 2 4-4"/>
+                </svg>
+                <span><b>{t('priv.title')}</b> {t('priv.desc')}</span>
+              </div>
+              <a
+                className="nd-hero-link"
+                href="https://flow.drtr.uk/"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Flow — PRISMA sistematik inceleme akış şeması"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <rect x="3" y="4" width="18" height="6" rx="1.5"/>
+                  <rect x="3" y="14" width="10" height="6" rx="1.5"/>
+                  <path d="M8 10v4"/>
+                </svg>
+                <span><b>Flow</b> by drtr.uk · PRISMA akış şeması</span>
+              </a>
+              {!installed && (
+                <button
+                  type="button"
+                  className="nd-install-hint"
+                  onClick={canInstall ? promptInstall : undefined}
+                  title={canInstall
+                    ? 'Tarayıcıya uygulama olarak yükle'
+                    : 'Adres çubuğundaki yükle simgesine tıkla (Chrome / Edge). Safari: Paylaş → Ana Ekrana Ekle.'}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <path d="M3 3h7v7H3z"/>
+                    <path d="M14 3h7v7h-7z"/>
+                    <path d="M14 14h7v7h-7z"/>
+                    <path d="M3 14h7v7H3z"/>
+                    <path d="M12 8v8M8 12h8"/>
+                  </svg>
+                  <span>
+                    <b>Uygulama olarak yükle</b>
+                    {canInstall
+                      ? 'Tıkla: NeoDW Chrome/Edge üzerinden cihazına kurulur.'
+                      : 'Adres çubuğunun sağındaki ⊞ simgesine tıkla. Safari: Paylaş → Ana Ekrana Ekle.'}
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         </div>
