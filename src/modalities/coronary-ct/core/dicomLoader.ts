@@ -179,19 +179,69 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
   const seriesList: DicomSeriesInfo[] = [];
 
-  for (const [seriesInstanceUID, parsedFiles] of seriesMap) {
-    parsedFiles.sort((lhs, rhs) => getSlicePosition(lhs.metadata) - getSlicePosition(rhs.metadata));
-    const first = parsedFiles[0]?.metadata ?? {};
+  for (const [seriesInstanceUID, filesList] of seriesMap) {
+    // 1. Sort strictly by ascending Z position using ImagePositionPatient
+    filesList.sort((lhs, rhs) => getSlicePosition(lhs.metadata) - getSlicePosition(rhs.metadata));
 
-    seriesList.push({
-      seriesInstanceUID,
-      seriesDescription: first.seriesDescription || 'Unknown Series',
-      modality: first.modality || 'Unknown',
-      numImages: parsedFiles.length,
-      imageIds: parsedFiles.map((entry) => entry.imageId),
-      patientName: first.patientName || 'Unknown',
-      studyDescription: first.studyDescription || 'Unknown Study',
-    });
+    // 2. Separate interleaved phases and discard step-and-shoot redundant slices
+    // We group slices into multiple "passes".
+    const passes: typeof filesList[] = [];
+    const Z_TOLERANCE = 0.05; // 0.05mm minimum slice spacing
+
+    for (const file of filesList) {
+      const z = getSlicePosition(file.metadata);
+      let placed = false;
+
+      for (const pass of passes) {
+        if (pass.length === 0) {
+          pass.push(file);
+          placed = true;
+          break;
+        }
+        const lastZ = getSlicePosition(pass[pass.length - 1].metadata);
+        if (z - lastZ > Z_TOLERANCE) {
+          pass.push(file);
+          placed = true;
+          break;
+        }
+      }
+
+      if (!placed) {
+        passes.push([file]);
+      }
+    }
+
+    // A real sub-volume should have a similar number of slices to the main pass.
+    // Step-and-shoot boundaries usually generate a pass with just 1 or 2 slices.
+    const maxSlices = Math.max(...passes.map(p => p.length));
+    const validPasses = passes.filter(p => p.length >= maxSlices * 0.4); // At least 40% of max
+
+    for (let passIdx = 0; passIdx < validPasses.length; passIdx++) {
+      const parsedFiles = validPasses[passIdx];
+      const first = parsedFiles[0]?.metadata ?? {};
+
+      let desc = first.seriesDescription || 'Unknown Series';
+      // Append pass info if we found multiple interleaved phases
+      if (validPasses.length > 1) {
+        // Try to identify it using Trigger Time or Phase
+        const phaseMarker = first.temporalPosition || first.triggerTime || first.acquisitionNumber;
+        if (phaseMarker) {
+          desc = `${desc} (Phase/Acq: ${phaseMarker})`;
+        } else {
+          desc = `${desc} (Sub-volume ${passIdx + 1})`;
+        }
+      }
+
+      seriesList.push({
+        seriesInstanceUID: validPasses.length > 1 ? `${seriesInstanceUID}_pass${passIdx}` : seriesInstanceUID,
+        seriesDescription: desc,
+        modality: first.modality || 'Unknown',
+        numImages: parsedFiles.length,
+        imageIds: parsedFiles.map((entry) => entry.imageId),
+        patientName: first.patientName || 'Unknown',
+        studyDescription: first.studyDescription || 'Unknown Study',
+      });
+    }
   }
 
   seriesList.sort((lhs, rhs) => rhs.numImages - lhs.numImages);

@@ -6,6 +6,7 @@ interface Props {
   seriesList: DicomSeriesInfo[];
   activeSeriesUID: string;
   onSelectSeries: (series: DicomSeriesInfo) => void;
+  onExportSeries?: (series: DicomSeriesInfo) => void;
   isLoading: boolean;
 }
 
@@ -26,8 +27,6 @@ function SeriesThumb({ imageId }: { imageId: string }) {
         const pixelData = image.getPixelData?.() ?? image.imageFrame?.pixelData;
         if (!pixelData) return;
         const { width, height } = image;
-        // Sample a representative WL from the scan: use DICOM window if
-        // available, otherwise fall back to min/max contrast stretch.
         let minPx = Infinity;
         let maxPx = -Infinity;
         for (let i = 0; i < pixelData.length; i++) {
@@ -66,7 +65,7 @@ function SeriesThumb({ imageId }: { imageId: string }) {
   return <canvas ref={canvasRef} className="ccta-series-thumb" width={96} height={72} />;
 }
 
-export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoading }: Props) {
+export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, onExportSeries, isLoading }: Props) {
   return (
     <aside className="series-panel">
       <div className="panel-header">
@@ -75,8 +74,6 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
       </div>
       <div className="series-list">
         {seriesList.map((series) => {
-          // Pick a middle-slice imageId for a more diagnostic thumbnail
-          // than scout/first slice.
           const mid = Math.floor(series.imageIds.length / 2);
           const thumbId = series.imageIds[mid] ?? series.imageIds[0];
           return (
@@ -84,7 +81,13 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
               key={series.seriesInstanceUID}
               className={`series-card with-thumb ${series.seriesInstanceUID === activeSeriesUID ? 'active' : ''}`}
               onClick={() => onSelectSeries(series)}
+              onContextMenu={(e) => {
+                if (!onExportSeries) return;
+                e.preventDefault();
+                onExportSeries(series);
+              }}
               disabled={isLoading}
+              title="Sol tık: aç · Sağ tık: DICOM indir"
             >
               <SeriesThumb imageId={thumbId} />
               <div className="series-card-info">

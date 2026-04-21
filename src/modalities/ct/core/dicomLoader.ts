@@ -181,25 +181,62 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
   const seriesList: DicomSeriesInfo[] = [];
 
-  for (const [uid, parsedFiles] of seriesMap) {
-    parsedFiles.sort((a, b) => {
-      const posA = getSlicePosition(a.metadata);
-      const posB = getSlicePosition(b.metadata);
-      return posA - posB;
-    });
+  for (const [uid, filesList] of seriesMap) {
+    // 1. Sort strictly by ascending Z position using ImagePositionPatient
+    filesList.sort((a, b) => getSlicePosition(a.metadata) - getSlicePosition(b.metadata));
 
-    const first = parsedFiles[0].metadata;
+    // 2. Separate interleaved phases and discard step-and-shoot redundant slices
+    const passes: typeof filesList[] = [];
+    const Z_TOLERANCE = 0.05; // 0.05mm minimum slice spacing
 
-    seriesList.push({
-      seriesInstanceUID: uid,
-      seriesDescription: first.seriesDescription || 'Unknown Series',
-      modality: first.modality || 'Unknown',
-      numImages: parsedFiles.length,
-      imageIds: parsedFiles.map((f) => f.imageId),
-      patientName: first.patientName || 'Unknown',
-      studyDescription: first.studyDescription || 'Unknown Study',
-      studyDate: first.studyDate || '',
-    });
+    for (const file of filesList) {
+      const z = getSlicePosition(file.metadata);
+      let placed = false;
+
+      for (const pass of passes) {
+        if (pass.length === 0) {
+          pass.push(file); placed = true; break;
+        }
+        const lastZ = getSlicePosition(pass[pass.length - 1].metadata);
+        if (z - lastZ > Z_TOLERANCE) {
+          pass.push(file); placed = true; break;
+        }
+      }
+
+      if (!placed) {
+        passes.push([file]);
+      }
+    }
+
+    // A real sub-volume should have a similar number of slices to the main pass.
+    const maxSlices = Math.max(...passes.map(p => p.length));
+    const validPasses = passes.filter(p => p.length >= maxSlices * 0.4); // At least 40% of max
+
+    for (let passIdx = 0; passIdx < validPasses.length; passIdx++) {
+      const parsedFiles = validPasses[passIdx];
+      const first = parsedFiles[0]?.metadata ?? {};
+
+      let desc = first.seriesDescription || 'Unknown Series';
+      if (validPasses.length > 1) {
+        const phaseMarker = first.temporalPosition || first.triggerTime || first.acquisitionNumber;
+        if (phaseMarker) {
+          desc = `${desc} (Phase/Acq: ${phaseMarker})`;
+        } else {
+          desc = `${desc} (Sub-volume ${passIdx + 1})`;
+        }
+      }
+
+      seriesList.push({
+        seriesInstanceUID: validPasses.length > 1 ? `${uid}_pass${passIdx}` : uid,
+        seriesDescription: desc,
+        modality: first.modality || 'Unknown',
+        numImages: parsedFiles.length,
+        imageIds: parsedFiles.map((f) => f.imageId),
+        patientName: first.patientName || 'Unknown',
+        studyDescription: first.studyDescription || 'Unknown Study',
+        studyDate: first.studyDate || '',
+      });
+    }
   }
 
   seriesList.sort((a, b) => b.numImages - a.numImages);

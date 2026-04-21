@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
+import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import coronaryModuleCss from './coronary-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
@@ -18,7 +19,7 @@ import { Toolbar } from './components/Toolbar';
 import { ViewportGrid } from './components/ViewportGrid';
 import { CoronaryWorkspace } from './components/CoronaryWorkspace';
 import { createVolume, loadDicomFiles, type DicomSeriesInfo } from './core/dicomLoader';
-import { initCornerstone } from './core/initCornerstone';
+import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
 import { attachAdvancedInteractions, destroyToolGroups, resetCrosshairsToCenter, setupToolGroups } from './core/toolManager';
 
 const RENDERING_ENGINE_ID = 'coronaryRenderingEngine';
@@ -44,6 +45,9 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   const [loadingProgress, setLoadingProgress] = useState('');
   const [workspaceResetToken, setWorkspaceResetToken] = useState(0);
   const [viewportSetupToken, setViewportSetupToken] = useState(0);
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [playFps, setPlayFps] = useState(15);
 
   useEffect(() => {
     const el = document.createElement('style');
@@ -213,6 +217,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           continue;
         }
         viewport.setProperties({ voiRange: nativeVoi });
+        applyLinearInterpolation(viewport);
         viewport.resetCamera();
       }
 
@@ -229,6 +234,20 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
       }
 
       advancedInteractionsCleanupRef.current = attachAdvancedInteractions(RENDERING_ENGINE_ID);
+
+      // Start axial viewing at the first slice (top of the volume) rather
+      // than mid-stack. resetCamera + crosshair-center both settle on the
+      // volume center, which is typically around the heart/diaphragm for
+      // chest CT; users expect to scroll top→bottom.
+      stage = 'jumpAxialToStart';
+      try {
+        const axialEl = document.getElementById('viewport-axial') as HTMLDivElement | null;
+        if (axialEl) {
+          await cornerstone.utilities.jumpToSlice(axialEl, { imageIndex: 0, volumeId: VOLUME_ID });
+          const axialVp = engine.getViewport('axial') as cornerstone.Types.IVolumeViewport | undefined;
+          axialVp?.render();
+        }
+      } catch { /* non-fatal */ }
     } catch (seriesError: any) {
       console.error(`[loadSeries:${stage}]`, seriesError);
       setError(`Failed to load series at ${stage}: ${seriesError.message}`);
@@ -249,6 +268,134 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
     };
     input.click();
   }
+
+  useEffect(() => {
+    if (!playing || !activeSeries) return;
+    const engine = renderingEngineRef.current;
+    if (!engine) return;
+    const axialEl = document.getElementById('viewport-axial') as HTMLDivElement | null;
+    if (!axialEl) return;
+    const vp = engine.getViewport('axial') as cornerstone.Types.IVolumeViewport | undefined;
+    if (!vp) return;
+    const total = typeof (vp as any).getNumberOfSlices === 'function' ? (vp as any).getNumberOfSlices() : activeSeries.imageIds.length;
+    if (!total || total < 2) { setPlaying(false); return; }
+
+    let cancelled = false;
+    let idx = typeof (vp as any).getSliceIndex === 'function' ? (vp as any).getSliceIndex() : 0;
+    const tick = async () => {
+      if (cancelled) return;
+      idx = (idx + 1) % total;
+      try {
+        await cornerstone.utilities.jumpToSlice(axialEl, { imageIndex: idx, volumeId: VOLUME_ID });
+      } catch { /* ignore */ }
+      vp.render();
+    };
+    const handle = window.setInterval(() => { void tick(); }, Math.max(33, 1000 / Math.max(1, playFps)));
+    return () => { cancelled = true; window.clearInterval(handle); };
+  }, [playing, playFps, activeSeries]);
+
+  const getAxialCanvas = useCallback((): HTMLCanvasElement | null => {
+    const host = document.getElementById('viewport-axial');
+    if (!host) return null;
+    return (host.querySelector('canvas.cornerstone-canvas') ?? host.querySelector('canvas')) as HTMLCanvasElement | null;
+  }, []);
+
+  const gotoSeries = useCallback((delta: number) => {
+    if (!activeSeries) return;
+    const idx = seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID);
+    const next = seriesList[idx + delta];
+    if (next) void loadSeries(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSeries, seriesList]);
+
+  const saveAxialFrameImage = useCallback(() => {
+    const canvas = getAxialCanvas();
+    if (!canvas) return;
+    try {
+      const url = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      const name = (activeSeries?.seriesDescription || 'ccta').replace(/[^a-zA-Z0-9]/g, '_');
+      a.download = `${name}_axial.png`;
+      a.href = url;
+      a.click();
+    } catch (e) { console.warn('[CCTA saveImage] failed', e); }
+  }, [getAxialCanvas, activeSeries]);
+
+  const saveAxialVideo = useCallback(async () => {
+    const engine = renderingEngineRef.current;
+    const canvas = getAxialCanvas();
+    if (!engine || !canvas || !activeSeries) return;
+    const vp = engine.getViewport('axial') as cornerstone.Types.IVolumeViewport | undefined;
+    if (!vp) return;
+    const totalSlices = typeof (vp as any).getNumberOfSlices === 'function' ? (vp as any).getNumberOfSlices() : activeSeries.imageIds.length;
+    if (!totalSlices || totalSlices < 2) return;
+    const axialEl = document.getElementById('viewport-axial') as HTMLDivElement | null;
+    if (!axialEl) return;
+
+    setExporting('Hazırlanıyor...');
+    const fps = 15;
+    const stream = canvas.captureStream(fps);
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5_000_000 });
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    const done = new Promise<void>((r) => { recorder.onstop = () => r(); });
+    recorder.start();
+
+    try {
+      for (let i = 0; i < totalSlices; i++) {
+        setExporting(`Slice ${i + 1}/${totalSlices}`);
+        try {
+          await cornerstone.utilities.jumpToSlice(axialEl, { imageIndex: i, volumeId: VOLUME_ID });
+        } catch { /* best-effort */ }
+        vp.render();
+        await new Promise((r) => setTimeout(r, 1000 / fps));
+      }
+    } finally {
+      recorder.stop();
+      await done;
+    }
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const name = (activeSeries.seriesDescription || 'ccta').replace(/[^a-zA-Z0-9]/g, '_');
+    a.download = `${name}_axial_${totalSlices}fr.webm`;
+    a.href = url;
+    a.click();
+    URL.revokeObjectURL(url);
+    setExporting(null);
+  }, [getAxialCanvas, activeSeries]);
+
+  const exportSeriesAsDicom = useCallback(async (series: DicomSeriesInfo) => {
+    const fm: any = (dicomImageLoader as any).wadouri?.fileManager;
+    if (!fm) { alert('DICOM export desteklenmiyor.'); return; }
+    const baseName = (series.seriesDescription || 'ccta').replace(/[^a-zA-Z0-9]/g, '_');
+    const single = series.imageIds.length === 1;
+    try {
+      setExporting(`DICOM 0/${series.imageIds.length}`);
+      for (let i = 0; i < series.imageIds.length; i++) {
+        const id = series.imageIds[i].split('?')[0];
+        const m = id.match(/^dicomfile:(\d+)$/);
+        if (!m) continue;
+        const file = fm.get(Number(m[1]));
+        if (!file) continue;
+        const a = document.createElement('a');
+        a.download = single ? `${baseName}.dcm` : `${baseName}_${String(i + 1).padStart(4, '0')}.dcm`;
+        a.href = URL.createObjectURL(file);
+        a.click();
+        URL.revokeObjectURL(a.href);
+        if (i % 10 === 0) {
+          setExporting(`DICOM ${i + 1}/${series.imageIds.length}`);
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      }
+    } catch (e) {
+      console.warn('[CCTA DICOM export] failed', e);
+      alert('DICOM export başarısız.');
+    } finally {
+      setExporting(null);
+    }
+  }, []);
 
   function openFolderPicker() {
     const input = document.createElement('input');
@@ -326,6 +473,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
             seriesList={seriesList}
             activeSeriesUID={activeSeries.seriesInstanceUID}
             onSelectSeries={loadSeries}
+            onExportSeries={exportSeriesAsDicom}
             isLoading={isLoading}
           />
           <div className="viewer-column">
@@ -333,6 +481,41 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
               renderingEngineId={RENDERING_ENGINE_ID}
               setupToken={viewportSetupToken}
             />
+            <div className="ccta-transport">
+              {seriesList.length > 1 && (
+                <button
+                  onClick={() => gotoSeries(-1)}
+                  disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === 0 || isLoading}
+                  title="Önceki seri"
+                >⏮</button>
+              )}
+              {seriesList.length > 1 && (
+                <button
+                  onClick={() => gotoSeries(1)}
+                  disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === seriesList.length - 1 || isLoading}
+                  title="Sonraki seri"
+                >⏭</button>
+              )}
+              <button
+                onClick={() => setPlaying((p) => !p)}
+                title={playing ? 'Duraklat' : 'Oynat (axial slice sine)'}
+              >{playing ? '❚❚' : '►'}</button>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={playFps}
+                onChange={(e) => setPlayFps(Math.max(1, Math.min(60, Number(e.target.value) || 15)))}
+                title="FPS"
+                style={{ width: 48, height: 30, padding: '0 6px', background: 'transparent', color: 'var(--nd-ink, #e2e8f0)', border: '1px solid var(--nd-line, rgba(255,255,255,0.14))', borderRadius: 6 }}
+              />
+              <button onClick={saveAxialFrameImage} title="Anlık görüntü kaydet (PNG)">📷</button>
+              <button onClick={saveAxialVideo} disabled={!!exporting} title="Axial video kaydet (WebM)">
+                {exporting ? '⏺' : '🎞'}
+              </button>
+              <button onClick={() => exportSeriesAsDicom(activeSeries)} disabled={!!exporting} title="Seriyi DICOM olarak indir">💾</button>
+              {exporting && <span className="ccta-transport-status">{exporting}</span>}
+            </div>
           </div>
           <CoronaryWorkspace
             renderingEngineId={RENDERING_ENGINE_ID}

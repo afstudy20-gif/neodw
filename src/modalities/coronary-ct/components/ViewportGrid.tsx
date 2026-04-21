@@ -134,6 +134,19 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
   }, [expanded, layout, renderingEngineId]);
 
   useEffect(() => {
+    function handleLayoutChange(event: Event) {
+      const detail = (event as CustomEvent).detail;
+      if (detail === 'single' || detail === 'mpr') setLayout(detail);
+    }
+    window.addEventListener('ccta:layout', handleLayoutChange);
+    return () => window.removeEventListener('ccta:layout', handleLayoutChange);
+  }, []);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('ccta:layout-state', { detail: layout }));
+  }, [layout]);
+
+  useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setExpanded(null);
@@ -438,22 +451,8 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
 
   return (
     <div className={`viewport-grid layout-${layout} ${expanded ? 'expanded' : ''}`}>
-      <div className="viewport-grid-toolbar">
-        <button
-          type="button"
-          className={`layout-toggle ${layout === 'mpr' ? 'on' : ''}`}
-          onClick={() => setLayout((l) => (l === 'mpr' ? 'single' : 'mpr'))}
-          title={layout === 'mpr' ? 'Tek pencere (Axial) görünümüne dön' : 'MPR üçlü görünüme geç (Axial + Sagittal + Coronal)'}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <rect x="3" y="3" width="8" height="18" rx="1"/>
-            <rect x="13" y="3" width="8" height="8" rx="1"/>
-            <rect x="13" y="13" width="8" height="8" rx="1"/>
-          </svg>
-          <span>{layout === 'mpr' ? 'Tek Pencere' : 'MPR (3'}</span>
-          {layout !== 'mpr' && <span style={{ opacity: 0.85 }}>pencere)</span>}
-        </button>
-        {layout === 'mpr' && (
+      {layout === 'mpr' && (
+        <div className="viewport-grid-toolbar">
           <label className="sync-toggle" title="When on, switching a viewport to MIP applies the same mode and slab thickness to all MPR viewports.">
             <input
               type="checkbox"
@@ -462,8 +461,8 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
             />
             <span>Sync view mode + slab</span>
           </label>
-        )}
-      </div>
+        </div>
+      )}
       {ORTHO_VIEWPORTS.map((viewport) => {
         const hidden = (expanded != null && expanded !== viewport.key) || (layout === 'single' && viewport.key !== 'axial');
         const presentation = presentations[viewport.key];

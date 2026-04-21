@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
-import { initCornerstone } from '../ct/core/initCornerstone';
+import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
 import { loadEchoFiles, getDopplerSpectralRegion, type EchoSeriesInfo } from './echoLoader';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
@@ -112,39 +112,7 @@ function fitImageToViewport(vp: any) {
   }
 }
 
-let loggedActorOnce = false;
-function applyLinearInterpolation(vp: any) {
-  try {
-    const InterpEnum = (cornerstone.Enums as any).InterpolationType;
-    const linear = InterpEnum?.LINEAR ?? 1;
-    vp.setProperties?.({ interpolationType: linear });
-  } catch {}
-  try {
-    const actors = vp.getActors?.() ?? [];
-    if (!loggedActorOnce && actors.length > 0) {
-      loggedActorOnce = true;
-      const actor = actors[0].actor ?? actors[0];
-      const prop = actor?.getProperty?.();
-      console.log('[Echo actor]', {
-        actorType: actor?.getClassName?.(),
-        hasProp: !!prop,
-        propType: prop?.getClassName?.(),
-        setInterpolationToLinear: typeof prop?.setInterpolationTypeToLinear,
-        setInterpolationType: typeof prop?.setInterpolationType,
-        getInterpolationType: prop?.getInterpolationType?.(),
-      });
-    }
-    for (const entry of actors) {
-      const actor = entry.actor ?? entry;
-      const prop = actor?.getProperty?.();
-      if (prop?.setInterpolationTypeToLinear) prop.setInterpolationTypeToLinear();
-      else if (prop?.setInterpolationType) prop.setInterpolationType(1);
-      // Also try VTK image mapper sampler state
-      const mapper = actor?.getMapper?.();
-      if (mapper?.setSampleDistance) { /* no-op for 2D */ }
-    }
-  } catch {}
-}
+
 
 type EchoTool = 'pan' | 'zoom' | 'window' | 'length' | 'angle' | 'area' | 'probe' | 'arrow' | 'text' | 'spectral';
 

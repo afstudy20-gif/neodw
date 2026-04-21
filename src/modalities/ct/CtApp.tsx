@@ -8,7 +8,7 @@ Object.defineProperty(window, '__cornerstone', {
   configurable: true,
   get: () => cornerstone,
 });
-import { initCornerstone } from './core/initCornerstone';
+import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
 import { loadDicomFiles, createVolume, DicomSeriesInfo } from './core/dicomLoader';
 import { setupToolGroups, destroyToolGroups, resetCrosshairsToCenter, enterDoubleObliqueMode, exitDoubleObliqueMode, setActiveTool } from './core/toolManager';
 import type { ViewportMode } from './components/ViewportGrid';

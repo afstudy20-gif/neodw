@@ -335,9 +335,9 @@ textarea {
 
 .series-card.with-thumb {
   flex-direction: row;
-  align-items: stretch;
-  gap: 10px;
-  padding: 8px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
 }
 .series-card.with-thumb .series-card-info {
   display: flex;
@@ -353,10 +353,10 @@ textarea {
   white-space: nowrap;
 }
 .ccta-series-thumb {
-  width: 96px;
-  height: 72px;
+  width: 56px;
+  height: 42px;
   background: #000;
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid var(--nd-line);
   flex-shrink: 0;
   display: block;
@@ -384,13 +384,14 @@ textarea {
   overflow: hidden;
 }
 
-/* Single viewport layout — toolbar row + one full-bleed axial cell. */
+/* Single viewport layout — one full-bleed axial cell. */
 .viewport-grid.layout-single {
   grid-template-columns: 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: 1fr;
 }
 .viewport-grid.layout-single .viewport-shell {
   grid-column: 1 / -1;
+  grid-row: 1 / -1;
 }
 
 .viewport-grid.expanded {
@@ -424,6 +425,19 @@ textarea {
   box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
 }
 .layout-toggle svg { flex-shrink: 0; }
+.layout-toggle.toolbar-inline {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(26, 79, 138, 0.25);
+}
+.layout-toggle.toolbar-inline.on {
+  box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);
+}
+.layout-toggle.toolbar-inline:hover {
+  transform: none;
+  box-shadow: 0 3px 10px rgba(26, 79, 138, 0.35);
+}
 
 .viewport-shell {
   min-height: 0;
@@ -1574,4 +1588,42 @@ textarea {
   color: #a9b9c9;
   text-transform: uppercase;
   letter-spacing: 0.6px;
+}
+
+.ccta-transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-top: 8px;
+  background: var(--nd-panel, rgba(0, 0, 0, 0.35));
+  color: var(--nd-ink, #e2e8f0);
+  border: 1px solid var(--nd-line, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+.ccta-transport button {
+  min-width: 34px;
+  height: 30px;
+  padding: 0 10px;
+  background: color-mix(in oklch, var(--nd-panel, #1a232c) 82%, white 18%);
+  color: var(--nd-ink, #e2e8f0);
+  border: 1px solid var(--nd-line, rgba(255, 255, 255, 0.14));
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ccta-transport button:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--nd-primary, #3b82f6) 18%, var(--nd-panel, #1a232c));
+  border-color: var(--nd-primary, #3b82f6);
+}
+.ccta-transport button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ccta-transport-status {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-left: 4px;
 }
