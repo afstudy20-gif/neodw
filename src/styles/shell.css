@@ -596,6 +596,22 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   outline-offset: -2px;
   background: color-mix(in oklch, var(--nd-primary) 8%, var(--nd-panel));
 }
+.nd-mode-drop-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 4px 2px;
+  font-size: 10.5px;
+  color: var(--nd-ink-3);
+  opacity: 0.6;
+  letter-spacing: 0.02em;
+}
+.nd-mode-drop-hint svg {
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
 .nd-mode-dropmask {
   position: absolute;
   inset: 0;

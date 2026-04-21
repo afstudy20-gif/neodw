@@ -392,6 +392,27 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
     try { (vp as any).resetCamera?.({ resetPan: true, resetZoom: true, resetToCenter: true }); } catch {}
     fitImageToViewport(vp);
     vp.render();
+
+    // Workaround: on multi-frame DX/CR/MG/RF the initial setImageIdIndex(0)
+    // registers the stack but doesn't always trigger the actor/texture
+    // rebuild, so the canvas stays black until the user hits play (which
+    // cycles indices). Toggle the index once to force that rebuild.
+    if (imageIds.length > 1) {
+      try {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        await vp.setImageIdIndex(1);
+        await vp.setImageIdIndex(0);
+        vp.render();
+      } catch { /* ignore */ }
+    } else {
+      // Single-frame: re-issue the same index after a frame to force the
+      // actor to pick up the loaded image.
+      try {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        await vp.setImageIdIndex(0);
+        vp.render();
+      } catch { /* ignore */ }
+    }
     setTimeout(() => {
       try { engine.resize(true, true); } catch {}
       try { (vp as any).resetCamera?.({ resetPan: true, resetZoom: true, resetToCenter: true }); } catch {}
