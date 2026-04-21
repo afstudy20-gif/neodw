@@ -138,7 +138,16 @@ const MODES: ModeDef[] = [
     desc: 'mod.echo.desc',
     icon: <IcoWave/>,
     key: 'us',
-    tags: ['US', 'CR', 'DX', 'MG', 'Cine', 'Length'],
+    tags: ['US', 'Cine', 'Doppler', 'Length'],
+  },
+  {
+    route: { kind: 'xray' },
+    group: 'cross',
+    name: 'mod.xray',
+    desc: 'mod.xray.desc',
+    icon: <IcoFile/>,
+    key: 'xr',
+    tags: ['CR', 'DX', 'MG', 'W/L', 'Length'],
   },
 ];
 
@@ -294,6 +303,16 @@ export default function Welcome({ onLaunch }: Props) {
       <div className="nd-topbar">
         <Wordmark size={17} />
         <div className="nd-topbar-sep" />
+        <a
+          href="https://flow.drtr.uk/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="nd-topbar-link"
+          title="Flow — acil triyaj yardımcı uygulama"
+        >
+          <span className="nd-topbar-link-name">Flow</span>
+          <span className="nd-topbar-link-sub">by drtr.uk · acil triyaj</span>
+        </a>
         <div style={{ flex: 1 }} />
         <div className="mono nd-topbar-status">
           <span className="dot-ok" /> PACS · LOCAL

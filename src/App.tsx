@@ -13,7 +13,8 @@ export type ModalityRoute =
   | { kind: 'ct'; panel: CtInitialPanel; title: string }
   | { kind: 'ccta' }
   | { kind: 'angio' }
-  | { kind: 'echo' };
+  | { kind: 'echo' }
+  | { kind: 'xray' };
 
 interface Session {
   route: ModalityRoute;
@@ -63,7 +64,10 @@ function Shell() {
         <AngioApp onBack={handleBack} initialFiles={session.files} />
       )}
       {session.route.kind === 'echo' && (
-        <EchoApp onBack={handleBack} initialFiles={session.files} title={t('mod.echo')} />
+        <EchoApp onBack={handleBack} initialFiles={session.files} title={t('mod.echo')} mode="echo" />
+      )}
+      {session.route.kind === 'xray' && (
+        <EchoApp onBack={handleBack} initialFiles={session.files} title={t('mod.xray')} mode="xray" />
       )}
     </Suspense>
   );

@@ -174,9 +174,13 @@ interface EchoAppProps {
   onBack?: () => void;
   initialFiles?: File[];
   title?: string;
+  /** UI profile. 'echo' keeps ultrasound/Doppler tools; 'xray' hides
+   *  cine/Doppler and defaults to W/L drag on primary button. */
+  mode?: 'echo' | 'xray';
 }
 
-export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = {}) {
+export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: EchoAppProps = {}) {
+  const isXray = mode === 'xray';
   const viewportRef = useRef<HTMLDivElement>(null);
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
   const toolGroupInitRef = useRef(false);
@@ -427,15 +431,16 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
     if (rate && rate > 0 && rate < 120) {
       setFps(Math.round(rate));
     }
-    // Default primary-button tool by modality: radiographs → W/L drag,
-    // ultrasound / cine → pan. Right-click stays on zoom for both.
+    // Default primary-button tool: xray profile (or DX/CR/MG/RF modality)
+    // → W/L drag; everything else → pan. Right-click stays zoom.
     const modU = (series.modality || '').toUpperCase();
-    if (['DX', 'CR', 'MG', 'RF'].includes(modU)) {
+    if (isXray || ['DX', 'CR', 'MG', 'RF'].includes(modU)) {
       setActiveTool('window');
     } else {
       setActiveTool('pan');
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isXray]);
 
   const getViewportCanvas = useCallback((): HTMLCanvasElement | null => {
     const el = viewportRef.current;
@@ -1666,6 +1671,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
             </div>
           </section>
 
+          {!isXray && (
           <section className="echo-measure-section">
             <h3>Doppler / Spektral</h3>
             <div className="echo-tool-grid cols-2">
@@ -1701,6 +1707,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
               </div>
             )}
           </section>
+          )}
 
           <section className="echo-measure-section">
             <h3>Sonuçlar</h3>
