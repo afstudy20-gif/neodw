@@ -514,7 +514,31 @@ function MapMyVisitors() {
     };
     slot.appendChild(s);
   }, []);
-  return <div id="mapmyvisitors-slot" style={{ marginTop: 40, minHeight: 280, opacity: 0.9, display: 'flex', justifyContent: 'center', alignItems: 'center' }} />;
+  return (
+    <div
+      id="mapmyvisitors-slot"
+      style={{
+        marginTop: 24,
+        opacity: 0.85,
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        maxWidth: 320,
+        marginLeft: 'auto',
+        marginRight: 'auto',
+      }}
+    >
+      <style>{`
+        #mapmyvisitors-slot img,
+        #mapmyvisitors-slot canvas,
+        #mapmyvisitors-slot iframe {
+          max-width: 100%;
+          height: auto;
+        }
+        #mapmyvisitors-slot a { display: inline-block; }
+      `}</style>
+    </div>
+  );
 }
 
 /* ── World map ──────────────────────────────────── */
