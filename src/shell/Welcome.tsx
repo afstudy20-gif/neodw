@@ -94,7 +94,7 @@ function Wordmark({ tagline = false, size = 17 }: { tagline?: boolean; size?: nu
 /* ── Mode definitions ───────────────────────────── */
 interface ModeDef {
   route: ModalityRoute;
-  group: 'cross' | 'coronary' | 'us';
+  group: 'cross' | 'coronary' | 'us' | 'xray';
   featured?: boolean;
   name: string;
   desc: string;
@@ -142,7 +142,7 @@ const MODES: ModeDef[] = [
   },
   {
     route: { kind: 'xray' },
-    group: 'cross',
+    group: 'xray',
     name: 'mod.xray',
     desc: 'mod.xray.desc',
     icon: <IcoFile/>,
@@ -154,6 +154,7 @@ const MODES: ModeDef[] = [
 const GROUPS: { id: ModeDef['group']; key: string }[] = [
   { id: 'cross', key: 'sec.ctmr' },
   { id: 'coronary', key: 'sec.coronary' },
+  { id: 'xray', key: 'sec.xray' },
 ];
 
 function pickFiles(folder: boolean): Promise<File[]> {
@@ -308,10 +309,10 @@ export default function Welcome({ onLaunch }: Props) {
           target="_blank"
           rel="noopener noreferrer"
           className="nd-topbar-link"
-          title="Flow — acil triyaj yardımcı uygulama"
+          title="Flow — PRISMA sistematik inceleme akış şeması"
         >
           <span className="nd-topbar-link-name">Flow</span>
-          <span className="nd-topbar-link-sub">by drtr.uk · acil triyaj</span>
+          <span className="nd-topbar-link-sub">by drtr.uk · PRISMA flowchart</span>
         </a>
         <div style={{ flex: 1 }} />
         <div className="mono nd-topbar-status">
