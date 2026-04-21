@@ -479,17 +479,20 @@ function MapMyVisitors() {
     const slot = document.getElementById('mapmyvisitors-slot');
     if (!slot) return;
     if (document.getElementById('mapmyvisitors')) return;
-    // MapMyVisitors injects its widget at the script's DOM position.
-    // Script MUST live inside the slot div — putting it on document.body
-    // renders the map at the page tail (often invisible). Also set
-    // crossorigin to satisfy any future CORS/CORP requirements.
+    // MapMyVisitors injects its widget at the script's DOM position — the
+    // script MUST live inside the slot element, not on document.body.
+    // Do NOT set crossOrigin: mapmyvisitors.com does not send CORS headers,
+    // so marking the request anonymous (CORS) makes it fail to load.
+    // With page-level COEP=credentialless the script is fetched without
+    // credentials and no CORP is required.
     const s = document.createElement('script');
     s.type = 'text/javascript';
     s.id = 'mapmyvisitors';
     s.async = true;
-    s.crossOrigin = 'anonymous';
     s.src = 'https://mapmyvisitors.com/map.js?d=mKLyIjWT577bDc9kAESkC_hHaxcXtAD5mKvhZGFApHQ&cl=ffffff&w=a';
-    s.onerror = () => { console.warn('[MapMyVisitors] blocked (likely COEP require-corp). Relax nginx headers on landing route or load in iframe.'); };
+    s.onerror = () => {
+      console.warn('[MapMyVisitors] script failed to load. Check: (1) COEP header on deployed page (want credentialless, not require-corp), (2) ad/tracker blockers, (3) network reach to mapmyvisitors.com.');
+    };
     slot.appendChild(s);
   }, []);
   return <div id="mapmyvisitors-slot" style={{ marginTop: 40, minHeight: 280, opacity: 0.9, display: 'flex', justifyContent: 'center', alignItems: 'center' }} />;
