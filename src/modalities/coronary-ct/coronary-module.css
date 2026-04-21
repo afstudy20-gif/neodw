@@ -355,10 +355,46 @@ textarea {
   overflow: hidden;
 }
 
+/* Single viewport layout — toolbar row + one full-bleed axial cell. */
+.viewport-grid.layout-single {
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr;
+}
+.viewport-grid.layout-single .viewport-shell {
+  grid-column: 1 / -1;
+}
+
 .viewport-grid.expanded {
   grid-template-columns: 1fr;
   grid-template-rows: auto 1fr;
 }
+
+.layout-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, var(--nd-primary, #1a4f8a) 0%, #2563eb 100%);
+  border: 1px solid color-mix(in oklch, var(--nd-primary, #1a4f8a) 80%, #fff);
+  border-radius: 10px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 12px rgba(26, 79, 138, 0.35);
+  transition: transform 0.12s, box-shadow 0.12s, background 0.12s;
+}
+.layout-toggle:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(26, 79, 138, 0.45);
+}
+.layout-toggle.on {
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  border-color: color-mix(in oklch, #10b981 80%, #fff);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
+}
+.layout-toggle svg { flex-shrink: 0; }
 
 .viewport-shell {
   min-height: 0;
@@ -381,9 +417,33 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 5px 9px;
-  border-bottom: 1px solid var(--line-soft);
-  color: var(--text-soft);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
   font-size: 11px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.viewport-header select,
+.viewport-header input,
+.viewport-header button {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+.viewport-header button:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.viewport-header button.active,
+.viewport-header button.ghost-btn.active {
+  background: var(--nd-primary, #1a4f8a);
+  border-color: var(--nd-primary, #1a4f8a);
+  color: #fff;
+}
+
+.viewport-mode-strip {
+  color: #cbd5e1 !important;
+  background: rgba(0, 0, 0, 0.25);
 }
 
 .viewport-header-copy {
