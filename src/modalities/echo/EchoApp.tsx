@@ -293,6 +293,15 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
     const el = viewportRef.current;
     if (!engine || !el) return;
 
+    // Make the viewport div visible BEFORE enabling cornerstone on it.
+    // The JSX toggles `display: activeSeries ? 'block' : 'none'` and
+    // enabling a display:none element gives cornerstone a zero-sized
+    // canvas. Static single-frame images then stay blank until the user
+    // triggers anything that forces a re-render. Flip activeSeries first,
+    // wait two RAFs for layout, then enable.
+    setActiveSeries(series);
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+
     engine.enableElement({
       viewportId: VIEWPORT_ID,
       type: cornerstone.Enums.ViewportType.STACK,

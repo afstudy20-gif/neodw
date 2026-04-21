@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type DragEvent as ReactDragEvent } from 'react';
 import { LANGS, useI18n } from './i18n';
 import { useTheme } from '../theme/ThemeProvider';
 import type { ModalityRoute } from '../App';
@@ -341,7 +341,7 @@ export default function Welcome({ onLaunch }: Props) {
               <div className="cap nd-mode-group-title">{t(g.key)}</div>
               <div className={`nd-modes ${singleCol ? 'cols-1' : 'cols-2'}`}>
                 {items.map((m) => (
-                  <ModalityCard key={m.key} m={m} t={t} onLaunch={launchWith} />
+                  <ModalityCard key={m.key} m={m} t={t} onLaunch={launchWith} onDropFiles={(r, files) => onLaunch(r, files)} />
                 ))}
               </div>
             </div>
@@ -390,8 +390,66 @@ export default function Welcome({ onLaunch }: Props) {
   );
 }
 
+/* ── Drop helper: flatten dragged files + folders (webkitGetAsEntry) ── */
+async function gatherFilesFromDataTransfer(dt: DataTransfer): Promise<File[]> {
+  const out: File[] = [];
+  const entries: any[] = [];
+  const items = dt.items;
+  if (items && items.length) {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const entry = (it as any).webkitGetAsEntry?.();
+      if (entry) entries.push(entry);
+      else {
+        const f = it.getAsFile?.();
+        if (f) out.push(f);
+      }
+    }
+  }
+  async function walk(entry: any): Promise<void> {
+    if (entry.isFile) {
+      await new Promise<void>((r) => entry.file((f: File) => { out.push(f); r(); }, () => r()));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      while (true) {
+        const batch = await new Promise<any[]>((r) => reader.readEntries((e: any[]) => r(e), () => r([])));
+        if (batch.length === 0) break;
+        for (const c of batch) await walk(c);
+      }
+    }
+  }
+  for (const e of entries) await walk(e);
+  if (out.length === 0 && dt.files) {
+    for (let i = 0; i < dt.files.length; i++) out.push(dt.files[i]);
+  }
+  return out;
+}
+
 /* ── Modality Card ──────────────────────────────── */
-function ModalityCard({ m, t, onLaunch }: { m: ModeDef; t: (k: string) => string; onLaunch: (r: ModalityRoute, mode: 'files' | 'folder' | 'empty') => void }) {
+function ModalityCard({ m, t, onLaunch, onDropFiles }: {
+  m: ModeDef;
+  t: (k: string) => string;
+  onLaunch: (r: ModalityRoute, mode: 'files' | 'folder' | 'empty') => void;
+  onDropFiles: (r: ModalityRoute, files: File[]) => void;
+}) {
+  const [dragOver, setDragOver] = useState<null | 'folder' | 'files'>(null);
+
+  const makeDropHandlers = (which: 'folder' | 'files') => ({
+    onDragOver: (e: ReactDragEvent) => {
+      if (!e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      setDragOver(which);
+    },
+    onDragLeave: () => setDragOver((prev) => prev === which ? null : prev),
+    onDrop: async (e: ReactDragEvent) => {
+      e.preventDefault();
+      setDragOver(null);
+      const files = await gatherFilesFromDataTransfer(e.dataTransfer);
+      if (files.length > 0) onDropFiles(m.route, files);
+    },
+  });
+
   return (
     <div className="nd-mode-card">
       <div className="nd-mode-head">
@@ -414,10 +472,20 @@ function ModalityCard({ m, t, onLaunch }: { m: ModeDef; t: (k: string) => string
       <div className="nd-mode-divider" />
 
       <div className="nd-mode-actions">
-        <button className="nd-mode-btn primary" onClick={() => onLaunch(m.route, 'folder')}>
+        <button
+          className={`nd-mode-btn primary ${dragOver === 'folder' ? 'drop-over' : ''}`}
+          onClick={() => onLaunch(m.route, 'folder')}
+          {...makeDropHandlers('folder')}
+          title="Tıkla: klasör seç · Sürükle bırak: dosya/klasör"
+        >
           <IcoFolder s={14}/> {t('btn.folder')}
         </button>
-        <button className="nd-mode-btn" onClick={() => onLaunch(m.route, 'files')}>
+        <button
+          className={`nd-mode-btn ${dragOver === 'files' ? 'drop-over' : ''}`}
+          onClick={() => onLaunch(m.route, 'files')}
+          {...makeDropHandlers('files')}
+          title="Tıkla: dosya seç · Sürükle bırak: dosya/klasör"
+        >
           <IcoFile s={14}/> {t('btn.files')}
         </button>
       </div>
