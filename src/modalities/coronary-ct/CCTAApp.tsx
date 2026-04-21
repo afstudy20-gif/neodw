@@ -318,9 +318,9 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
         </div>
       )}
 
-      {!activeSeries ? (
+      {!activeSeries && !isLoading ? (
         <DicomDropzone onFilesLoaded={handleFilesLoaded} isLoading={isLoading} />
-      ) : (
+      ) : !activeSeries ? null : (
         <main className="workspace-layout">
           <SeriesPanel
             seriesList={seriesList}
