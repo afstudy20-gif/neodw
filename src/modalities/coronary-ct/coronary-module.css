@@ -333,6 +333,35 @@ textarea {
   letter-spacing: 0.06em;
 }
 
+.series-card.with-thumb {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 10px;
+  padding: 8px;
+}
+.series-card.with-thumb .series-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.series-card.with-thumb strong,
+.series-card.with-thumb span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ccta-series-thumb {
+  width: 96px;
+  height: 72px;
+  background: #000;
+  border-radius: 8px;
+  border: 1px solid var(--nd-line);
+  flex-shrink: 0;
+  display: block;
+}
+
 .viewer-column {
   padding: 16px;
   min-width: 0;
