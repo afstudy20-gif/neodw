@@ -532,36 +532,39 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
   onLaunch: (r: ModalityRoute, mode: 'files' | 'folder' | 'empty') => void;
   onDropFiles: (r: ModalityRoute, files: File[]) => void;
 }) {
-  const [dragOver, setDragOver] = useState<null | 'folder' | 'files'>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const dragCounter = useRef(0);
 
-  const makeDropHandlers = (which: 'folder' | 'files') => ({
+  const cardDropHandlers = {
     onDragEnter: (e: ReactDragEvent) => {
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
       e.preventDefault();
-      e.stopPropagation();
-      setDragOver(which);
+      dragCounter.current++;
+      setDragOver(true);
     },
     onDragOver: (e: ReactDragEvent) => {
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
       e.preventDefault();
-      e.stopPropagation();
       e.dataTransfer.dropEffect = 'copy';
-      setDragOver(which);
     },
-    onDragLeave: (e: ReactDragEvent) => {
-      // Only clear when leaving the actual button, not a child
-      if ((e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) return;
-      setDragOver((prev) => prev === which ? null : prev);
+    onDragLeave: () => {
+      dragCounter.current--;
+      if (dragCounter.current <= 0) {
+        dragCounter.current = 0;
+        setDragOver(false);
+      }
     },
     onDrop: async (e: ReactDragEvent) => {
       e.preventDefault();
-      e.stopPropagation();
-      setDragOver(null);
+      dragCounter.current = 0;
+      setDragOver(false);
       const files = await gatherFilesFromDataTransfer(e.dataTransfer);
       if (files.length > 0) onDropFiles(m.route, files);
     },
-  });
+  };
 
   return (
-    <div className="nd-mode-card">
+    <div className={`nd-mode-card ${dragOver ? 'drop-over' : ''}`} {...cardDropHandlers}>
       <div className="nd-mode-head">
         <div className="nd-mode-icon">{m.icon}</div>
         <div style={{ flex: 1 }}>
@@ -583,22 +586,31 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
 
       <div className="nd-mode-actions">
         <button
-          className={`nd-mode-btn primary ${dragOver === 'folder' ? 'drop-over' : ''}`}
+          className="nd-mode-btn primary"
           onClick={() => onLaunch(m.route, 'folder')}
-          {...makeDropHandlers('folder')}
-          title="Tıkla: klasör seç · Sürükle bırak: dosya/klasör"
+          title="Klasör seç (ya da karta sürükle-bırak)"
         >
           <IcoFolder s={14}/> {t('btn.folder')}
         </button>
         <button
-          className={`nd-mode-btn ${dragOver === 'files' ? 'drop-over' : ''}`}
+          className="nd-mode-btn"
           onClick={() => onLaunch(m.route, 'files')}
-          {...makeDropHandlers('files')}
-          title="Tıkla: dosya seç · Sürükle bırak: dosya/klasör"
+          title="Dosya seç (ya da karta sürükle-bırak)"
         >
           <IcoFile s={14}/> {t('btn.files')}
         </button>
       </div>
+
+      {dragOver && (
+        <div className="nd-mode-dropmask">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <path d="M7 10l5-5 5 5"/>
+            <path d="M12 5v12"/>
+          </svg>
+          <span>Buraya bırak</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -588,6 +588,31 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   font-size: 10.5px;
 }
 
+.nd-mode-card {
+  position: relative;
+}
+.nd-mode-card.drop-over {
+  outline: 2px dashed var(--nd-primary);
+  outline-offset: -2px;
+  background: color-mix(in oklch, var(--nd-primary) 8%, var(--nd-panel));
+}
+.nd-mode-dropmask {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: color-mix(in oklch, var(--nd-primary) 25%, transparent);
+  color: var(--nd-primary);
+  font-weight: 700;
+  font-size: 14px;
+  pointer-events: none;
+  border-radius: inherit;
+  z-index: 5;
+}
+
 .nd-mode-btn.drop-over {
   outline: 2px dashed var(--nd-accent);
   outline-offset: 2px;

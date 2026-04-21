@@ -347,6 +347,45 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
     // setImageIdIndex). Observed on DX radiographs.
     try { await vp.setImageIdIndex(0); } catch { /* ignore */ }
 
+    // For radiographs (DX/CR/MG/RF) cornerstone's auto VOI is often
+    // degenerate (lower == upper) leaving the canvas completely black.
+    // Apply DICOM window tags if present, otherwise fall back to a wide
+    // percentile range on raw pixels. Also honor MONOCHROME1 inversion.
+    try {
+      const modU2 = (series.modality || '').toUpperCase();
+      if (['DX', 'CR', 'MG', 'RF'].includes(modU2)) {
+        const firstId = series.imageIds[0];
+        const image: any = await cornerstone.imageLoader.loadAndCacheImage(firstId);
+        const photometric = image?.photometricInterpretation || image?.imageFrame?.photometricInterpretation;
+        if (photometric === 'MONOCHROME1') {
+          try { (vp as any).setProperties?.({ invert: true }); } catch {}
+        }
+        // Preferred: DICOM WindowCenter/Width. Both series meta and
+        // image meta may carry them.
+        const wc = series.windowCenter ?? image?.windowCenter;
+        const ww = series.windowWidth ?? image?.windowWidth;
+        const wcN = Array.isArray(wc) ? Number(wc[0]) : Number(wc);
+        const wwN = Array.isArray(ww) ? Number(ww[0]) : Number(ww);
+        if (Number.isFinite(wcN) && Number.isFinite(wwN) && wwN > 0) {
+          try { (vp as any).setProperties?.({ voiRange: { lower: wcN - wwN / 2, upper: wcN + wwN / 2 } }); } catch {}
+        } else {
+          const pixels: ArrayLike<number> | undefined =
+            image?.getPixelData?.() ?? image?.imageFrame?.pixelData;
+          if (pixels && pixels.length > 0) {
+            const stride = Math.max(1, Math.floor(pixels.length / 100000));
+            const sample: number[] = [];
+            for (let i = 0; i < pixels.length; i += stride) sample.push(pixels[i]);
+            sample.sort((a, b) => a - b);
+            const lower = sample[Math.floor(sample.length * 0.005)];
+            const upper = sample[Math.floor(sample.length * 0.995)];
+            if (Number.isFinite(lower) && Number.isFinite(upper) && upper > lower) {
+              try { (vp as any).setProperties?.({ voiRange: { lower, upper } }); } catch {}
+            }
+          }
+        }
+      }
+    } catch (e) { console.warn('[Echo xray-voi]', e); }
+
     applyLinearInterpolation(vp);
     // Force canvas resolution to match CSS size (fixes browser NEAREST stretching of small GL canvas)
     try { engine.resize(true, true); } catch {}
