@@ -479,19 +479,38 @@ function MapMyVisitors() {
     const slot = document.getElementById('mapmyvisitors-slot');
     if (!slot) return;
     if (document.getElementById('mapmyvisitors')) return;
-    // MapMyVisitors injects its widget at the script's DOM position — the
-    // script MUST live inside the slot element, not on document.body.
-    // Do NOT set crossOrigin: mapmyvisitors.com does not send CORS headers,
-    // so marking the request anonymous (CORS) makes it fail to load.
-    // With page-level COEP=credentialless the script is fetched without
-    // credentials and no CORP is required.
+
+    // MapMyVisitors map.js renders via document.write(), which is
+    // silently dropped for async-inserted scripts. Proxy document.write
+    // so any output lands inside our slot div, then restore after the
+    // script finishes executing. This is the standard workaround for
+    // embedding document.write-based third-party widgets in SPAs.
+    const origWrite = document.write.bind(document);
+    const origWriteln = document.writeln.bind(document);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (document as any).write = (...args: any[]) => {
+      slot.insertAdjacentHTML('beforeend', args.join(''));
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (document as any).writeln = (...args: any[]) => {
+      slot.insertAdjacentHTML('beforeend', args.join('') + '\n');
+    };
+
+    const restore = () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (document as any).write = origWrite;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (document as any).writeln = origWriteln;
+    };
+
     const s = document.createElement('script');
     s.type = 'text/javascript';
     s.id = 'mapmyvisitors';
-    s.async = true;
     s.src = 'https://mapmyvisitors.com/map.js?d=mKLyIjWT577bDc9kAESkC_hHaxcXtAD5mKvhZGFApHQ&cl=ffffff&w=a';
+    s.onload = restore;
     s.onerror = () => {
-      console.warn('[MapMyVisitors] script failed to load. Check: (1) COEP header on deployed page (want credentialless, not require-corp), (2) ad/tracker blockers, (3) network reach to mapmyvisitors.com.');
+      restore();
+      console.warn('[MapMyVisitors] script failed to load. Check network reach / ad-blocker.');
     };
     slot.appendChild(s);
   }, []);
