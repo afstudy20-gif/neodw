@@ -565,9 +565,23 @@ textarea {
   gap: 12px;
   padding: 14px;
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(24, 38, 54, 0.82), rgba(15, 24, 34, 0.88));
-  border: 1px solid var(--line);
+  background: var(--nd-panel);
+  color: var(--nd-ink);
+  border: 1px solid var(--nd-line);
   margin-bottom: 12px;
+}
+.workspace-card h3,
+.workspace-card h2 {
+  color: var(--nd-ink);
+}
+.workspace-card p,
+.workspace-card span,
+.workspace-card label {
+  color: var(--nd-ink);
+}
+.workspace-card .mini-copy,
+.workspace-card .section-label {
+  color: var(--nd-ink-2);
 }
 
 .status-card {

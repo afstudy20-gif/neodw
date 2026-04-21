@@ -188,17 +188,31 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
       await cornerstone.setVolumesForViewports(engine, [{ volumeId: VOLUME_ID }], [...VIEWPORT_IDS]);
 
       stage = 'configureViewports';
+      // Prefer native DICOM WindowCenter/Width (read from first image's
+      // metadata). Soft tissue (WC 40 WW 400) fallback when the series
+      // has no explicit VOI. Avoid the old hardcoded bone preset that
+      // made most scans look dark on load.
+      let nativeVoi: { lower: number; upper: number } | null = null;
+      try {
+        const firstImageId = series.imageIds[0];
+        if (firstImageId) {
+          const voiMod: any = cornerstone.metaData.get('voiLutModule', firstImageId);
+          const wc = Array.isArray(voiMod?.windowCenter) ? Number(voiMod.windowCenter[0]) : Number(voiMod?.windowCenter);
+          const ww = Array.isArray(voiMod?.windowWidth) ? Number(voiMod.windowWidth[0]) : Number(voiMod?.windowWidth);
+          if (Number.isFinite(wc) && Number.isFinite(ww) && ww > 0) {
+            nativeVoi = { lower: wc - ww / 2, upper: wc + ww / 2 };
+          }
+        }
+      } catch { /* metadata may not be ready; fall back */ }
+      if (!nativeVoi) {
+        nativeVoi = { lower: 40 - 400 / 2, upper: 40 + 400 / 2 };
+      }
       for (const viewportId of ORTHO_VIEWPORT_IDS) {
         const viewport = engine.getViewport(viewportId) as cornerstone.Types.IVolumeViewport | undefined;
         if (!viewport) {
           continue;
         }
-        viewport.setProperties({
-          voiRange: {
-            lower: 300 - 600 / 2,
-            upper: 300 + 600 / 2,
-          },
-        });
+        viewport.setProperties({ voiRange: nativeVoi });
         viewport.resetCamera();
       }
 
