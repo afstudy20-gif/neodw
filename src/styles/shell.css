@@ -787,7 +787,7 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   color: var(--nd-ink-2);
   line-height: 1.45;
   text-decoration: none;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
 }
 .nd-hero-link:hover {
   background: color-mix(in oklch, var(--nd-primary) 18%, var(--nd-panel));
@@ -803,6 +803,63 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   display: block;
   margin-bottom: 2px;
   font-weight: 600;
+}
+
+.nd-hero-link-flow {
+  background: linear-gradient(135deg,
+    color-mix(in oklch, var(--nd-primary) 22%, var(--nd-panel)) 0%,
+    color-mix(in oklch, #8b5cf6 18%, var(--nd-panel)) 100%);
+  border-color: color-mix(in oklch, var(--nd-primary) 45%, transparent);
+  gap: 12px;
+  padding: 12px 14px;
+  align-items: center;
+}
+.nd-hero-link-flow:hover {
+  background: linear-gradient(135deg,
+    color-mix(in oklch, var(--nd-primary) 32%, var(--nd-panel)) 0%,
+    color-mix(in oklch, #8b5cf6 28%, var(--nd-panel)) 100%);
+  border-color: var(--nd-primary);
+  transform: translateY(-1px);
+}
+.nd-hero-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--nd-primary) 35%, var(--nd-panel));
+  color: #fff;
+  flex-shrink: 0;
+}
+.nd-hero-link-icon svg { color: #fff; margin: 0; }
+.nd-hero-link-text {
+  display: block;
+  line-height: 1.45;
+}
+.nd-hero-link-text b {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+.nd-hero-link-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--nd-primary);
+  border-radius: 999px;
+  line-height: 1.6;
+}
+.nd-hero-link-host {
+  color: color-mix(in oklch, var(--nd-primary) 80%, var(--nd-ink-2));
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .nd-install-hint {

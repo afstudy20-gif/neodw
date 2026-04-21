@@ -385,18 +385,30 @@ export default function Welcome({ onLaunch }: Props) {
                 <span><b>{t('priv.title')}</b> {t('priv.desc')}</span>
               </div>
               <a
-                className="nd-hero-link"
+                className="nd-hero-link nd-hero-link-flow"
                 href="https://flow.drtr.uk/"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Flow — PRISMA sistematik inceleme akış şeması"
+                title="Flow — tarayıcıda PRISMA akış şeması ve grafiksel özet hazırlama aracı"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <rect x="3" y="4" width="18" height="6" rx="1.5"/>
-                  <rect x="3" y="14" width="10" height="6" rx="1.5"/>
-                  <path d="M8 10v4"/>
-                </svg>
-                <span><b>Flow</b> by drtr.uk · PRISMA akış şeması</span>
+                <span className="nd-hero-link-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+                    <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+                    <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+                    <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+                    <path d="M10 6.5h4"/>
+                    <path d="M17.5 10v4"/>
+                    <path d="M10 17.5h4"/>
+                    <path d="M6.5 10v4"/>
+                  </svg>
+                </span>
+                <span className="nd-hero-link-text">
+                  <b>
+                    Flow <span className="nd-hero-link-pill">Yeni</span>
+                  </b>
+                  Akış şeması & grafiksel özet hazırlama aracı. PRISMA 2020, tarayıcıda, kurulum yok. <span className="nd-hero-link-host">flow.drtr.uk ↗</span>
+                </span>
               </a>
               {!installed && (
                 <button

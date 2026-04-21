@@ -663,6 +663,18 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
     tg.setToolActive(ZoomTool.toolName, { bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }] });
   }, [activeTool]);
 
+  // Block the native right-click context menu on the viewport so
+  // cornerstone's ZoomTool (bound to the secondary mouse button) can
+  // receive the full mousedown→mousemove→mouseup drag without the
+  // browser popping up its own menu on mousedown.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const stop = (e: Event) => e.preventDefault();
+    el.addEventListener('contextmenu', stop);
+    return () => el.removeEventListener('contextmenu', stop);
+  }, [activeSeries]);
+
   // Keep DOM text overlay positions in sync with viewport pan/zoom/frame changes.
   useEffect(() => {
     const el = viewportRef.current;
