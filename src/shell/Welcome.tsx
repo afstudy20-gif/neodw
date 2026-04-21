@@ -254,6 +254,21 @@ export default function Welcome({ onLaunch }: Props) {
     return () => { cancelled = true; };
   }, []);
 
+  // Prevent browser from opening a dragged file in a new tab when the user
+  // releases it outside a drop target (default behavior would navigate away
+  // from the app). Page-wide dragover + drop preventDefault neutralizes this.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+    };
+    window.addEventListener('dragover', prevent);
+    window.addEventListener('drop', prevent);
+    return () => {
+      window.removeEventListener('dragover', prevent);
+      window.removeEventListener('drop', prevent);
+    };
+  }, []);
+
   async function launchWith(route: ModalityRoute, mode: 'files' | 'folder' | 'empty') {
     if (mode === 'empty') {
       onLaunch(route);
@@ -435,15 +450,25 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
   const [dragOver, setDragOver] = useState<null | 'folder' | 'files'>(null);
 
   const makeDropHandlers = (which: 'folder' | 'files') => ({
-    onDragOver: (e: ReactDragEvent) => {
-      if (!e.dataTransfer.types.includes('Files')) return;
+    onDragEnter: (e: ReactDragEvent) => {
       e.preventDefault();
+      e.stopPropagation();
+      setDragOver(which);
+    },
+    onDragOver: (e: ReactDragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
       e.dataTransfer.dropEffect = 'copy';
       setDragOver(which);
     },
-    onDragLeave: () => setDragOver((prev) => prev === which ? null : prev),
+    onDragLeave: (e: ReactDragEvent) => {
+      // Only clear when leaving the actual button, not a child
+      if ((e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) return;
+      setDragOver((prev) => prev === which ? null : prev);
+    },
     onDrop: async (e: ReactDragEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       setDragOver(null);
       const files = await gatherFilesFromDataTransfer(e.dataTransfer);
       if (files.length > 0) onDropFiles(m.route, files);

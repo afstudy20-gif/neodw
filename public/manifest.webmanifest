@@ -1,0 +1,27 @@
+{
+  "name": "NeoDW — Universal DICOM Workstation",
+  "short_name": "NeoDW",
+  "description": "Browser-based cardiovascular DICOM workstation. Any modality.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#1a4f8a",
+  "background_color": "#0b1424",
+  "lang": "tr",
+  "categories": ["medical", "health", "productivity"],
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

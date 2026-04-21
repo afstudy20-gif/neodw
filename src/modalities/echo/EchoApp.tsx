@@ -1456,30 +1456,42 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
             </div>
           )}
 
-          {activeSeries && (
-            <div className="echo-transport">
+        </div>
+
+        {activeSeries && (() => {
+          // Only US / XA / IVUS / OCT are true cine modalities. DX, CR, MG, RF
+          // are single-shot radiographs (often stored as 2-frame paired views
+          // or L/R) — never auto-play those; cine controls only add flicker.
+          const mod = (activeSeries.modality || '').toUpperCase();
+          const isCine = ['US', 'XA', 'IVUS', 'OCT'].includes(mod);
+          const showCine = isCine && totalFrames > 1;
+          const multiFrameNav = totalFrames > 1; // prev/next frame navigation (works for any modality)
+          return (
+            <div className="echo-transport echo-transport-bar">
               {seriesList.length > 1 && (
                 <button
                   onClick={() => gotoSeries(-1)}
                   disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === 0}
-                  title="Önceki seri (otomatik oynatır)"
+                  title="Önceki seri"
                 >⏮</button>
               )}
-              {totalFrames > 1 && <>
+              {multiFrameNav && <>
                 <button onClick={() => seekFrame(frameIndex - 1)} title="Önceki frame">‹</button>
-                <button onClick={() => setPlaying((p) => !p)} title={playing ? 'Duraklat' : 'Oynat'}>
-                  {playing ? '❚❚' : '►'}
-                </button>
+                {showCine && (
+                  <button onClick={() => setPlaying((p) => !p)} title={playing ? 'Duraklat' : 'Oynat'}>
+                    {playing ? '❚❚' : '►'}
+                  </button>
+                )}
                 <button onClick={() => seekFrame(frameIndex + 1)} title="Sonraki frame">›</button>
               </>}
               {seriesList.length > 1 && (
                 <button
                   onClick={() => gotoSeries(1)}
                   disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === seriesList.length - 1}
-                  title="Sonraki seri (otomatik oynatır)"
+                  title="Sonraki seri"
                 >⏭</button>
               )}
-              {totalFrames > 1 && (
+              {multiFrameNav && (
                 <input
                   type="range"
                   min={0}
@@ -1489,7 +1501,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
                 />
               )}
               <span>{frameIndex + 1} / {totalFrames}</span>
-              {totalFrames > 1 && <>
+              {showCine && <>
                 <span style={{ opacity: 0.7 }}>FPS</span>
                 <input
                   type="number"
@@ -1501,7 +1513,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
                 />
               </>}
               <button onClick={saveCurrentFrameImage} title="Resim Kaydet (PNG)">📷</button>
-              {totalFrames > 1 && (
+              {showCine && (
                 <button onClick={saveCineAsVideo} disabled={!!exporting} title="Video Kaydet (WebM)">
                   {exporting ? '⏺' : '🎞'}
                 </button>
@@ -1509,8 +1521,8 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
               <button onClick={saveSeriesAsDicom} title="DICOM İndir (.dcm)">💾</button>
               {exporting && <span style={{ fontSize: 11, opacity: 0.8 }}>{exporting}</span>}
             </div>
-          )}
-        </div>
+          );
+        })()}
 
         <aside className="echo-measure-panel">
           <h2>Araçlar &amp; Ölçümler</h2>

@@ -193,6 +193,22 @@
   max-width: calc(100% - 40px);
 }
 
+/* Static bar variant rendered BELOW the viewport so it never covers the
+   image content. Used when series is active. */
+.echo-transport.echo-transport-bar {
+  position: static;
+  transform: none;
+  margin: 0;
+  max-width: none;
+  width: 100%;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.92);
+}
+
 .echo-transport button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
