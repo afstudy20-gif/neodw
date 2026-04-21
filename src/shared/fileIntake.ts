@@ -157,24 +157,26 @@ export async function expandAndFilterDicom(files: File[]): Promise<File[]> {
     expanded.push(f);
   }
 
-  // Filter: keep DICOM-like files
+  // Filter: exclude obvious non-DICOM junk; everything else falls through
+  // to the per-modality dicom-parser which has its own try/catch, so a
+  // stray garbage file is only a per-file parse warning. Being permissive
+  // here matters because many PACS/CD exports drop files without any
+  // extension and without a Part-10 preamble (implicit VR), and the
+  // heuristic can miss when a private tag sits at offset 0.
+  const JUNK_EXT = /\.(jpe?g|png|gif|bmp|tiff?|webp|pdf|txt|rtf|doc|docx|xls|xlsx|ppt|pptx|xml|json|html?|css|js|ts|zip|rar|7z|tgz|tar|gz|bz2|mp3|mp4|mov|avi|wmv|mkv|webm|exe|bat|sh|app|msi|log)$/i;
   const out: File[] = [];
   for (const f of expanded) {
     const lower = f.name.toLowerCase();
-    const extMatch = lower.endsWith('.dcm') || lower.endsWith('.dicom') || lower.endsWith('.ima');
-    if (extMatch) {
-      out.push(f);
-      continue;
-    }
-    if (await isDicomByMagic(f)) {
-      out.push(f);
-      continue;
-    }
-    if (await looksLikeImplicitDicom(f)) {
-      out.push(f);
-      continue;
-    }
-    // Skip obvious non-DICOM junk
+    // Skip DICOMDIR — not a single image, would confuse loader
+    if (lower === 'dicomdir' || lower.endsWith('/dicomdir')) continue;
+    // Skip hidden / system files
+    const base = lower.split('/').pop() || lower;
+    if (base.startsWith('.') || base === 'thumbs.db') continue;
+    // Skip known non-DICOM extensions
+    if (JUNK_EXT.test(base)) continue;
+    // Skip tiny files that can't possibly be DICOM (< 256 bytes)
+    if (f.size < 256) continue;
+    out.push(f);
   }
   return out;
 }
