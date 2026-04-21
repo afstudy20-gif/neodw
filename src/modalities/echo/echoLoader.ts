@@ -29,7 +29,27 @@ interface EchoCalibration {
   colSpacingMm: number;
 }
 
+export interface DopplerSpectralRegion {
+  /** Region rect in image-pixel coords (y0..y1 inclusive). */
+  y0: number;
+  y1: number;
+  x0: number;
+  x1: number;
+  /** Image-pixel Y where physical value equals 0 (baseline, zero velocity). */
+  refPixelY0: number;
+  /** Velocity unit code (4 = cm/s, 7 = m/s). */
+  unitY: number;
+  /** PhysicalDeltaY (value per pixel), in `unitY` units. */
+  deltaY: number;
+  /** Normalized m/s per image pixel (absolute value). */
+  mpsPerImagePx: number;
+}
+
 const calibrationByImageId = new Map<string, EchoCalibration>();
+const dopplerByImageId = new Map<string, DopplerSpectralRegion>();
+export function getDopplerSpectralRegion(imageId: string): DopplerSpectralRegion | undefined {
+  return dopplerByImageId.get(imageId) ?? dopplerByImageId.get(imageId.split('?')[0]);
+}
 let providerRegistered = false;
 
 let providerLogCount = 0;
@@ -205,6 +225,78 @@ function inferFrameCount(ds: any): number {
   return 1;
 }
 
+function parseDopplerSpectralRegion(ds: any): DopplerSpectralRegion | null {
+  try {
+    const seq = ds.elements['x00186011'];
+    if (!seq?.items?.length) return null;
+    for (const item of seq.items) {
+      const inner = item?.dataSet;
+      if (!inner) continue;
+      let dataType = 0;
+      try { dataType = inner.uint16('x00186014') ?? 0; } catch {}
+      // 3 = Spectral Doppler, 4 = Waveform
+      if (dataType !== 3 && dataType !== 4) continue;
+      const readU = (tag: string): number => {
+        try {
+          const el = inner.elements[tag];
+          if (el && el.length >= 4) {
+            const dv = new DataView(inner.byteArray.buffer, inner.byteArray.byteOffset + el.dataOffset, 4);
+            return dv.getUint32(0, true);
+          }
+        } catch {}
+        return 0;
+      };
+      const readS = (tag: string): number => {
+        try {
+          const el = inner.elements[tag];
+          if (el && el.length >= 4) {
+            const dv = new DataView(inner.byteArray.buffer, inner.byteArray.byteOffset + el.dataOffset, 4);
+            return dv.getInt32(0, true);
+          }
+        } catch {}
+        return 0;
+      };
+      const readF = (tag: string): number | null => {
+        try {
+          const el = inner.elements[tag];
+          if (!el) return null;
+          const vr = (el.vr || '').toUpperCase();
+          if (vr === 'FD' && el.length >= 8) {
+            const dv = new DataView(inner.byteArray.buffer, inner.byteArray.byteOffset + el.dataOffset, 8);
+            return dv.getFloat64(0, true);
+          }
+          if (vr === 'FL' && el.length >= 4) {
+            const dv = new DataView(inner.byteArray.buffer, inner.byteArray.byteOffset + el.dataOffset, 4);
+            return dv.getFloat32(0, true);
+          }
+          const s = inner.string(tag); if (s) return parseFloat(s);
+        } catch {}
+        return null;
+      };
+      const x0 = readU('x00186018');
+      const y0 = readU('x0018601a');
+      const x1 = readU('x0018601c');
+      const y1 = readU('x0018601e');
+      const refPixelY0 = readS('x00186022');
+      const unitY = (() => { try { return inner.uint16('x00186026') ?? 0; } catch { return 0; } })();
+      const deltaY = readF('x0018602e');
+      if (deltaY == null || deltaY === 0) continue;
+      if (x1 <= x0 || y1 <= y0) continue;
+      // refPixelY0 is relative to region origin — convert to absolute image-pixel Y
+      const baselineAbsY = y0 + refPixelY0;
+      // Convert deltaY to m/s per pixel. unitY: 4 = cm/s, 7 = m/s, 3 = cm (not velocity)
+      let mpsPerImagePx: number;
+      if (unitY === 7) mpsPerImagePx = Math.abs(deltaY);
+      else if (unitY === 4) mpsPerImagePx = Math.abs(deltaY) / 100;
+      else mpsPerImagePx = Math.abs(deltaY); // best-effort
+      return { y0, y1, x0, x1, refPixelY0: baselineAbsY, unitY, deltaY, mpsPerImagePx };
+    }
+  } catch (e) {
+    console.warn('[Echo doppler-region] parse fail', e);
+  }
+  return null;
+}
+
 function parseUSRegion(ds: any): EchoCalibration | null {
   try {
     const seq = ds.elements['x00186011'];
@@ -340,7 +432,29 @@ function parseOne(arrayBuffer: ArrayBuffer) {
   const inferred = inferFrameCount(ds);
   const stdRows = getInt('x00280010') || 0;
   const stdCols = getInt('x00280011') || 0;
-  const geCine = parseGEVividCine(ds, { rows: stdRows, columns: stdCols });
+
+  // Only invoke GE proprietary decoder when standard pixel data (7FE0,0010)
+  // is absent OR empty. Otherwise Horos-style standard rendering produces
+  // the correct image and the GE decoder only adds artifacts.
+  const stdPd = ds.elements['x7fe00010'];
+  const hasStdPixelData = !!stdPd && (
+    (stdPd.items && stdPd.items.length > 1) ||
+    (stdPd.length != null && stdPd.length > 0)
+  );
+  const stdFrames = Math.max(getInt('x00280008') || 1, inferred);
+  const stdIsMultiframe = stdFrames > 1;
+
+  // Always attempt GE proprietary decode. Then decide at route time:
+  //   - Standard path if standard pixel data alone already yields >=
+  //     GE frame count (regular single-frame or multi-frame DICOM).
+  //   - GE path only when GE decoder produced strictly more frames than
+  //     the standard block exposes (GE Vivid cines: standard holds 1
+  //     preview frame, private 7FE1 block holds the full cine).
+  void hasStdPixelData; void stdIsMultiframe;
+  const geCineAttempt = parseGEVividCine(ds, { rows: stdRows, columns: stdCols });
+  const geCine = (geCineAttempt && geCineAttempt.frames.length > stdFrames)
+    ? geCineAttempt
+    : null;
 
   return {
     seriesInstanceUID: get('x0020000e') || 'unknown',
@@ -359,6 +473,7 @@ function parseOne(arrayBuffer: ArrayBuffer) {
     windowWidth: firstFloat(get('x00281051')) ?? getFloat('x00281051') ?? null,
     cineRate: getFloat('x00180040') ?? getInt('x00082144') ?? null,
     calibration: parseUSRegion(ds),
+    dopplerRegion: parseDopplerSpectralRegion(ds),
     geCine,
   };
 }
@@ -436,6 +551,10 @@ export async function loadEchoFiles(files: File[]): Promise<EchoSeriesInfo[]> {
     if (meta.calibration) {
       calibrationByImageId.set(baseId, meta.calibration);
       for (const id of imageIds) calibrationByImageId.set(id, meta.calibration);
+    }
+    if (meta.dopplerRegion) {
+      dopplerByImageId.set(baseId, meta.dopplerRegion);
+      for (const id of imageIds) dopplerByImageId.set(id, meta.dopplerRegion);
     }
 
     // Group per-file (SOP instance) — each cine clip is its own entry, not merged by series UID

@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { initCornerstone } from '../ct/core/initCornerstone';
-import { loadEchoFiles, type EchoSeriesInfo } from './echoLoader';
+import { loadEchoFiles, getDopplerSpectralRegion, type EchoSeriesInfo } from './echoLoader';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import echoModuleCss from './echo-module.css?inline';
@@ -146,7 +146,22 @@ function applyLinearInterpolation(vp: any) {
   } catch {}
 }
 
-type EchoTool = 'pan' | 'zoom' | 'window' | 'length' | 'angle' | 'area' | 'probe';
+type EchoTool = 'pan' | 'zoom' | 'window' | 'length' | 'angle' | 'area' | 'probe' | 'arrow' | 'text' | 'spectral';
+
+// Doppler spectral calibration stored in image-pixel space so pan/zoom
+// doesn't alter the velocity scale. Canvas positions derived per render.
+interface DopplerCal {
+  baselineImagePxY: number;
+  mpsPerImagePx: number;
+  source: 'auto' | 'manual';
+}
+interface DopplerReadout {
+  id: string;
+  imagePxY: number;
+  velocityMps: number;
+  pressureMmHg: number;
+  imageId?: string;
+}
 
 interface Measurement {
   id: string;
@@ -176,9 +191,26 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
   const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState(24);
   const [activeTool, setActiveTool] = useState<EchoTool>('pan');
+  const activeToolRef = useRef<EchoTool>('pan');
+  useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  const [annoColor, setAnnoColor] = useState<string>('#ffd43b');
+  const [annoFontSize, setAnnoFontSize] = useState<number>(14);
+  const [annoFontFamily, setAnnoFontFamily] = useState<string>('Inter, system-ui, sans-serif');
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [textEditor, setTextEditor] = useState<{ canvasX: number; canvasY: number; worldPt: [number, number, number]; value: string } | null>(null);
+  const textEditorRef = useRef<HTMLInputElement | null>(null);
+  interface TextAnno { id: string; worldPt: [number, number, number]; text: string; color: string; fontSize: number; fontFamily: string; imageId?: string; }
+  const [textAnnos, setTextAnnos] = useState<TextAnno[]>([]);
+  const [overlayTick, setOverlayTick] = useState(0);
+  const [dopplerCal, setDopplerCal] = useState<DopplerCal | null>(null);
+  const [calibStage, setCalibStage] = useState<'idle' | 'baseline' | 'ref'>('idle');
+  const calibBaselineRef = useRef<number | null>(null);
+  const [crosshairY, setCrosshairY] = useState<number | null>(null);
+  const [liveReadout, setLiveReadout] = useState<DopplerReadout | null>(null);
+  const [readouts, setReadouts] = useState<DopplerReadout[]>([]);
 
   // Inject module CSS
   useEffect(() => {
@@ -350,8 +382,9 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
       PlanarFreehandROITool,
       ProbeTool,
       StackScrollTool,
+      ArrowAnnotateTool,
     } = cornerstoneTools;
-    const toolsToAdd = [PanTool, ZoomTool, WindowLevelTool, LengthTool, AngleTool, PlanarFreehandROITool, ProbeTool, StackScrollTool];
+    const toolsToAdd = [PanTool, ZoomTool, WindowLevelTool, LengthTool, AngleTool, PlanarFreehandROITool, ProbeTool, StackScrollTool, ArrowAnnotateTool];
     for (const T of toolsToAdd) {
       try { cornerstoneTools.addTool(T); } catch {}
     }
@@ -380,13 +413,129 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
     }
   }, []);
 
+  const getViewportCanvas = useCallback((): HTMLCanvasElement | null => {
+    const el = viewportRef.current;
+    if (!el) return null;
+    return (el.querySelector('canvas.cornerstone-canvas') ?? el.querySelector('canvas')) as HTMLCanvasElement | null;
+  }, []);
+
+  const saveCurrentFrameImage = useCallback(() => {
+    const canvas = getViewportCanvas();
+    if (!canvas) return;
+    try {
+      const url = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      const name = (activeSeries?.seriesDescription || 'echo').replace(/[^a-zA-Z0-9]/g, '_');
+      a.download = `${name}_frame${frameIndex + 1}.png`;
+      a.href = url;
+      a.click();
+    } catch (e) { console.warn('[Echo saveImage] failed', e); }
+  }, [getViewportCanvas, activeSeries, frameIndex]);
+
+  const saveSeriesAsDicom = useCallback(async () => {
+    const series = activeSeries;
+    if (!series) return;
+    const wadouriIds = series.imageIds
+      .map((id) => id.split('?')[0])
+      .filter((id) => id.startsWith('wadouri:'));
+    const uniqueBases = Array.from(new Set(wadouriIds));
+    if (uniqueBases.length === 0) {
+      alert('Bu seri için DICOM export desteklenmiyor (proprietary/decoded cine).');
+      return;
+    }
+    const baseName = (series.seriesDescription || 'echo').replace(/[^a-zA-Z0-9]/g, '_');
+    try {
+      for (let i = 0; i < uniqueBases.length; i++) {
+        const blobUrl = uniqueBases[i].replace(/^wadouri:/, '');
+        const resp = await fetch(blobUrl);
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.download = uniqueBases.length > 1 ? `${baseName}_${i + 1}.dcm` : `${baseName}.dcm`;
+        a.href = URL.createObjectURL(blob);
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    } catch (e) {
+      console.warn('[Echo DICOM export] failed', e);
+      alert('DICOM export başarısız.');
+    }
+  }, [activeSeries]);
+
+  const saveCineAsVideo = useCallback(async () => {
+    const series = activeSeries;
+    const canvas = getViewportCanvas();
+    const engine = renderingEngineRef.current;
+    if (!series || !canvas || !engine || series.imageIds.length < 2) return;
+    const vp = engine.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport;
+    if (!vp) return;
+
+    setExporting('Hazırlanıyor...');
+    const stream = canvas.captureStream(fps);
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5_000_000 });
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    const done = new Promise<void>((r) => { recorder.onstop = () => r(); });
+    recorder.start();
+
+    const wasPlaying = playing;
+    setPlaying(false);
+    try {
+      for (let i = 0; i < series.imageIds.length; i++) {
+        setExporting(`Frame ${i + 1}/${series.imageIds.length}`);
+        try { await vp.setImageIdIndex(i); } catch {}
+        vp.render();
+        await new Promise((r) => setTimeout(r, 1000 / Math.max(1, fps)));
+      }
+    } finally {
+      recorder.stop();
+      await done;
+      if (wasPlaying) setPlaying(true);
+    }
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const name = (series.seriesDescription || 'echo').replace(/[^a-zA-Z0-9]/g, '_');
+    a.download = `${name}_${series.imageIds.length}fr.webm`;
+    a.href = url;
+    a.click();
+    URL.revokeObjectURL(url);
+    setExporting(null);
+  }, [activeSeries, getViewportCanvas, fps, playing]);
+
+  const commitTextAnnotation = useCallback((text: string) => {
+    const ed = textEditor;
+    if (!ed) return;
+    const trimmed = text.trim();
+    if (!trimmed) { setTextEditor(null); return; }
+    const engine = renderingEngineRef.current;
+    const vp = engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined;
+    const imageId = (vp as any)?.getCurrentImageId?.();
+    const id = (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2);
+    setTextAnnos((prev) => [
+      ...prev,
+      { id, worldPt: ed.worldPt, text: trimmed, color: annoColor, fontSize: annoFontSize, fontFamily: annoFontFamily, imageId },
+    ]);
+    setTextEditor(null);
+  }, [textEditor, annoColor, annoFontSize, annoFontFamily]);
+
+  const gotoSeries = useCallback((delta: number) => {
+    if (!activeSeries) return;
+    const idx = seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID);
+    const next = seriesList[idx + delta];
+    if (next) {
+      setPlaying(true);
+      void openSeries(next);
+    }
+  }, [activeSeries, seriesList, openSeries]);
+
   // Apply active tool
   useEffect(() => {
     if (!toolGroupInitRef.current) return;
     const tg = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
     if (!tg) return;
     const {
-      PanTool, ZoomTool, WindowLevelTool, LengthTool, AngleTool, PlanarFreehandROITool, ProbeTool,
+      PanTool, ZoomTool, WindowLevelTool, LengthTool, AngleTool, PlanarFreehandROITool, ProbeTool, ArrowAnnotateTool,
     } = cornerstoneTools;
     const bindings = [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }];
     const toolMap: Record<EchoTool, string> = {
@@ -397,17 +546,383 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
       angle: AngleTool.toolName,
       area: PlanarFreehandROITool.toolName,
       probe: ProbeTool.toolName,
+      arrow: ArrowAnnotateTool.toolName,
+      text: '', // Placed via custom mousedown handler — ArrowAnnotateTool must stay passive here
+      spectral: '', // Doppler measurement handled by custom capture-phase listener
     };
+    // Arrow mode: empty text (single space so annotation isn't discarded).
+    try {
+      (tg as any).setToolConfiguration?.(ArrowAnnotateTool.toolName, {
+        getTextCallback: (done: (t: string) => void) => done(' '),
+      });
+    } catch {}
     const selected = toolMap[activeTool];
     for (const name of Object.values(toolMap)) {
+      if (!name) continue;
       if (name === selected) {
         tg.setToolActive(name, { bindings });
       } else if (name !== PanTool.toolName || activeTool !== 'pan') {
         try { tg.setToolPassive(name); } catch {}
       }
     }
+    // Text / spectral mode: make all primary-button tools passive so our
+    // custom mousedown handlers own left-click.
+    if (activeTool === 'text' || activeTool === 'spectral') {
+      try { tg.setToolPassive(ArrowAnnotateTool.toolName); } catch {}
+      try { tg.setToolPassive(PanTool.toolName); } catch {}
+    }
     tg.setToolActive(ZoomTool.toolName, { bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }] });
   }, [activeTool]);
+
+  // Keep DOM text overlay positions in sync with viewport pan/zoom/frame changes.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const bump = () => setOverlayTick((n) => n + 1);
+    const camEvt = (cornerstone as any).Enums?.Events?.CAMERA_MODIFIED ?? 'CORNERSTONE_CAMERA_MODIFIED';
+    const rendEvt = (cornerstone as any).Enums?.Events?.IMAGE_RENDERED ?? 'CORNERSTONE_IMAGE_RENDERED';
+    el.addEventListener(camEvt, bump as EventListener);
+    el.addEventListener(rendEvt, bump as EventListener);
+    const ro = new ResizeObserver(bump);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener(camEvt, bump as EventListener);
+      el.removeEventListener(rendEvt, bump as EventListener);
+      ro.disconnect();
+    };
+  }, [activeSeries]);
+
+  // ─── Doppler spectral helpers ───
+  const getViewportForSpectral = useCallback((): cornerstone.Types.IStackViewport | null => {
+    const engine = renderingEngineRef.current;
+    return (engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined) ?? null;
+  }, []);
+
+  const imagePxYToCanvasY = useCallback((imagePxY: number): number | null => {
+    const vp = getViewportForSpectral();
+    if (!vp) return null;
+    try {
+      const img: any = (vp as any).getImageData?.();
+      if (!img) return null;
+      const origin = img.origin ?? img.imageData?.getOrigin?.();
+      const spacing = img.spacing ?? img.imageData?.getSpacing?.();
+      if (!origin || !spacing) return null;
+      const worldY = origin[1] + imagePxY * spacing[1];
+      const cp = vp.worldToCanvas([origin[0], worldY, origin[2]] as any) as number[];
+      return Number.isFinite(cp?.[1]) ? cp[1] : null;
+    } catch { return null; }
+  }, [getViewportForSpectral]);
+
+  const canvasYToImagePxY = useCallback((canvasY: number): number | null => {
+    const vp = getViewportForSpectral();
+    if (!vp) return null;
+    try {
+      const img: any = (vp as any).getImageData?.();
+      if (!img) return null;
+      const origin = img.origin ?? img.imageData?.getOrigin?.();
+      const spacing = img.spacing ?? img.imageData?.getSpacing?.();
+      if (!origin || !spacing) return null;
+      // Use any x (e.g. canvas center) since we only care about Y
+      const el = viewportRef.current;
+      const x = el ? el.clientWidth / 2 : 0;
+      const wp = vp.canvasToWorld([x, canvasY]) as number[];
+      return (wp[1] - origin[1]) / spacing[1];
+    } catch { return null; }
+  }, [getViewportForSpectral]);
+
+  // Auto-calibration from DICOM Ultrasound Region (type 3/4 = Doppler spectrum).
+  useEffect(() => {
+    if (activeTool !== 'spectral' || !activeSeries) return;
+    const vp = getViewportForSpectral();
+    const imageId: string | undefined = (vp as any)?.getCurrentImageId?.();
+    if (!imageId) return;
+    const region = getDopplerSpectralRegion(imageId);
+    if (region && !dopplerCal) {
+      setDopplerCal({
+        baselineImagePxY: region.refPixelY0,
+        mpsPerImagePx: region.mpsPerImagePx,
+        source: 'auto',
+      });
+      console.log('[Doppler] auto-cal from DICOM region', region);
+    }
+  }, [activeTool, activeSeries, frameIndex, dopplerCal, getViewportForSpectral]);
+
+  const computeVelocityForCanvasY = useCallback((canvasY: number): { v: number; p: number; imagePxY: number } | null => {
+    if (!dopplerCal) return null;
+    const imgY = canvasYToImagePxY(canvasY);
+    if (imgY == null) return null;
+    const v = Math.abs(imgY - dopplerCal.baselineImagePxY) * dopplerCal.mpsPerImagePx;
+    const p = 4 * v * v; // Simplified Bernoulli: ΔP = 4·v²
+    return { v, p, imagePxY: imgY };
+  }, [dopplerCal, canvasYToImagePxY]);
+
+  /**
+   * Sub-pixel refinement: sample a vertical luminance column of the
+   * underlying viewport canvas around the clicked Y, find the brightest
+   * row (spectrum envelope peak on the side matching the user's click
+   * relative to the baseline), and parabolically interpolate across the
+   * peak and its two neighbors to extract a fractional canvas-Y.
+   */
+  const refineCanvasYSubPixel = useCallback((canvasX: number, canvasY: number, searchRadius = 12): number => {
+    const el = viewportRef.current;
+    if (!el) return canvasY;
+    const canvas = (el.querySelector('canvas.cornerstone-canvas') ?? el.querySelector('canvas')) as HTMLCanvasElement | null;
+    if (!canvas) return canvasY;
+    const dpr = canvas.width / Math.max(1, el.clientWidth);
+    const cx = Math.round(canvasX * dpr);
+    const cyBuf = Math.round(canvasY * dpr);
+    const radBuf = Math.max(3, Math.round(searchRadius * dpr));
+    const y0 = Math.max(0, cyBuf - radBuf);
+    const y1 = Math.min(canvas.height - 1, cyBuf + radBuf);
+    if (y1 <= y0) return canvasY;
+
+    let ctx: CanvasRenderingContext2D | null = null;
+    try { ctx = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | null; } catch {}
+    // WebGL canvases (Cornerstone uses VTK.js -> WebGL by default) won't
+    // expose a 2D context. Read via readPixels fallback via drawImage.
+    if (!ctx) {
+      try {
+        const tmp = document.createElement('canvas');
+        tmp.width = 1; tmp.height = y1 - y0 + 1;
+        const tctx = tmp.getContext('2d');
+        if (!tctx) return canvasY;
+        tctx.drawImage(canvas, cx, y0, 1, tmp.height, 0, 0, 1, tmp.height);
+        const data = tctx.getImageData(0, 0, 1, tmp.height).data;
+        return pickPeakFromLumaColumn(data, y0, cyBuf, dpr);
+      } catch { return canvasY; }
+    }
+    try {
+      const data = ctx.getImageData(cx, y0, 1, y1 - y0 + 1).data;
+      return pickPeakFromLumaColumn(data, y0, cyBuf, dpr);
+    } catch { return canvasY; }
+
+    function pickPeakFromLumaColumn(data: Uint8ClampedArray, startY: number, seedY: number, dprLocal: number): number {
+      const n = data.length / 4;
+      let bestIdx = -1;
+      let bestLuma = -1;
+      for (let i = 0; i < n; i++) {
+        const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+        // Rec.709 luma
+        const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (y > bestLuma) { bestLuma = y; bestIdx = i; }
+      }
+      if (bestIdx < 0) return seedY / dprLocal;
+      // Parabolic interpolation between (idx-1, idx, idx+1) luminance samples
+      let subOffset = 0;
+      if (bestIdx > 0 && bestIdx < n - 1) {
+        const yl = 0.2126 * data[(bestIdx - 1) * 4] + 0.7152 * data[(bestIdx - 1) * 4 + 1] + 0.0722 * data[(bestIdx - 1) * 4 + 2];
+        const yc = bestLuma;
+        const yr = 0.2126 * data[(bestIdx + 1) * 4] + 0.7152 * data[(bestIdx + 1) * 4 + 1] + 0.0722 * data[(bestIdx + 1) * 4 + 2];
+        const denom = (yl - 2 * yc + yr);
+        if (Math.abs(denom) > 1e-6) subOffset = 0.5 * (yl - yr) / denom;
+        if (subOffset < -1) subOffset = -1;
+        if (subOffset > 1) subOffset = 1;
+      }
+      const refinedBuf = startY + bestIdx + subOffset;
+      return refinedBuf / dprLocal;
+    }
+  }, []);
+
+  // Capture-phase mousedown + mousemove for spectral tool: calibration clicks,
+  // crosshair tracking, and readout locking.
+  useEffect(() => {
+    if (activeTool !== 'spectral') return;
+    const el = viewportRef.current;
+    if (!el) return;
+
+    const onMove = (e: MouseEvent) => {
+      const rect = el.getBoundingClientRect();
+      const canvasX = e.clientX - rect.left;
+      const rawCanvasY = e.clientY - rect.top;
+      // Refinement strategy depends on mode:
+      //  - Measurement (idle + calibrated): snap to brightest spectrum column
+      //    around cursor X (envelope peak).
+      //  - Calibration: snap to nearest tick on the right-side velocity axis
+      //    (ticks are bright short lines in a narrow right-edge strip).
+      let refinedCanvasY: number;
+      if (calibStage !== 'idle') {
+        const axisX = Math.max(0, (el.clientWidth ?? rawCanvasY) - 15);
+        refinedCanvasY = refineCanvasYSubPixel(axisX, rawCanvasY, 40);
+      } else {
+        // Post-calibration measurement: crosshair follows cursor exactly.
+        refinedCanvasY = rawCanvasY;
+      }
+      void canvasX;
+      setCrosshairY(refinedCanvasY);
+      const r = computeVelocityForCanvasY(refinedCanvasY);
+      if (r) {
+        const vp = getViewportForSpectral();
+        const imageId: string | undefined = (vp as any)?.getCurrentImageId?.();
+        setLiveReadout({
+          id: 'live',
+          imagePxY: r.imagePxY,
+          velocityMps: r.v,
+          pressureMmHg: r.p,
+          imageId,
+        });
+      } else {
+        setLiveReadout(null);
+      }
+    };
+
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const rect = el.getBoundingClientRect();
+      const canvasY = e.clientY - rect.top;
+
+      // Manual calibration flow — snap to nearest right-axis tick line.
+      if (calibStage === 'baseline' || calibStage === 'ref') {
+        const axisX = Math.max(0, el.clientWidth - 15);
+        const snappedY = refineCanvasYSubPixel(axisX, canvasY, 40);
+        if (calibStage === 'baseline') {
+          const imgY = canvasYToImagePxY(snappedY);
+          if (imgY == null) return;
+          calibBaselineRef.current = imgY;
+          setCalibStage('ref');
+          return;
+        }
+        // calibStage === 'ref'
+        const imgY = canvasYToImagePxY(snappedY);
+        const baseImgY = calibBaselineRef.current;
+        if (imgY == null || baseImgY == null) { setCalibStage('idle'); return; }
+        const ans = window.prompt('Bu satır için referans hız (m/s):', '1.0');
+        if (!ans) { setCalibStage('idle'); calibBaselineRef.current = null; return; }
+        const vRef = Math.abs(parseFloat(ans));
+        if (!Number.isFinite(vRef) || vRef <= 0) { setCalibStage('idle'); calibBaselineRef.current = null; return; }
+        const dy = Math.abs(imgY - baseImgY);
+        if (dy < 1) { setCalibStage('idle'); calibBaselineRef.current = null; return; }
+        setDopplerCal({
+          baselineImagePxY: baseImgY,
+          mpsPerImagePx: vRef / dy,
+          source: 'manual',
+        });
+        setCalibStage('idle');
+        calibBaselineRef.current = null;
+        return;
+      }
+
+      // After calibration: click locks the crosshair as a readout (raw Y, no snap)
+      if (!dopplerCal) return;
+      const r = computeVelocityForCanvasY(canvasY);
+      if (!r) return;
+      const vp = getViewportForSpectral();
+      const imageId: string | undefined = (vp as any)?.getCurrentImageId?.();
+      const id = (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2);
+      setReadouts((prev) => [...prev, { id, imagePxY: r.imagePxY, velocityMps: r.v, pressureMmHg: r.p, imageId }]);
+    };
+
+    const onLeave = () => { setCrosshairY(null); setLiveReadout(null); };
+
+    el.addEventListener('mousedown', onDown, true);
+    el.addEventListener('mousemove', onMove);
+    el.addEventListener('mouseleave', onLeave);
+    return () => {
+      el.removeEventListener('mousedown', onDown, true);
+      el.removeEventListener('mousemove', onMove);
+      el.removeEventListener('mouseleave', onLeave);
+    };
+  }, [activeTool, calibStage, dopplerCal, computeVelocityForCanvasY, canvasYToImagePxY, getViewportForSpectral, refineCanvasYSubPixel]);
+
+  // In 'text' mode: intercept mousedown BEFORE ArrowAnnotateTool sees it,
+  // prompt for text, and place a ready-built annotation programmatically.
+  // This avoids the visible arrow appearing during the drag.
+  useEffect(() => {
+    if (activeTool !== 'text') return;
+    const el = viewportRef.current;
+    if (!el) return;
+
+    const handler = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      const engine = renderingEngineRef.current;
+      const vp = engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined;
+      if (!vp) return;
+
+      const rect = el.getBoundingClientRect();
+      const canvasPt: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
+      let worldPt: [number, number, number];
+      try { worldPt = vp.canvasToWorld(canvasPt) as [number, number, number]; } catch { return; }
+
+      setTextEditor({ canvasX: canvasPt[0], canvasY: canvasPt[1], worldPt, value: '' });
+      setTimeout(() => textEditorRef.current?.focus(), 0);
+    };
+
+    el.addEventListener('mousedown', handler, true);
+    return () => el.removeEventListener('mousedown', handler, true);
+  }, [activeTool]);
+
+  // In 'text' mode: collapse arrow to zero length AND force its color
+  // transparent so only the text label renders. textBoxColor stays from
+  // global style, so the label color stays visible.
+  useEffect(() => {
+    const evt = (cornerstoneTools as any).Enums?.Events?.ANNOTATION_COMPLETED ?? 'ANNOTATION_COMPLETED';
+    const handler = (e: any) => {
+      if (activeToolRef.current !== 'text') return;
+      const anno = e?.detail?.annotation;
+      const pts = anno?.data?.handles?.points;
+      if (pts && pts.length >= 2) pts[0] = [...pts[1]];
+      const uid = anno?.annotationUID;
+      try {
+        const api: any = (cornerstoneTools as any).annotation;
+        const setStyle = api?.config?.style?.setAnnotationStyle
+          ?? api?.config?.style?.setAnnotationToolStyles
+          ?? api?.config?.style?.setAnnotationUIDStyles;
+        if (uid && setStyle) {
+          setStyle.call(api.config.style, uid, {
+            color: 'transparent',
+            colorHighlighted: 'transparent',
+            colorSelected: 'transparent',
+            colorLocked: 'transparent',
+            lineWidth: 0,
+            lineDash: '',
+          });
+        }
+      } catch {}
+      try { renderingEngineRef.current?.render(); } catch {}
+    };
+    try {
+      (cornerstoneTools as any).eventTarget?.addEventListener?.(evt, handler);
+    } catch {}
+    return () => {
+      try {
+        (cornerstoneTools as any).eventTarget?.removeEventListener?.(evt, handler);
+      } catch {}
+    };
+  }, []);
+
+  // Apply annotation visual style (color + font) globally
+  useEffect(() => {
+    try {
+      const cfg: any = (cornerstoneTools as any).annotation?.config?.style;
+      if (!cfg?.setDefaultToolStyles && !cfg?.setGlobalStyle && !cfg?.setDefaultStyles) return;
+      const styleObj = {
+        color: annoColor,
+        colorSelected: annoColor,
+        colorHighlighted: annoColor,
+        colorLocked: annoColor,
+        lineWidth: 2,
+        textBoxFontSize: `${annoFontSize}px`,
+        textBoxFontFamily: annoFontFamily,
+        textBoxColor: annoColor,
+        textBoxColorSelected: annoColor,
+        textBoxColorLocked: annoColor,
+      };
+      if (cfg.setDefaultToolStyles) cfg.setDefaultToolStyles(styleObj);
+      else if (cfg.setGlobalStyle) cfg.setGlobalStyle(styleObj);
+      else if (cfg.setDefaultStyles) cfg.setDefaultStyles(styleObj);
+      // Force redraw
+      const engine = renderingEngineRef.current;
+      engine?.render();
+    } catch (e) {
+      console.warn('[Echo anno-style] failed', e);
+    }
+  }, [annoColor, annoFontSize, annoFontFamily]);
 
   // Cine playback — recursive setTimeout w/ async setImageIdIndex
   useEffect(() => {
@@ -520,6 +1035,7 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
       const engine = renderingEngineRef.current;
       engine?.render();
       setMeasurements([]);
+      setTextAnnos([]);
     } catch {}
   }, []);
 
@@ -690,32 +1206,299 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
             </div>
           )}
           {isLoading && <div className="echo-empty" style={{ color: '#fff' }}>Yükleniyor...</div>}
-          <div ref={viewportRef} className="echo-viewport" style={{ display: activeSeries ? 'block' : 'none' }} />
+          <div ref={viewportRef} className="echo-viewport" data-tool={activeTool} style={{ display: activeSeries ? 'block' : 'none' }} />
 
-          {activeSeries && totalFrames > 1 && (
+          {activeSeries && textAnnos.length > 0 && (() => {
+            const engine = renderingEngineRef.current;
+            const vp = engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined;
+            if (!vp) return null;
+            const currentImageId: string | undefined = (vp as any).getCurrentImageId?.();
+            void overlayTick;
+            return textAnnos.map((a) => {
+              if (a.imageId && currentImageId && a.imageId !== currentImageId) return null;
+              let cp: number[]; try { cp = vp.worldToCanvas(a.worldPt as any) as number[]; } catch { return null; }
+              if (!cp || !Number.isFinite(cp[0]) || !Number.isFinite(cp[1])) return null;
+              return (
+                <div
+                  key={a.id}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setTextAnnos((prev) => prev.filter((x) => x.id !== a.id));
+                  }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const el = viewportRef.current;
+                    const vpLocal = engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined;
+                    if (!el || !vpLocal) return;
+                    const rect = el.getBoundingClientRect();
+                    const startCanvas: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
+                    const startAnnoCanvas = vpLocal.worldToCanvas(a.worldPt as any) as number[];
+                    const dx0 = startCanvas[0] - startAnnoCanvas[0];
+                    const dy0 = startCanvas[1] - startAnnoCanvas[1];
+                    let moved = false;
+                    const onMove = (ev: MouseEvent) => {
+                      const nx = ev.clientX - rect.left - dx0;
+                      const ny = ev.clientY - rect.top - dy0;
+                      try {
+                        const newWorld = vpLocal.canvasToWorld([nx, ny]) as [number, number, number];
+                        moved = true;
+                        setTextAnnos((prev) => prev.map((x) => x.id === a.id ? { ...x, worldPt: newWorld } : x));
+                      } catch {}
+                    };
+                    const onUp = () => {
+                      window.removeEventListener('mousemove', onMove);
+                      window.removeEventListener('mouseup', onUp);
+                      if (!moved) {
+                        // Treat as click → enter edit mode
+                        const cpNow = vpLocal.worldToCanvas(a.worldPt as any) as number[];
+                        setTextAnnos((prev) => prev.filter((x) => x.id !== a.id));
+                        setTextEditor({ canvasX: cpNow[0], canvasY: cpNow[1], worldPt: a.worldPt, value: a.text });
+                        setTimeout(() => {
+                          textEditorRef.current?.focus();
+                          textEditorRef.current?.select();
+                        }, 0);
+                      }
+                    };
+                    window.addEventListener('mousemove', onMove);
+                    window.addEventListener('mouseup', onUp);
+                  }}
+                  onDoubleClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const vpLocal = engine?.getViewport(VIEWPORT_ID) as cornerstone.Types.IStackViewport | undefined;
+                    if (!vpLocal) return;
+                    const cpNow = vpLocal.worldToCanvas(a.worldPt as any) as number[];
+                    setTextAnnos((prev) => prev.filter((x) => x.id !== a.id));
+                    setTextEditor({ canvasX: cpNow[0], canvasY: cpNow[1], worldPt: a.worldPt, value: a.text });
+                    setTimeout(() => {
+                      textEditorRef.current?.focus();
+                      textEditorRef.current?.select();
+                    }, 0);
+                  }}
+                  title="Sürükle: taşı · Çift tık: düzenle · Sağ tık: sil"
+                  style={{
+                    position: 'absolute',
+                    left: cp[0],
+                    top: cp[1],
+                    transform: 'translate(0, -50%)',
+                    color: a.color,
+                    font: `${a.fontSize}px ${a.fontFamily}`,
+                    fontWeight: 600,
+                    textShadow: '0 1px 2px rgba(0,0,0,0.85)',
+                    pointerEvents: 'auto',
+                    cursor: 'move',
+                    whiteSpace: 'nowrap',
+                    zIndex: 15,
+                    userSelect: 'none',
+                    padding: '2px 4px',
+                  }}
+                >{a.text}</div>
+              );
+            });
+          })()}
+
+          {/* Doppler spectral overlays */}
+          {activeTool === 'spectral' && activeSeries && (() => {
+            const vp = getViewportForSpectral();
+            const el = viewportRef.current;
+            const width = el?.clientWidth ?? 0;
+            const nodes: ReactNode[] = [];
+            void overlayTick;
+
+            // Locked readouts (horizontal lines with labels)
+            if (vp) {
+              const currentImageId: string | undefined = (vp as any).getCurrentImageId?.();
+              for (const r of readouts) {
+                if (r.imageId && currentImageId && r.imageId !== currentImageId) continue;
+                const cy = imagePxYToCanvasY(r.imagePxY);
+                if (cy == null) continue;
+                nodes.push(
+                  <div key={r.id} style={{ position: 'absolute', left: 0, top: cy, width, pointerEvents: 'none', zIndex: 14 }}>
+                    <div style={{ position: 'absolute', left: 0, top: 0, width, height: 1, background: '#51cf66', opacity: 0.8 }} />
+                    <span
+                      style={{
+                        position: 'absolute', left: 8, top: -10, background: 'rgba(0,0,0,0.7)', color: '#51cf66',
+                        padding: '1px 6px', borderRadius: 3, fontSize: 11, fontFamily: 'ui-monospace, monospace',
+                        pointerEvents: 'auto',
+                      }}
+                      onContextMenu={(e) => { e.preventDefault(); setReadouts((prev) => prev.filter((x) => x.id !== r.id)); }}
+                      title="Sağ tık: sil"
+                    >
+                      v {r.velocityMps.toFixed(2)} m/s · p {r.pressureMmHg.toFixed(1)} mmHg
+                    </span>
+                  </div>
+                );
+              }
+
+              // Baseline line (from calibration)
+              if (dopplerCal) {
+                const by = imagePxYToCanvasY(dopplerCal.baselineImagePxY);
+                if (by != null) {
+                  nodes.push(
+                    <div key="baseline" style={{ position: 'absolute', left: 0, top: by, width, height: 1, background: 'rgba(255,212,59,0.6)', borderTop: '1px dashed rgba(255,212,59,0.9)', pointerEvents: 'none', zIndex: 12 }}>
+                      <span style={{ position: 'absolute', left: 4, top: -14, color: '#ffd43b', fontSize: 10, fontFamily: 'ui-monospace, monospace', textShadow: '0 1px 2px #000' }}>0 m/s</span>
+                    </div>
+                  );
+                }
+              }
+            }
+
+            // Live crosshair
+            if (crosshairY != null) {
+              nodes.push(
+                <div key="live-crosshair" style={{ position: 'absolute', left: 0, top: crosshairY, width, height: 1, background: '#4dabf7', pointerEvents: 'none', zIndex: 13 }} />
+              );
+            }
+
+            // Calibration instruction banner
+            if (calibStage !== 'idle') {
+              nodes.push(
+                <div key="calib-banner" style={{ position: 'absolute', top: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(255,212,59,0.92)', color: '#000', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 700, zIndex: 20 }}>
+                  {calibStage === 'baseline' ? '1/2: Baseline (0 m/s) satırına tıkla' : '2/2: Bilinen hız satırına tıkla'}
+                </div>
+              );
+            }
+
+            // Live readout card top-left
+            if (liveReadout || dopplerCal) {
+              nodes.push(
+                <div key="readout-card" style={{
+                  position: 'absolute', top: 8, left: 8, zIndex: 20,
+                  background: 'rgba(0,0,0,0.85)', color: '#fff', padding: '6px 10px',
+                  borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)',
+                  fontFamily: 'ui-monospace, monospace', fontSize: 12, lineHeight: 1.35, minWidth: 140,
+                }}>
+                  {liveReadout ? (
+                    <>
+                      <div><span style={{ color: '#4dabf7' }}>v</span> {liveReadout.velocityMps.toFixed(2)} m/s</div>
+                      <div><span style={{ color: '#4dabf7' }}>p</span> {liveReadout.pressureMmHg.toFixed(2)} mmHg</div>
+                    </>
+                  ) : (
+                    <div style={{ opacity: 0.6 }}>Fare ile satır hizala</div>
+                  )}
+                </div>
+              );
+            } else if (activeTool === 'spectral' && !dopplerCal && calibStage === 'idle') {
+              nodes.push(
+                <div key="no-cal-hint" style={{
+                  position: 'absolute', top: 8, left: 8, zIndex: 20,
+                  background: 'rgba(0,0,0,0.85)', color: '#ffd43b', padding: '6px 10px',
+                  borderRadius: 6, border: '1px solid #ffd43b', fontSize: 11, maxWidth: 240,
+                }}>
+                  Auto-calibration yok. "Kalibre Et" ile manuel ayarla.
+                </div>
+              );
+            }
+
+            return nodes;
+          })()}
+
+          {textEditor && (
+            <div
+              className="echo-text-editor"
+              style={{
+                position: 'absolute',
+                left: textEditor.canvasX,
+                top: textEditor.canvasY,
+                transform: 'translate(0, -50%)',
+                zIndex: 20,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                background: 'rgba(0,0,0,0.82)',
+                padding: '6px 8px',
+                borderRadius: 6,
+                border: `1px solid ${annoColor}`,
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <input
+                ref={textEditorRef}
+                type="text"
+                value={textEditor.value}
+                placeholder="Yazı..."
+                onChange={(e) => setTextEditor({ ...textEditor, value: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitTextAnnotation(textEditor.value); }
+                  else if (e.key === 'Escape') { e.preventDefault(); setTextEditor(null); }
+                }}
+                style={{
+                  background: 'transparent',
+                  color: annoColor,
+                  border: 'none',
+                  outline: 'none',
+                  font: `${annoFontSize}px ${annoFontFamily}`,
+                  minWidth: 160,
+                  padding: 0,
+                }}
+              />
+              <button
+                onClick={() => commitTextAnnotation(textEditor.value)}
+                title="Ekle (Enter)"
+                style={{ background: annoColor, color: '#000', border: 'none', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}
+              >OK</button>
+              <button
+                onClick={() => setTextEditor(null)}
+                title="İptal (Esc)"
+                style={{ background: 'transparent', color: '#fff', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 4, padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}
+              >✕</button>
+            </div>
+          )}
+
+          {activeSeries && (
             <div className="echo-transport">
-              <button onClick={() => seekFrame(frameIndex - 1)} title="Önceki frame">‹</button>
-              <button onClick={() => setPlaying((p) => !p)} title={playing ? 'Duraklat' : 'Oynat'}>
-                {playing ? '❚❚' : '►'}
-              </button>
-              <button onClick={() => seekFrame(frameIndex + 1)} title="Sonraki frame">›</button>
-              <input
-                type="range"
-                min={0}
-                max={totalFrames - 1}
-                value={frameIndex}
-                onChange={(e) => seekFrame(Number(e.target.value))}
-              />
+              {seriesList.length > 1 && (
+                <button
+                  onClick={() => gotoSeries(-1)}
+                  disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === 0}
+                  title="Önceki seri (otomatik oynatır)"
+                >⏮</button>
+              )}
+              {totalFrames > 1 && <>
+                <button onClick={() => seekFrame(frameIndex - 1)} title="Önceki frame">‹</button>
+                <button onClick={() => setPlaying((p) => !p)} title={playing ? 'Duraklat' : 'Oynat'}>
+                  {playing ? '❚❚' : '►'}
+                </button>
+                <button onClick={() => seekFrame(frameIndex + 1)} title="Sonraki frame">›</button>
+              </>}
+              {seriesList.length > 1 && (
+                <button
+                  onClick={() => gotoSeries(1)}
+                  disabled={seriesList.findIndex((s) => s.seriesInstanceUID === activeSeries.seriesInstanceUID) === seriesList.length - 1}
+                  title="Sonraki seri (otomatik oynatır)"
+                >⏭</button>
+              )}
+              {totalFrames > 1 && (
+                <input
+                  type="range"
+                  min={0}
+                  max={totalFrames - 1}
+                  value={frameIndex}
+                  onChange={(e) => seekFrame(Number(e.target.value))}
+                />
+              )}
               <span>{frameIndex + 1} / {totalFrames}</span>
-              <span style={{ opacity: 0.7 }}>FPS</span>
-              <input
-                type="number"
-                min={1}
-                max={60}
-                value={fps}
-                onChange={(e) => setFps(Math.max(1, Math.min(60, Number(e.target.value) || 24)))}
-                style={{ width: 50, padding: '2px 4px', background: 'transparent', color: '#fff', border: '1px solid rgba(255,255,255,0.25)', borderRadius: 4 }}
-              />
+              {totalFrames > 1 && <>
+                <span style={{ opacity: 0.7 }}>FPS</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={fps}
+                  onChange={(e) => setFps(Math.max(1, Math.min(60, Number(e.target.value) || 24)))}
+                  style={{ width: 50, padding: '2px 4px', background: 'transparent', color: '#fff', border: '1px solid rgba(255,255,255,0.25)', borderRadius: 4 }}
+                />
+              </>}
+              <button onClick={saveCurrentFrameImage} title="Resim Kaydet (PNG)">📷</button>
+              {totalFrames > 1 && (
+                <button onClick={saveCineAsVideo} disabled={!!exporting} title="Video Kaydet (WebM)">
+                  {exporting ? '⏺' : '🎞'}
+                </button>
+              )}
+              <button onClick={saveSeriesAsDicom} title="DICOM İndir (.dcm)">💾</button>
+              {exporting && <span style={{ fontSize: 11, opacity: 0.8 }}>{exporting}</span>}
             </div>
           )}
         </div>
@@ -724,34 +1507,48 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
           <h2>Araçlar &amp; Ölçümler</h2>
 
           <section className="echo-measure-section">
-            <h3>Görüntüleme</h3>
-            <div className="echo-tool-grid">
-              <button className={`echo-tool-btn ${activeTool === 'pan' ? 'active' : ''}`} onClick={() => setActiveTool('pan')}>Pan</button>
-              <button className={`echo-tool-btn ${activeTool === 'zoom' ? 'active' : ''}`} onClick={() => setActiveTool('zoom')}>Zoom</button>
-              <button className={`echo-tool-btn ${activeTool === 'window' ? 'active' : ''}`} onClick={() => setActiveTool('window')}>W/L drag</button>
-              <button className={`echo-tool-btn ${activeTool === 'probe' ? 'active' : ''}`} onClick={() => setActiveTool('probe')}>Probe</button>
-            </div>
-            <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--nd-text-dim)', textTransform: 'uppercase', letterSpacing: '.08em' }}>W/L Ön-ayar</div>
-            <div className="echo-tool-grid" style={{ marginTop: 6 }}>
+            <h3>W/L Ön-Ayar</h3>
+            <div className="echo-tool-grid cols-3">
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(-600, 1500)}>Akciğer</button>
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(50, 400)}>Mediasten</button>
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(500, 2000)}>Kemik</button>
               <button className="echo-tool-btn" onClick={() => applyVoiPreset(40, 400)}>Abdomen</button>
-              <button className="echo-tool-btn" onClick={() => applyVoiPreset(50, 350)}>Yumuşak Doku</button>
+              <button className="echo-tool-btn" onClick={() => applyVoiPreset(50, 350)}>Yumuşak</button>
               <button className="echo-tool-btn" onClick={() => resetVoi()}>Otomatik</button>
             </div>
-            <div className="echo-tool-grid" style={{ marginTop: 8 }}>
-              <button className="echo-tool-btn" onClick={() => rotateBy(90)}>Rotate 90°</button>
-              <button className="echo-tool-btn" onClick={() => rotateBy(-90)}>Rotate -90°</button>
-              <button className="echo-tool-btn" onClick={() => rotateBy(1)}>Rot +1°</button>
-              <button className="echo-tool-btn" onClick={() => rotateBy(-1)}>Rot -1°</button>
-              <button className="echo-tool-btn" onClick={() => mirrorActor('x')}>Mirror ↔</button>
-              <button className="echo-tool-btn" onClick={() => mirrorActor('y')}>Mirror ↕</button>
-              <button className="echo-tool-btn" onClick={() => stretchActor('x', 1.05)}>Genişlet ↔</button>
-              <button className="echo-tool-btn" onClick={() => stretchActor('x', 1 / 1.05)}>Daralt ↔</button>
-              <button className="echo-tool-btn" onClick={() => stretchActor('y', 1.05)}>Uzat ↕</button>
-              <button className="echo-tool-btn" onClick={() => stretchActor('y', 1 / 1.05)}>Kısalt ↕</button>
-              <button className="echo-tool-btn" onClick={() => {
+          </section>
+
+          <section className="echo-measure-section">
+            <h3>Görüntüleme</h3>
+            <div className="echo-tool-grid cols-2">
+              <button className={`echo-tool-btn ${activeTool === 'pan' ? 'active' : ''}`} onClick={() => setActiveTool('pan')}>Pan</button>
+              <button className={`echo-tool-btn ${activeTool === 'zoom' ? 'active' : ''}`} onClick={() => setActiveTool('zoom')}>Zoom</button>
+            </div>
+
+            <div className="echo-sub-label">Rotasyon</div>
+            <div className="echo-tool-grid cols-4">
+              <button className="echo-tool-btn" onClick={() => rotateBy(90)}>⟳ 90°</button>
+              <button className="echo-tool-btn" onClick={() => rotateBy(-90)}>⟲ 90°</button>
+              <button className="echo-tool-btn" onClick={() => rotateBy(1)}>⟳ 1°</button>
+              <button className="echo-tool-btn" onClick={() => rotateBy(-1)}>⟲ 1°</button>
+            </div>
+
+            <div className="echo-sub-label">Mirror</div>
+            <div className="echo-tool-grid cols-2">
+              <button className="echo-tool-btn" onClick={() => mirrorActor('x')}>↔</button>
+              <button className="echo-tool-btn" onClick={() => mirrorActor('y')}>↕</button>
+            </div>
+
+            <div className="echo-sub-label">Genişlet / Daralt</div>
+            <div className="echo-tool-grid cols-4">
+              <button className="echo-tool-btn" onClick={() => stretchActor('x', 1.05)}>↔ +</button>
+              <button className="echo-tool-btn" onClick={() => stretchActor('x', 1 / 1.05)}>↔ −</button>
+              <button className="echo-tool-btn" onClick={() => stretchActor('y', 1.05)}>↕ +</button>
+              <button className="echo-tool-btn" onClick={() => stretchActor('y', 1 / 1.05)}>↕ −</button>
+            </div>
+
+            <div className="echo-tool-grid" style={{ marginTop: 6 }}>
+              <button className="echo-tool-btn" style={{ gridColumn: '1 / -1' }} onClick={() => {
                 const eng = renderingEngineRef.current;
                 const vp = eng?.getViewport(VIEWPORT_ID) as any;
                 if (!vp) return;
@@ -772,6 +1569,92 @@ export default function EchoApp({ onBack, initialFiles, title }: EchoAppProps = 
               <button className={`echo-tool-btn ${activeTool === 'area' ? 'active' : ''}`} onClick={() => setActiveTool('area')}>Alan (ROI)</button>
               <button className="echo-tool-btn" onClick={clearMeasurements}>Temizle</button>
             </div>
+          </section>
+
+          <section className="echo-measure-section">
+            <h3>Annotation</h3>
+            <div className="echo-tool-grid cols-3">
+              <button className={`echo-tool-btn ${activeTool === 'arrow' ? 'active' : ''}`} onClick={() => setActiveTool('arrow')} title="Sürükleyerek ok çiz">Ok</button>
+              <button className={`echo-tool-btn ${activeTool === 'text' ? 'active' : ''}`} onClick={() => setActiveTool('text')} title="Sürükle, bırak, yazı gir">Yazı</button>
+              <button className="echo-tool-btn" onClick={clearMeasurements} title="Tüm annotation/ölçüm temizle">Temizle</button>
+            </div>
+            <div className="echo-sub-label">Renk</div>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {['#ffd43b', '#ff6b6b', '#51cf66', '#4dabf7', '#ffffff', '#000000'].map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setAnnoColor(c)}
+                  title={c}
+                  style={{
+                    width: 22, height: 22, borderRadius: 4, border: annoColor === c ? '2px solid var(--nd-accent)' : '1px solid var(--nd-border)',
+                    background: c, cursor: 'pointer', padding: 0,
+                  }}
+                />
+              ))}
+              <input
+                type="color"
+                value={annoColor}
+                onChange={(e) => setAnnoColor(e.target.value)}
+                style={{ width: 26, height: 22, border: '1px solid var(--nd-border)', borderRadius: 4, padding: 0, background: 'transparent', cursor: 'pointer' }}
+              />
+            </div>
+            <div className="echo-sub-label">Yazı</div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <select
+                value={annoFontFamily}
+                onChange={(e) => setAnnoFontFamily(e.target.value)}
+                style={{ flex: 1, padding: '3px 5px', background: 'var(--nd-bg)', color: 'var(--nd-text)', border: '1px solid var(--nd-border)', borderRadius: 4, fontSize: 11 }}
+              >
+                <option value="Inter, system-ui, sans-serif">Sans</option>
+                <option value="Georgia, serif">Serif</option>
+                <option value="ui-monospace, Menlo, monospace">Mono</option>
+              </select>
+              <input
+                type="number"
+                min={8}
+                max={48}
+                value={annoFontSize}
+                onChange={(e) => setAnnoFontSize(Math.max(8, Math.min(48, Number(e.target.value) || 14)))}
+                style={{ width: 46, padding: '3px 5px', background: 'var(--nd-bg)', color: 'var(--nd-text)', border: '1px solid var(--nd-border)', borderRadius: 4, fontSize: 11 }}
+                title="Punto"
+              />
+            </div>
+          </section>
+
+          <section className="echo-measure-section">
+            <h3>Doppler / Spektral</h3>
+            <div className="echo-tool-grid cols-2">
+              <button
+                className={`echo-tool-btn ${activeTool === 'spectral' ? 'active' : ''}`}
+                onClick={() => setActiveTool('spectral')}
+                title="Yatay crosshair; hız (m/s) ve Bernoulli basıncı (mmHg)"
+              >Crosshair</button>
+              <button
+                className="echo-tool-btn"
+                onClick={() => {
+                  setDopplerCal(null);
+                  setReadouts([]);
+                  setCalibStage('baseline');
+                  calibBaselineRef.current = null;
+                  setActiveTool('spectral');
+                }}
+                title="Manuel kalibrasyon: 1) baseline satırı · 2) bilinen hız satırı"
+              >Kalibre Et</button>
+            </div>
+            <div style={{ fontSize: 10.5, color: 'var(--nd-text-dim)', marginTop: 6, lineHeight: 1.4 }}>
+              {dopplerCal
+                ? <>
+                    <div><b>{(dopplerCal.mpsPerImagePx * 100).toFixed(3)}</b> m/s / 100px · <i>{dopplerCal.source === 'auto' ? 'DICOM auto' : 'manuel'}</i></div>
+                  </>
+                : <div style={{ color: '#ff6b6b' }}>Kalibrasyon yok</div>}
+              {calibStage === 'baseline' && <div style={{ color: '#ffd43b' }}>1/2: Baseline (0 m/s) satırına tıkla</div>}
+              {calibStage === 'ref' && <div style={{ color: '#ffd43b' }}>2/2: Bilinen hız satırına tıkla</div>}
+            </div>
+            {readouts.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <button className="echo-tool-btn" style={{ width: '100%' }} onClick={() => setReadouts([])}>Ölçümleri Temizle ({readouts.length})</button>
+              </div>
+            )}
           </section>
 
           <section className="echo-measure-section">

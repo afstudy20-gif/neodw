@@ -99,3 +99,20 @@ export function destroyToolGroup(): void {
     toolGroup = undefined;
   }
 }
+
+export function addViewportToToolGroup(renderingEngineId: string, viewportId: string): void {
+  if (!toolGroup) return;
+  try { toolGroup.addViewport(viewportId, renderingEngineId); } catch { /* already added */ }
+}
+
+export function removeViewportFromToolGroup(viewportId: string): void {
+  if (!toolGroup) return;
+  try {
+    const anyGroup = toolGroup as unknown as { removeViewports?: (ids: string[]) => void };
+    anyGroup.removeViewports?.([viewportId]);
+  } catch { /* ignore */ }
+}
+
+export function isToolGroupReady(): boolean {
+  return toolGroup != null;
+}

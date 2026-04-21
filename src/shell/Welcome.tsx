@@ -420,13 +420,6 @@ function ModalityCard({ m, t, onLaunch }: { m: ModeDef; t: (k: string) => string
         <button className="nd-mode-btn" onClick={() => onLaunch(m.route, 'files')}>
           <IcoFile s={14}/> {t('btn.files')}
         </button>
-        <button
-          className="nd-mode-btn"
-          style={{ marginLeft: 'auto', background: 'transparent', border: 0, color: 'var(--nd-ink-2)' }}
-          onClick={() => onLaunch(m.route, 'empty')}
-        >
-          {t('btn.empty')}
-        </button>
       </div>
     </div>
   );
@@ -483,17 +476,23 @@ function GlobalActivityPanel({ stats }: { stats: any }) {
 /* ── mapmyvisitors embed ────────────────────────── */
 function MapMyVisitors() {
   useEffect(() => {
-    const ID = 'mapmyvisitors';
-    if (document.getElementById(ID)) return;
+    const slot = document.getElementById('mapmyvisitors-slot');
+    if (!slot) return;
+    if (document.getElementById('mapmyvisitors')) return;
+    // MapMyVisitors injects its widget at the script's DOM position.
+    // Script MUST live inside the slot div — putting it on document.body
+    // renders the map at the page tail (often invisible). Also set
+    // crossorigin to satisfy any future CORS/CORP requirements.
     const s = document.createElement('script');
     s.type = 'text/javascript';
-    s.id = ID;
+    s.id = 'mapmyvisitors';
     s.async = true;
-    s.src = '//mapmyvisitors.com/map.js?d=mKLyIjWT577bDc9kAESkC_hHaxcXtAD5mKvhZGFApHQ&cl=ffffff&w=a';
-    document.body.appendChild(s);
-    return () => { /* keep script; remove would cancel analytics */ };
+    s.crossOrigin = 'anonymous';
+    s.src = 'https://mapmyvisitors.com/map.js?d=mKLyIjWT577bDc9kAESkC_hHaxcXtAD5mKvhZGFApHQ&cl=ffffff&w=a';
+    s.onerror = () => { console.warn('[MapMyVisitors] blocked (likely COEP require-corp). Relax nginx headers on landing route or load in iframe.'); };
+    slot.appendChild(s);
   }, []);
-  return <div id="mapmyvisitors-slot" style={{ marginTop: 40, minHeight: 280, opacity: 0.9 }} />;
+  return <div id="mapmyvisitors-slot" style={{ marginTop: 40, minHeight: 280, opacity: 0.9, display: 'flex', justifyContent: 'center', alignItems: 'center' }} />;
 }
 
 /* ── World map ──────────────────────────────────── */

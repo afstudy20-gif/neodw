@@ -137,6 +137,36 @@
   inset: 0;
 }
 
+/* Cornerstone's ArrowAnnotate/Length etc. can unset cursor on the internal
+   viewport element, leaving no pointer visible. Force a crosshair for
+   annotation/measurement modes. */
+.echo-viewport[data-tool="arrow"],
+.echo-viewport[data-tool="arrow"] .viewport-element,
+.echo-viewport[data-tool="arrow"] canvas,
+.echo-viewport[data-tool="arrow"] svg,
+.echo-viewport[data-tool="text"],
+.echo-viewport[data-tool="text"] .viewport-element,
+.echo-viewport[data-tool="text"] canvas,
+.echo-viewport[data-tool="text"] svg,
+.echo-viewport[data-tool="length"],
+.echo-viewport[data-tool="length"] .viewport-element,
+.echo-viewport[data-tool="length"] canvas,
+.echo-viewport[data-tool="length"] svg,
+.echo-viewport[data-tool="angle"],
+.echo-viewport[data-tool="angle"] .viewport-element,
+.echo-viewport[data-tool="angle"] canvas,
+.echo-viewport[data-tool="angle"] svg,
+.echo-viewport[data-tool="area"],
+.echo-viewport[data-tool="area"] .viewport-element,
+.echo-viewport[data-tool="area"] canvas,
+.echo-viewport[data-tool="area"] svg,
+.echo-viewport[data-tool="probe"],
+.echo-viewport[data-tool="probe"] .viewport-element,
+.echo-viewport[data-tool="probe"] canvas,
+.echo-viewport[data-tool="probe"] svg {
+  cursor: crosshair !important;
+}
+
 .echo-viewport canvas {
   image-rendering: auto !important;
   image-rendering: smooth !important;
@@ -151,13 +181,21 @@
   background: rgba(0, 0, 0, 0.78);
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 999px;
-  padding: 10px 18px;
+  padding: 8px 14px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
   z-index: 5;
+  max-width: calc(100% - 40px);
+}
+
+.echo-transport button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .echo-transport button {
@@ -187,19 +225,19 @@
 .echo-measure-panel {
   border-left: 1px solid var(--nd-border);
   background: var(--nd-bg-elev);
-  padding: 18px;
+  padding: 10px;
   overflow-y: auto;
 }
 
 .echo-measure-panel h2 {
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 700;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 
 .echo-measure-section {
-  margin-bottom: 18px;
-  padding-bottom: 16px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--nd-border);
 }
 
@@ -208,30 +246,43 @@
 }
 
 .echo-measure-section h3 {
-  font-size: 12px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--nd-text-dim);
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   font-weight: 700;
 }
 
 .echo-tool-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 4px;
+}
+
+.echo-tool-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.echo-tool-grid.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+.echo-sub-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nd-text-dim);
+  margin: 6px 0 3px;
+  font-weight: 600;
 }
 
 .echo-tool-btn {
-  padding: 11px 12px;
-  border-radius: 8px;
+  padding: 5px 6px;
+  border-radius: 5px;
   background: var(--nd-bg);
   border: 1px solid var(--nd-border);
   color: var(--nd-text);
-  font-size: 13px;
+  font-size: 11px;
   cursor: pointer;
   text-align: center;
   font-weight: 600;
+  line-height: 1.2;
 }
 
 .echo-tool-btn:hover {
