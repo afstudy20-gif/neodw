@@ -492,11 +492,17 @@ export async function loadEchoFiles(files: File[]): Promise<EchoSeriesInfo[]> {
   }
   const map = new Map<string, Parsed[]>();
 
-  for (const file of files) {
+  // Parallel I/O: bounded concurrency keeps per-file side-effects (URL.createObjectURL,
+  // GE frame registration) order-free but file reads + DICOM parses run concurrently.
+  const echoConcurrency = Math.max(4, Math.min(16, navigator.hardwareConcurrency || 8));
+  type FileOutcome = { uid: string; entry: Parsed } | null;
+  const outcomes: FileOutcome[] = new Array(files.length).fill(null);
+
+  async function processFile(file: File, index: number) {
     const buf = await file.arrayBuffer();
     let bytes = new Uint8Array(buf);
     const meta = parseOne(bytes.buffer);
-    if (!meta) continue;
+    if (!meta) return;
 
     const geCine: GECineResult | null = meta.geCine;
     const geDetectedFlag = !!(globalThis as any).__echoGEPrivateCineDetected;
@@ -559,15 +565,39 @@ export async function loadEchoFiles(files: File[]): Promise<EchoSeriesInfo[]> {
 
     // Group per-file (SOP instance) — each cine clip is its own entry, not merged by series UID
     const uid = (meta as any).sopInstanceUID || `${meta.seriesInstanceUID}:${file.name}`;
-    if (!map.has(uid)) map.set(uid, []);
-    map.get(uid)!.push({
-      imageId: baseId,
-      imageIds,
-      meta,
-      hasGECineUndecoded: geDetectedFlag && !geCine,
-      geCineDecoded,
-      frameTimeMs,
-    });
+    outcomes[index] = {
+      uid,
+      entry: {
+        imageId: baseId,
+        imageIds,
+        meta,
+        hasGECineUndecoded: geDetectedFlag && !geCine,
+        geCineDecoded,
+        frameTimeMs,
+      },
+    };
+  }
+
+  // Concurrency pool.
+  let nextIdx = 0;
+  async function poolWorker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= files.length) return;
+      try {
+        await processFile(files[i], i);
+      } catch (err) {
+        console.warn(`[Echo] Failed to parse ${files[i].name}:`, err);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(echoConcurrency, files.length) }, poolWorker));
+
+  // Preserve original file order when building the map.
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    if (!map.has(outcome.uid)) map.set(outcome.uid, []);
+    map.get(outcome.uid)!.push(outcome.entry);
   }
 
   const out: EchoSeriesInfo[] = [];

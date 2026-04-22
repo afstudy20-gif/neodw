@@ -135,12 +135,15 @@ export function applyLinearInterpolation(viewport: cornerstone.Types.IViewport) 
   // 1. Level: Viewport properties
   try {
     if ('setProperties' in viewport) {
-      (viewport as any).setProperties({ interpolationType: cornerstone.Enums.InterpolationType.LINEAR });
+      (viewport as any).setProperties({
+        interpolationType: cornerstone.Enums.InterpolationType.LINEAR,
+      });
     }
   } catch {}
 
   // 2. Level: Deep Actor properties (VTK level)
-  // This is sometimes needed to force linear filtering on underlying textures
+  // Orthographic MPR viewports ignore sampleDistanceMultiplier, so the
+  // mapper itself must be tuned to avoid slice-step artifacts on oblique views.
   try {
     const actors = (viewport as any).getActors?.() ?? [];
     for (const entry of actors) {
@@ -150,6 +153,32 @@ export function applyLinearInterpolation(viewport: cornerstone.Types.IViewport) 
         prop.setInterpolationTypeToLinear();
       } else if (prop?.setInterpolationType) {
         prop.setInterpolationType(1); // 1 = Linear in VTK
+      }
+
+      // Force finer sampling on the underlying VTK Volume Mapper
+      const mapper = actor?.getMapper?.();
+      if (mapper?.setSampleDistance) {
+        const imageData = mapper.getInputData?.();
+        if (imageData?.getSpacing) {
+          const spacing = imageData
+            .getSpacing()
+            .filter((value: number) => Number.isFinite(value) && value > 0);
+
+          if (spacing.length > 0) {
+            const minSpacing = Math.min(...spacing);
+            const defaultSampleDistance =
+              spacing.reduce((sum: number, value: number) => sum + value, 0) /
+              (spacing.length * 2);
+            const targetSampleDistance = Math.min(defaultSampleDistance, minSpacing * 0.5);
+
+            mapper.setAutoAdjustSampleDistances?.(false);
+            mapper.setImageSampleDistance?.(1);
+            mapper.setMaximumSamplesPerRay?.(
+              Math.max(4000, mapper.getMaximumSamplesPerRay?.() ?? 0)
+            );
+            mapper.setSampleDistance(targetSampleDistance);
+          }
+        }
       }
     }
   } catch {}

@@ -25,6 +25,7 @@ import { computePatientFFR, type PatientFFRResult } from '../coronary/ffr';
 import { resampleCenterline } from '../coronary/ffr/arcResample';
 import { autoDetectStenosis } from '../shared/autoStenosis';
 import { computePatientCAC, type CACPatientResult } from '../coronary/cac/cacScoring';
+import { useAutoCoronary } from '../autoCoronary/useAutoCoronary';
 
 const VIEWPORT_IDS = ['axial', 'sagittal', 'coronal'] as const;
 const BRANCH_PRESETS = ['D1', 'D2', 'OM1', 'OM2', 'PDA', 'PLV', 'RI', 'Diag', 'Septal'];
@@ -67,6 +68,7 @@ interface Props {
   renderingEngineId: string;
   volumeId: string;
   series: DicomSeriesInfo | null;
+  seriesList: DicomSeriesInfo[];
   resetToken: number;
 }
 
@@ -97,7 +99,7 @@ function pickColor(index: number): string {
   return CENTERLINE_COLORS[index % CENTERLINE_COLORS.length];
 }
 
-export function CoronaryWorkspace({ renderingEngineId, volumeId, series, resetToken }: Props) {
+export function CoronaryWorkspace({ renderingEngineId, volumeId, series, seriesList, resetToken }: Props) {
   const sessionRef = useRef(new CoronaryMeasurementSession());
   const overlayRef = useRef<CoronaryCenterlineOverlay | null>(null);
   const session = sessionRef.current;
@@ -153,6 +155,31 @@ export function CoronaryWorkspace({ renderingEngineId, volumeId, series, resetTo
       setStatus(message);
     }
     setVersion((value) => value + 1);
+  }
+
+  const autoCoronary = useAutoCoronary({
+    seriesList,
+    activeSeries: series,
+    volumeId,
+    session,
+    onApplied: (result) => {
+      const first = result.centerlines[0];
+      if (first) setActiveCenterlineId(first.id);
+      const stageMsg = result.warnings[0]
+        ? ` (${result.warnings[0]})`
+        : '';
+      forceRefresh(
+        `Auto Coronary completed: ${result.centerlines.length} centerline(s) generated. Review and edit as needed.${stageMsg}`
+      );
+    },
+  });
+
+  async function handleAutoCoronary() {
+    setStatus('Auto Coronary: selecting best series…');
+    const result = await autoCoronary.run();
+    if (!result && autoCoronary.error) {
+      setStatus(`Auto Coronary failed: ${autoCoronary.error}`);
+    }
   }
 
   function runAutoDetectStenosis() {
@@ -793,6 +820,23 @@ export function CoronaryWorkspace({ renderingEngineId, volumeId, series, resetTo
                 <h3>Workflow Assistant</h3>
                 <span className="mini-copy">{series?.seriesDescription || 'No active series'}</span>
               </div>
+
+              <div className="section-label">Auto Coronary (beta)</div>
+              <div className="action-grid">
+                <button
+                  className="primary-btn small"
+                  onClick={handleAutoCoronary}
+                  disabled={autoCoronary.busy || !series || seriesList.length === 0}
+                  title="Automatically select the best CCTA phase and generate LM/LAD/LCx/RCA centerlines"
+                >
+                  {autoCoronary.busy
+                    ? `Auto Coronary… ${autoCoronary.stage || ''}`
+                    : 'Auto Coronary'}
+                </button>
+              </div>
+              {autoCoronary.error && (
+                <div className="instruction-box error">{autoCoronary.error}</div>
+              )}
 
               <div className="section-label">Main Vessels</div>
               <div className="vessel-tabs">

@@ -282,6 +282,7 @@ textarea {
   border-radius: 999px;
   background: color-mix(in oklch, var(--nd-ink) 4%, transparent);
   color: var(--text);
+  flex-shrink: 0; /* Prevent pill from being crushed by long titles */
 }
 
 .panel-pill.research {
@@ -347,10 +348,12 @@ textarea {
   flex: 1;
 }
 .series-card.with-thumb strong,
-.series-card.with-thumb span {
+.series-card.with-thumb span:not(.panel-pill):not(.series-modality) {
+  /* Allow word wrapping for full series name visibility */
+  display: -webkit-box;
+  -webkit-line-clamp: 2; /* max 2 lines */
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .ccta-series-thumb {
   width: 56px;

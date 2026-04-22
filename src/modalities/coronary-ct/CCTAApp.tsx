@@ -437,12 +437,6 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}
-          <button className="secondary-btn" onClick={openFilePicker} disabled={isLoading}>
-            Open Files
-          </button>
-          <button className="secondary-btn" onClick={openFolderPicker} disabled={isLoading}>
-            Open Folder
-          </button>
           <ThemeToggleBtn />
         </div>
       </header>
@@ -465,9 +459,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
         </div>
       )}
 
-      {!activeSeries && !isLoading ? (
-        <DicomDropzone onFilesLoaded={handleFilesLoaded} isLoading={isLoading} />
-      ) : !activeSeries ? null : (
+      {!activeSeries ? null : (
         <main className="workspace-layout">
           <SeriesPanel
             seriesList={seriesList}
@@ -521,6 +513,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
             renderingEngineId={RENDERING_ENGINE_ID}
             volumeId={VOLUME_ID}
             series={activeSeries}
+            seriesList={seriesList}
             resetToken={workspaceResetToken}
           />
         </main>

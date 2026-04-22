@@ -66,13 +66,13 @@ function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
   return result;
 }
 
-function parseMetadata(arrayBuffer: ArrayBuffer): Record<string, string> {
+function parseMetadata(byteArray: Uint8Array): Record<string, string> {
   const parserAny = dicomParser as any;
-  const byteArray = new Uint8Array(arrayBuffer);
   let dataSet: any;
 
+  // Primary path: full parse with untilTag so pixel data (largest element) is skipped.
   try {
-    dataSet = parserAny.parseDicom(byteArray);
+    dataSet = parserAny.parseDicom(byteArray, { untilTag: 'x7fe00010' });
   } catch {
     try {
       const byteStream = new parserAny.ByteStream(parserAny.littleEndianByteArrayParser, byteArray, 0);
@@ -108,6 +108,10 @@ function parseMetadata(arrayBuffer: ArrayBuffer): Record<string, string> {
     instanceNumber: getString('x00200013'),
     sliceLocation: getString('x00201041'),
     imagePositionPatient: getString('x00200032'),
+    acquisitionNumber: getString('x00200012'),
+    temporalPositionIdentifier: getString('x00200100'),
+    acquisitionTime: getString('x00080032'),
+    imageOrientationPatient: getString('x00200037'),
   };
 }
 
@@ -139,112 +143,250 @@ function getSlicePosition(metadata: Record<string, string>): number {
   return 0;
 }
 
+export function getSeriesPreferenceScore(series: Pick<DicomSeriesInfo, 'seriesDescription' | 'numImages'>): number {
+  const desc = (series.seriesDescription || '').toLowerCase();
+  let score = series.numImages;
+
+  // Coronary CTA MPR should strongly prefer the diastolic temporal phase
+  // instead of derived BONE/LUNG/scout reconstructions.
+  const isTemporal = /\btemporal\b|\bphase\b/.test(desc);
+  const has75Phase =
+    /\b75(?:\.0)?\s*%/.test(desc) ||
+    /\b75\s*phase\b/.test(desc) ||
+    /\bphase\s*75\b/.test(desc) ||
+    /\b75\b/.test(desc);
+  const hasMidDiastolicPhase =
+    /\b(?:70|75|80)(?:\.0)?\s*%/.test(desc) ||
+    /\b(?:70|75|80)\b/.test(desc);
+
+  if (isTemporal && has75Phase) {
+    score += 10000;
+  } else if (isTemporal && hasMidDiastolicPhase) {
+    score += 7000;
+  } else if (isTemporal) {
+    score += 3500;
+  }
+
+  if (/\bangi[oo]\b|\bcta\b|\bcor\b|\bcardiac\b/.test(desc)) {
+    score += 1200;
+  }
+
+  if (/\bbone\b|\blung\b|\bscout\b|\bsmart score\b|\bsmart prep\b|\bcalcium\b/.test(desc)) {
+    score -= 9000;
+  }
+
+  if (/\bsegment\b|\bthin\b|\b0\.625\b/.test(desc)) {
+    score -= 1200;
+  }
+
+  return score;
+}
+
 export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> {
   const seriesMap = new Map<string, ParsedFile[]>();
   let parseFailCount = 0;
 
-  for (const file of files) {
-    const arrayBuffer = await file.arrayBuffer();
-    const byteArray = new Uint8Array(arrayBuffer);
-    const needsWrapper = !hasPart10Header(byteArray);
+  // Parallel I/O: bounded concurrency so huge studies don't OOM, but all CPU-bound
+  // parsing runs concurrently with file reads.
+  const ioConcurrency = Math.max(4, Math.min(32, navigator.hardwareConcurrency || 8));
+  const parsed: Array<{ imageId: string; metadata: Record<string, string> } | null> = new Array(files.length).fill(null);
 
-    let metadata: Record<string, string>;
+  async function processFile(file: File, index: number) {
     try {
-      metadata = parseMetadata(arrayBuffer);
+      const arrayBuffer = await file.arrayBuffer();
+      const byteArray = new Uint8Array(arrayBuffer);
+      const needsWrapper = !hasPart10Header(byteArray);
+      const metadata = parseMetadata(byteArray);
+
+      let fileToLoad = file;
+      if (needsWrapper) {
+        // wrapWithPart10Header already returns a fresh Uint8Array; no extra copy needed.
+        const wrapped = wrapWithPart10Header(byteArray);
+        fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
+      }
+
+      const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
+      parsed[index] = { imageId, metadata };
     } catch (error) {
       parseFailCount += 1;
       if (parseFailCount <= 3) {
         console.warn(`[DICOM] Failed to parse ${file.name}:`, error);
       }
-      continue;
     }
+  }
 
-    let fileToLoad = file;
-    if (needsWrapper) {
-      const wrapped = wrapWithPart10Header(byteArray);
-      const wrappedCopy = new Uint8Array(wrapped.length);
-      wrappedCopy.set(wrapped);
-      fileToLoad = new File([wrappedCopy.buffer], file.name, { type: 'application/dicom' });
+  // Simple concurrency pool.
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const idx = next++;
+      if (idx >= files.length) return;
+      await processFile(files[idx], idx);
     }
+  }
+  await Promise.all(Array.from({ length: Math.min(ioConcurrency, files.length) }, worker));
 
-    const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
-    const seriesUid = metadata.seriesInstanceUID || 'unknown';
-
+  for (const entry of parsed) {
+    if (!entry) continue;
+    const seriesUid = entry.metadata.seriesInstanceUID || 'unknown';
     if (!seriesMap.has(seriesUid)) {
       seriesMap.set(seriesUid, []);
     }
-
-    seriesMap.get(seriesUid)?.push({ imageId, metadata });
+    seriesMap.get(seriesUid)!.push(entry);
   }
 
   const seriesList: DicomSeriesInfo[] = [];
 
   for (const [seriesInstanceUID, filesList] of seriesMap) {
-    // 1. Sort strictly by ascending Z position using ImagePositionPatient
-    filesList.sort((lhs, rhs) => getSlicePosition(lhs.metadata) - getSlicePosition(rhs.metadata));
+    // Strategy:
+    //  1. Group by acquisition identity (orientation + AcquisitionTime + AcquisitionNumber +
+    //     TemporalPositionIdentifier). Different heartbeats / kernels / phases differ on at
+    //     least one of these tags in every vendor we've seen.
+    //  2. Within each group: sort by InstanceNumber (stable per acquisition), then walk
+    //     forward and start a new pass whenever Z direction reverses or a duplicate Z occurs.
+    //  3. Among all resulting passes, pick the one with the most slices that also has
+    //     uniform spacing (≥90% of consecutive deltas match modal spacing within tolerance).
+    function acqKey(m: Record<string, string>): string {
+      return [
+        m.imageOrientationPatient || '',
+        m.acquisitionTime || '',
+        m.acquisitionNumber || '',
+        m.temporalPositionIdentifier || '',
+      ].join('|');
+    }
 
-    // 2. Separate interleaved phases and discard step-and-shoot redundant slices
-    // We group slices into multiple "passes".
-    const passes: typeof filesList[] = [];
-    const Z_TOLERANCE = 0.05; // 0.05mm minimum slice spacing
-
+    const acqGroups = new Map<string, typeof filesList>();
     for (const file of filesList) {
-      const z = getSlicePosition(file.metadata);
-      let placed = false;
+      const key = acqKey(file.metadata);
+      if (!acqGroups.has(key)) acqGroups.set(key, []);
+      acqGroups.get(key)!.push(file);
+    }
 
-      for (const pass of passes) {
-        if (pass.length === 0) {
-          pass.push(file);
-          placed = true;
-          break;
+    function instanceNumber(m: Record<string, string>): number {
+      const n = Number.parseFloat(m.instanceNumber || '');
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    const passes: typeof filesList[] = [];
+    for (const group of acqGroups.values()) {
+      // Sort by InstanceNumber (scanner's native acquisition order within this phase).
+      group.sort((a, b) => instanceNumber(a.metadata) - instanceNumber(b.metadata));
+      // Walk and split whenever Z direction flips or Z stalls (indicates a new pass).
+      let current: typeof filesList = [];
+      let lastZ: number | null = null;
+      let direction: 0 | 1 | -1 = 0;
+      for (const file of group) {
+        const z = getSlicePosition(file.metadata);
+        if (current.length === 0 || lastZ === null) {
+          current.push(file);
+          lastZ = z;
+          continue;
         }
-        const lastZ = getSlicePosition(pass[pass.length - 1].metadata);
-        if (z - lastZ > Z_TOLERANCE) {
-          pass.push(file);
-          placed = true;
-          break;
+        const dz = z - lastZ;
+        const absDz = Math.abs(dz);
+        if (absDz < 1e-3) {
+          // Duplicate Z → new pass.
+          passes.push(current);
+          current = [file];
+          lastZ = z;
+          direction = 0;
+          continue;
         }
+        const newDir: 1 | -1 = dz > 0 ? 1 : -1;
+        if (direction !== 0 && newDir !== direction) {
+          passes.push(current);
+          current = [file];
+          lastZ = z;
+          direction = 0;
+          continue;
+        }
+        current.push(file);
+        lastZ = z;
+        direction = newDir;
       }
+      if (current.length > 0) passes.push(current);
+    }
 
-      if (!placed) {
-        passes.push([file]);
+    // Normalise passes so Z increases within each (sagittal/coronal MPR expects ascending Z).
+    for (const pass of passes) {
+      if (pass.length >= 2) {
+        const first = getSlicePosition(pass[0].metadata);
+        const last = getSlicePosition(pass[pass.length - 1].metadata);
+        if (last < first) pass.reverse();
       }
     }
 
-    // A real sub-volume should have a similar number of slices to the main pass.
-    // Step-and-shoot boundaries usually generate a pass with just 1 or 2 slices.
-    const maxSlices = Math.max(...passes.map(p => p.length));
-    const validPasses = passes.filter(p => p.length >= maxSlices * 0.4); // At least 40% of max
+    // Keep filesList in Z-sorted form for UI numImages display.
+    filesList.sort((lhs, rhs) => getSlicePosition(lhs.metadata) - getSlicePosition(rhs.metadata));
 
-    for (let passIdx = 0; passIdx < validPasses.length; passIdx++) {
-      const parsedFiles = validPasses[passIdx];
-      const first = parsedFiles[0]?.metadata ?? {};
-
-      let desc = first.seriesDescription || 'Unknown Series';
-      // Append pass info if we found multiple interleaved phases
-      if (validPasses.length > 1) {
-        // Try to identify it using Trigger Time or Phase
-        const phaseMarker = first.temporalPosition || first.triggerTime || first.acquisitionNumber;
-        if (phaseMarker) {
-          desc = `${desc} (Phase/Acq: ${phaseMarker})`;
-        } else {
-          desc = `${desc} (Sub-volume ${passIdx + 1})`;
-        }
+    function measureUniformity(pass: typeof filesList): { score: number; spacing: number } {
+      const n = pass.length;
+      if (n < 3) return { score: 0, spacing: 0 };
+      // Cache positions once; compute diffs + histogram in single pass.
+      const positions = new Float64Array(n);
+      for (let i = 0; i < n; i += 1) positions[i] = getSlicePosition(pass[i].metadata);
+      const diffCount = n - 1;
+      const diffs = new Float64Array(diffCount);
+      const bins = new Map<number, number>();
+      let bestKey = 0;
+      let bestCount = 0;
+      for (let i = 0; i < diffCount; i += 1) {
+        const d = positions[i + 1] - positions[i];
+        diffs[i] = d;
+        const key = Math.round(d * 1000);
+        const next = (bins.get(key) ?? 0) + 1;
+        bins.set(key, next);
+        if (next > bestCount) { bestCount = next; bestKey = key; }
       }
+      const spacing = bestKey / 1000;
+      if (spacing === 0) return { score: 0, spacing: 0 };
+      const tol = Math.abs(spacing) * 0.1;
+      let matches = 0;
+      for (let i = 0; i < diffCount; i += 1) if (Math.abs(diffs[i] - spacing) <= tol) matches += 1;
+      return { score: matches / diffCount, spacing };
+    }
+
+    // Score passes: prefer long + uniformly-spaced.
+    const measured = passes.map((pass) => ({ pass, ...measureUniformity(pass) }));
+    let scored = measured
+      .filter((entry) => entry.pass.length >= 10 && entry.score >= 0.9)
+      .sort((a, b) => b.pass.length - a.pass.length);
+    if (scored.length === 0) {
+      // Fallback: largest pass (older data without AcquisitionTime/Number tags).
+      scored = measured
+        .filter((entry) => entry.pass.length >= 2)
+        .sort((a, b) => b.pass.length - a.pass.length);
+    }
+
+    if (scored.length > 0) {
+      const primaryPass = scored[0].pass;
+      const first = primaryPass[0]?.metadata ?? {};
 
       seriesList.push({
-        seriesInstanceUID: validPasses.length > 1 ? `${seriesInstanceUID}_pass${passIdx}` : seriesInstanceUID,
-        seriesDescription: desc,
+        seriesInstanceUID: seriesInstanceUID,
+        seriesDescription: first.seriesDescription || 'Unknown Series',
         modality: first.modality || 'Unknown',
-        numImages: parsedFiles.length,
-        imageIds: parsedFiles.map((entry) => entry.imageId),
+        numImages: filesList.length, // Display the true physical length for UI matching
+        imageIds: primaryPass.map((entry) => entry.imageId), // Only load geometrically contiguous slices
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
       });
     }
   }
 
-  seriesList.sort((lhs, rhs) => rhs.numImages - lhs.numImages);
+  seriesList.sort((lhs, rhs) => {
+    const scoreDelta = getSeriesPreferenceScore(rhs) - getSeriesPreferenceScore(lhs);
+    if (scoreDelta !== 0) {
+      return scoreDelta;
+    }
+
+    const imageDelta = rhs.numImages - lhs.numImages;
+    if (imageDelta !== 0) {
+      return imageDelta;
+    }
+
+    return lhs.seriesDescription.localeCompare(rhs.seriesDescription);
+  });
   console.log(
     `[DICOM] Loaded ${files.length} files, parsed ${files.length - parseFailCount}, failed ${parseFailCount}`
   );
@@ -254,7 +396,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
 async function preloadAllImages(
   imageIds: string[],
-  concurrency = 12,
+  concurrency = Math.max(8, Math.min(32, (navigator.hardwareConcurrency || 8) * 2)),
   onProgress?: (loaded: number, total: number) => void
 ): Promise<void> {
   let loaded = 0;
@@ -297,7 +439,7 @@ export async function createVolume(
   imageIds: string[],
   onProgress?: (loaded: number, total: number) => void
 ): Promise<cornerstone.Types.IImageVolume> {
-  await preloadAllImages(imageIds, 12, onProgress);
+  await preloadAllImages(imageIds, undefined, onProgress);
 
   let volume: cornerstone.Types.IImageVolume;
   try {

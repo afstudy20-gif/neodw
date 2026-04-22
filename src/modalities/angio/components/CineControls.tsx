@@ -149,16 +149,7 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
           title={isPlaying ? 'Duraklat (Space)' : 'Başlat (Space)'}
           aria-label={isPlaying ? 'Pause' : 'Play'}
         >
-          {isPlaying ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <rect x="6" y="5" width="4" height="14" rx="1" />
-              <rect x="14" y="5" width="4" height="14" rx="1" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <path d="M8 5v14l11-7z" />
-            </svg>
-          )}
+          {isPlaying ? '❚❚' : '►'}
         </button>
         <button
           className="cine-btn"

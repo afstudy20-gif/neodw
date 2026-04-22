@@ -169,11 +169,17 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
     const engine = renderingEngineRef.current;
     if (!engine) return;
 
+    const priorSeries = activeSeries;
     setActiveSeries(series);
     setIsLoading(true);
     setLoadingProgress(`Loading images: 0/${series.imageIds.length}`);
     setQcaActive(false);
     qcaDispatch({ type: 'RESET' });
+    // Drop accumulated undo history — each QCA session holds a full contour
+    // snapshot (~10k+ points). Carrying 50 of these across multiple series
+    // playbacks chokes the heap and is the primary cause of the "3rd play
+    // then next series freezes" bug.
+    undoStackRef.current = [];
 
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
@@ -280,6 +286,24 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
       setError(`Failed to load series at ${stage}: ${seriesError.message}`);
     } finally {
       setIsLoading(false);
+      // Purge prior series image cache entries now that the new series has
+      // taken over. Skipping the previous series' imageIds keeps the
+      // fileManager blobs alive while evicting decoded pixel buffers from
+      // cornerstone's image cache. Without this, cine playback across 3+
+      // series accumulates hundreds of MB of decoded frames and the tab
+      // stalls on the next series switch.
+      if (priorSeries && priorSeries.seriesInstanceUID !== series.seriesInstanceUID) {
+        try {
+          const cache: any = cornerstone.cache;
+          for (const id of priorSeries.imageIds) {
+            const baseId = id.includes('&frame=') ? id.slice(0, id.indexOf('&frame=')) : id;
+            try { cache.removeImageLoadObject?.(id); } catch { /* ignore */ }
+            try { cache.removeImageLoadObject?.(baseId); } catch { /* ignore */ }
+          }
+        } catch (err) {
+          console.warn('[loadSeries] prior-cache purge failed', err);
+        }
+      }
     }
   }
 
@@ -372,8 +396,6 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}
-          <button className="secondary-btn" onClick={openFilePicker} disabled={isLoading}>Open Files</button>
-          <button className="secondary-btn" onClick={openFolderPicker} disabled={isLoading}>Open Folder</button>
           <ThemeToggleBtn />
         </div>
       </header>
@@ -395,9 +417,7 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
         </div>
       )}
 
-      {!activeSeries ? (
-        <DicomDropzone onFilesLoaded={handleFilesLoaded} isLoading={isLoading} />
-      ) : (
+      {!activeSeries ? null : (
         <main className={`workspace-layout ${qcaActive ? 'with-qca' : ''}`}>
           <SeriesPanel
             seriesList={seriesList}

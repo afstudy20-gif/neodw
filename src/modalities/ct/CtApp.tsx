@@ -658,18 +658,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           </div>
         )}
         <div className="header-actions">
-          <button className="open-btn" onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file'; input.multiple = true;
-            input.onchange = (e) => { const t = e.target as HTMLInputElement; if (t.files?.length) handleFilesLoaded(Array.from(t.files)); };
-            input.click();
-          }} disabled={isLoading}>Open Files</button>
-          <button className="open-btn" onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file'; input.webkitdirectory = true; input.multiple = true;
-            input.onchange = (e) => { const t = e.target as HTMLInputElement; if (t.files?.length) handleFilesLoaded(Array.from(t.files)); };
-            input.click();
-          }} disabled={isLoading}>Open Folder</button>
           <button
             className="open-btn"
             onClick={() => {
@@ -900,9 +888,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
         </div>
       )}
 
-      {!activeSeries ? (
-        <DicomDropzone onFilesLoaded={handleFilesLoaded} isLoading={isLoading} />
-      ) : (
+      {!activeSeries ? null : (
         <div className={`main-content ${viewportMode === 'tavi-oblique' || viewportMode === 'tavi-crosshair' ? 'main-content--tavi-oblique' : ''} ${viewportMode === 'volume-3d' ? 'main-content--volume-3d' : ''}`}>
           {viewportMode !== 'volume-3d' && seriesList.length > 0 && (
             <SeriesPanel seriesList={seriesList} activeSeriesUID={activeSeries?.seriesInstanceUID || ''} onSelectSeries={loadSeries} onOpen2DViewer={open2DViewer} isLoading={isLoading} />

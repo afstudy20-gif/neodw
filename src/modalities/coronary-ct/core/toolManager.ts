@@ -1,6 +1,7 @@
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { getToolNames } from './initCornerstone';
+import { applyLinearInterpolation } from '../../../shared/core/cornerstone';
 
 const MPR_TOOL_GROUP_ID = 'coronaryMprToolGroup';
 const MPR_VIEWPORT_IDS = ['axial', 'sagittal', 'coronal'];
@@ -40,8 +41,15 @@ export function setupToolGroups(renderingEngineId: string): void {
       return colors[viewportId] || 'rgb(200, 200, 200)';
     },
     getReferenceLineControllable: () => true,
-    getReferenceLineDraggableRotatable: () => true,
+    // Rotation-by-dragging-line disabled to stop accidental large jumps when
+    // user clicks near a reference line instead of the center handle.
+    getReferenceLineDraggableRotatable: () => false,
     getReferenceLineSlabThicknessControlsOn: () => false,
+    mobile: {
+      enabled: false,
+      opacity: 1,
+      handleRadius: 6,
+    },
   });
 
   // IMPORTANT: Add viewports BEFORE setting tools active.
@@ -320,6 +328,7 @@ export function attachAdvancedInteractions(renderingEngineId: string): () => voi
     const currentSlab = (viewport as any).getSlabThickness?.() || 0;
     const nextSlab = Math.max(0, currentSlab + delta * 2);
     viewport.setSlabThickness(nextSlab);
+    applyLinearInterpolation(viewport);
     viewport.render();
   };
 

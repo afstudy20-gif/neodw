@@ -90,12 +90,11 @@ interface ParsedFile {
 }
 
 // Parse metadata from a single DICOM file (supports both Part 10 and raw/headerless DICOM)
-function parseMetadata(arrayBuffer: ArrayBuffer): Record<string, string> {
-  const byteArray = new Uint8Array(arrayBuffer);
+function parseMetadata(byteArray: Uint8Array): Record<string, string> {
   let dataSet: dicomParser.DataSet;
   try {
-    // Try standard Part 10 (with DICM header) first
-    dataSet = dicomParser.parseDicom(byteArray);
+    // Primary path: stop before pixel data (largest element) for ~2-5× faster metadata parse.
+    dataSet = dicomParser.parseDicom(byteArray, { untilTag: 'x7fe00010' });
   } catch {
     // Fallback: parse as raw/implicit little-endian DICOM (no Part 10 header).
     // Many PACS exports and older scanners produce files without the DICM preamble.
@@ -144,39 +143,49 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   const seriesMap = new Map<string, ParsedFile[]>();
 
   let parseFailCount = 0;
-  for (const file of files) {
-    const arrayBuffer = await file.arrayBuffer();
-    const byteArray = new Uint8Array(arrayBuffer);
+  const ioConcurrency = Math.max(4, Math.min(32, navigator.hardwareConcurrency || 8));
+  const parsed: Array<{ imageId: string; metadata: Record<string, string>; seriesUID: string } | null> =
+    new Array(files.length).fill(null);
 
-    // Check if file needs a Part 10 header wrapper
-    const needsWrapper = !hasPart10Header(byteArray);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const index = next++;
+      if (index >= files.length) return;
+      const file = files[index];
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const byteArray = new Uint8Array(arrayBuffer);
+        const needsWrapper = !hasPart10Header(byteArray);
+        const metadata = parseMetadata(byteArray);
 
-    let metadata: Record<string, string>;
-    try {
-      metadata = parseMetadata(arrayBuffer);
-    } catch (e) {
-      parseFailCount++;
-      if (parseFailCount <= 3) {
-        console.warn(`[DICOM] Failed to parse ${file.name} (${file.size} bytes):`, e);
+        let fileToLoad: File = file;
+        if (needsWrapper) {
+          const wrapped = wrapWithPart10Header(byteArray);
+          fileToLoad = new File([wrapped], file.name, { type: 'application/dicom' });
+        }
+        const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
+        parsed[index] = {
+          imageId,
+          metadata,
+          seriesUID: metadata.seriesInstanceUID || 'unknown',
+        };
+      } catch (e) {
+        parseFailCount++;
+        if (parseFailCount <= 3) {
+          console.warn(`[DICOM] Failed to parse ${file.name} (${file.size} bytes):`, e);
+        }
       }
-      continue;
     }
+  }
+  await Promise.all(Array.from({ length: Math.min(ioConcurrency, files.length) }, worker));
 
-    // For headerless DICOM files, create a wrapped File with a proper Part 10 header
-    // so that Cornerstone's image loader can process them
-    let fileToLoad: File = file;
-    if (needsWrapper) {
-      const wrapped = wrapWithPart10Header(byteArray);
-      fileToLoad = new File([wrapped], file.name, { type: 'application/dicom' });
+  for (const entry of parsed) {
+    if (!entry) continue;
+    if (!seriesMap.has(entry.seriesUID)) {
+      seriesMap.set(entry.seriesUID, []);
     }
-
-    const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
-    const seriesUID = metadata.seriesInstanceUID || 'unknown';
-
-    if (!seriesMap.has(seriesUID)) {
-      seriesMap.set(seriesUID, []);
-    }
-    seriesMap.get(seriesUID)!.push({ imageId, metadata });
+    seriesMap.get(entry.seriesUID)!.push({ imageId: entry.imageId, metadata: entry.metadata });
   }
 
   const seriesList: DicomSeriesInfo[] = [];
@@ -212,26 +221,18 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     const maxSlices = Math.max(...passes.map(p => p.length));
     const validPasses = passes.filter(p => p.length >= maxSlices * 0.4); // At least 40% of max
 
-    for (let passIdx = 0; passIdx < validPasses.length; passIdx++) {
-      const parsedFiles = validPasses[passIdx];
-      const first = parsedFiles[0]?.metadata ?? {};
-
-      let desc = first.seriesDescription || 'Unknown Series';
-      if (validPasses.length > 1) {
-        const phaseMarker = first.temporalPosition || first.triggerTime || first.acquisitionNumber;
-        if (phaseMarker) {
-          desc = `${desc} (Phase/Acq: ${phaseMarker})`;
-        } else {
-          desc = `${desc} (Sub-volume ${passIdx + 1})`;
-        }
-      }
+    // We only keep the primary pass (the largest continuous volume) to prevent inflating the series count.
+    if (validPasses.length > 0) {
+      validPasses.sort((a, b) => b.length - a.length);
+      const primaryPass = validPasses[0];
+      const first = primaryPass[0]?.metadata ?? {};
 
       seriesList.push({
-        seriesInstanceUID: validPasses.length > 1 ? `${uid}_pass${passIdx}` : uid,
-        seriesDescription: desc,
+        seriesInstanceUID: uid,
+        seriesDescription: first.seriesDescription || 'Unknown Series',
         modality: first.modality || 'Unknown',
-        numImages: parsedFiles.length,
-        imageIds: parsedFiles.map((f) => f.imageId),
+        numImages: filesList.length, // Display the true physical length for UI matching
+        imageIds: primaryPass.map((f) => f.imageId), // Only load geometrically contiguous slices
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
         studyDate: first.studyDate || '',
@@ -269,7 +270,7 @@ function getSlicePosition(metadata: Record<string, string>): number {
 // Load images in parallel with concurrency limit to populate metadata cache
 async function preloadAllImages(
   imageIds: string[],
-  concurrency = 16,
+  concurrency = Math.max(8, Math.min(32, (navigator.hardwareConcurrency || 8) * 2)),
   onProgress?: (loaded: number, total: number) => void
 ): Promise<void> {
   let loaded = 0;

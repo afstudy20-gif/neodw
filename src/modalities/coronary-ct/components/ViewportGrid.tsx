@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
+import { applyLinearInterpolation } from '../../../shared/core/cornerstone';
 import {
   normalize as normalizeVec3,
   cross as crossVec3,
@@ -286,6 +287,7 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
         }
       }
 
+      applyLinearInterpolation(viewport);
       viewport.render();
       previousModesRef.current[viewportKey] = config.mode;
       return true;
