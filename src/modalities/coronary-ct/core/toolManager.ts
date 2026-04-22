@@ -41,15 +41,8 @@ export function setupToolGroups(renderingEngineId: string): void {
       return colors[viewportId] || 'rgb(200, 200, 200)';
     },
     getReferenceLineControllable: () => true,
-    // Rotation-by-dragging-line disabled to stop accidental large jumps when
-    // user clicks near a reference line instead of the center handle.
-    getReferenceLineDraggableRotatable: () => false,
+    getReferenceLineDraggableRotatable: () => true,
     getReferenceLineSlabThicknessControlsOn: () => false,
-    mobile: {
-      enabled: false,
-      opacity: 1,
-      handleRadius: 6,
-    },
   });
 
   // IMPORTANT: Add viewports BEFORE setting tools active.

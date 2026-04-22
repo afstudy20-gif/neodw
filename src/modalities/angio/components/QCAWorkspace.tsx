@@ -10,6 +10,7 @@ import {
 } from '../qca/QCATypes';
 import { calculateVFFR } from '../qca/ffrCalculation';
 import { useState } from 'react';
+import { FloatingPanel } from '../../../shared/components/FloatingPanel';
 
 interface Props {
   session: QCASession;
@@ -25,6 +26,7 @@ function fmt(val: number | undefined | null, digits = 2): string {
 export function QCAWorkspace({ session, dispatch, currentFrame, imageCount }: Props) {
   const [catheterSize, setCatheterSize] = useState<CatheterSize>('6F');
   const [aoPress, setAoPress] = useState(100);
+  const [reportFloat, setReportFloat] = useState(true);
 
   const calibrationDone = session.calibration != null && session.calibration.mmPerPixel > 0;
   const analysisDone = session.measurements != null;
@@ -360,10 +362,13 @@ export function QCAWorkspace({ session, dispatch, currentFrame, imageCount }: Pr
           </div>
         )}
 
-        {/* ── Step 4: Report ── */}
-        {session.step === 'report' && session.measurements && (
+        {/* ── Step 4: Report (floating/inline) ── */}
+        {session.step === 'report' && session.measurements && !reportFloat && (
           <div className="qca-section">
-            <h3>QCA Report</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3>QCA Report</h3>
+              <button className="ghost-btn small" onClick={() => setReportFloat(true)} title="Rapor kutusunu floating/pop-out yap">⧉ Pop-out</button>
+            </div>
 
             <div className="qca-report">
               <table className="qca-report-table">
@@ -421,6 +426,73 @@ export function QCAWorkspace({ session, dispatch, currentFrame, imageCount }: Pr
               </button>
             </div>
           </div>
+        )}
+
+        {session.step === 'report' && session.measurements && reportFloat && (
+          <>
+            <div className="qca-section">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3>QCA Report (floating)</h3>
+                <button className="ghost-btn small" onClick={() => setReportFloat(false)} title="Inline görünüme döndür">↲ Dock</button>
+              </div>
+              <p style={{ fontSize: 11, opacity: 0.7 }}>
+                Rapor floating panelde açık. Sürükle / boyutlandır / kapat için panel başlığını kullan.
+              </p>
+            </div>
+            <FloatingPanel
+              title="QCA Report"
+              onClose={() => setReportFloat(false)}
+              initialWidth={480}
+              initialHeight={560}
+              minWidth={340}
+              minHeight={320}
+            >
+              <div className="qca-section" style={{ padding: 12 }}>
+                <div className="qca-report">
+                  <table className="qca-report-table">
+                    <tbody>
+                      <tr><th colSpan={2}>Quantitative Coronary Analysis</th></tr>
+                      <tr><td>Diameter Stenosis</td><td>{fmt(session.measurements.diameterStenosis, 1)}%</td></tr>
+                      <tr><td>MLD</td><td>{fmt(session.measurements.mld)} mm</td></tr>
+                      <tr><td>Reference Diameter</td><td>{fmt(session.measurements.referenceDiameter)} mm</td></tr>
+                      <tr><td>Lesion Length</td><td>{fmt(session.measurements.lesionLength)} mm</td></tr>
+                      <tr><td>Area Stenosis</td><td>{fmt(session.measurements.areaStenosis, 1)}%</td></tr>
+                      <tr><td>DMax</td><td>{fmt(session.measurements.dMax)} mm</td></tr>
+                      <tr><td>Proximal Ref D</td><td>{fmt(session.measurements.proximalRefDiameter)} mm</td></tr>
+                      <tr><td>Distal Ref D</td><td>{fmt(session.measurements.distalRefDiameter)} mm</td></tr>
+                      <tr><td>Segment Length</td><td>{fmt(session.measurements.segmentLength)} mm</td></tr>
+                      {session.calibration && (
+                        <tr><td>Pixel Size</td><td>{session.calibration.mmPerPixel.toFixed(4)} mm/px</td></tr>
+                      )}
+                      {session.ffrResult && (
+                        <>
+                          <tr><th colSpan={2}>Angio-Derived FFR</th></tr>
+                          <tr><td>vFFR</td><td className={session.ffrResult.isSignificant ? 'danger' : 'success'}>{session.ffrResult.vffr.toFixed(2)}</td></tr>
+                          <tr><td>Aortic Pressure</td><td>{session.ffrResult.aoPress} mmHg</td></tr>
+                          <tr><td>Significance</td><td>{session.ffrResult.isSignificant ? 'Significant (≤ 0.80)' : 'Not significant (> 0.80)'}</td></tr>
+                        </>
+                      )}
+                    </tbody>
+                  </table>
+                  {session.contour && (
+                    <DiameterChart
+                      contour={session.contour}
+                      referenceDiameters={session.referenceDiameters}
+                      measurements={session.measurements}
+                      ffrResult={session.ffrResult}
+                      chartMode="diameter"
+                    />
+                  )}
+                </div>
+                <div className="qca-btn-row">
+                  <button className="ghost-btn" onClick={() => dispatch({ type: 'SET_STEP', step: 'analysis' })}>Back to Analysis</button>
+                  <button className="primary-btn small" onClick={() => window.print()}>Print</button>
+                  <button className="secondary-btn small" onClick={() => exportPNG()}>PNG</button>
+                  <button className="secondary-btn small" onClick={() => exportCSV(session)}>CSV</button>
+                </div>
+              </div>
+            </FloatingPanel>
+          </>
         )}
       </div>
     </aside>

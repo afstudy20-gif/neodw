@@ -23,6 +23,21 @@ interface ValveVisualization3DProps {
   /** Canvas size */
   width?: number;
   height?: number;
+  /** Mesh base color as 0-1 RGB triplet. Default vivid yellow. */
+  meshColor?: [number, number, number];
+}
+
+const MESH_COLOR_PRESETS: Array<{ name: string; rgb: [number, number, number] }> = [
+  { name: 'Vivid Yellow', rgb: [0.98, 0.88, 0.15] },
+  { name: 'Electric Cyan', rgb: [0.10, 0.85, 1.00] },
+  { name: 'Hot Magenta', rgb: [1.00, 0.25, 0.75] },
+  { name: 'Neon Lime', rgb: [0.55, 1.00, 0.25] },
+  { name: 'Vivid Orange', rgb: [1.00, 0.55, 0.10] },
+  { name: 'Aortic Blue', rgb: [0.35, 0.65, 1.00] },
+];
+
+function rgbToCss(rgb: [number, number, number], alpha: number): string {
+  return `rgba(${Math.round(rgb[0] * 255)}, ${Math.round(rgb[1] * 255)}, ${Math.round(rgb[2] * 255)}, ${alpha})`;
 }
 
 interface Vec3 { x: number; y: number; z: number }
@@ -45,11 +60,13 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
   valveHeight = 26,
   width: propWidth,
   height: propHeight = 280,
+  meshColor: propMeshColor,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [rotX, setRotX] = useState(-30); // degrees
+  const [meshColor, setMeshColor] = useState<[number, number, number]>(propMeshColor ?? [0.98, 0.88, 0.15]);
 
   // Auto-size to container width
   useEffect(() => {
@@ -176,7 +193,7 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
       }
 
       // Draw ring
-      ctx.strokeStyle = ring === 0 ? 'rgba(88,166,255,0.6)' : 'rgba(88,166,255,0.3)';
+      ctx.strokeStyle = rgbToCss(meshColor, ring === 0 ? 0.9 : 0.5);
       ctx.lineWidth = ring === 0 ? 2 : 1;
       ctx.beginPath();
       for (let i = 0; i < points2D.length; i++) {
@@ -186,7 +203,7 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
       ctx.stroke();
 
       // Fill with translucent color
-      ctx.fillStyle = ring === 0 ? 'rgba(88,166,255,0.08)' : 'rgba(88,166,255,0.04)';
+      ctx.fillStyle = rgbToCss(meshColor, ring === 0 ? 0.25 : 0.12);
       ctx.fill();
     }
 
@@ -211,7 +228,7 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
       const bp = project(bottom3d, cx, cy, scale);
       const tp = project(top3d, cx, cy, scale);
 
-      ctx.strokeStyle = 'rgba(88,166,255,0.2)';
+      ctx.strokeStyle = rgbToCss(meshColor, 0.4);
       ctx.lineWidth = 0.5;
       ctx.beginPath();
       ctx.moveTo(bp.x, bp.y);
@@ -262,7 +279,7 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
     }
 
   }, [annulusContour, annulusNormal, annulusCentroid, cuspLCC, cuspNCC, cuspRCC,
-    axisDirection, minDiameter, maxDiameter, valveHeight, width, height, rotX, rotZ, project]);
+    axisDirection, minDiameter, maxDiameter, valveHeight, width, height, rotX, rotZ, project, meshColor]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -293,6 +310,29 @@ export const ValveVisualization3D: React.FC<ValveVisualization3DProps> = ({
 
   return (
     <div className="valve-viz-3d" ref={containerRef} style={{ width: '100%' }}>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+        <span style={{ fontSize: 10, color: 'var(--text-soft)', alignSelf: 'center', marginRight: 4 }}>Mesh:</span>
+        {MESH_COLOR_PRESETS.map((p) => (
+          <button
+            key={p.name}
+            type="button"
+            onClick={() => setMeshColor(p.rgb)}
+            title={p.name}
+            style={{
+              width: 18,
+              height: 18,
+              borderRadius: 4,
+              cursor: 'pointer',
+              background: rgbToCss(p.rgb, 1),
+              border:
+                meshColor[0] === p.rgb[0] && meshColor[1] === p.rgb[1] && meshColor[2] === p.rgb[2]
+                  ? '2px solid var(--text)'
+                  : '1px solid var(--line)',
+              padding: 0,
+            }}
+          />
+        ))}
+      </div>
       <canvas
         ref={canvasRef}
         style={{ width, height, cursor: 'grab', borderRadius: 'var(--radius-md)' }}

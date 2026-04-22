@@ -423,7 +423,15 @@ export function AngioViewer({ renderingEngineId, viewportId, imageCount, qcaSess
     const unscale = (p: Point2D) => ({ x: p.x / scaleX, y: p.y / scaleY });
 
     try {
-      const contour = detectVesselContour(vpCanvas, scale(toCanvas(proxWp)), scale(toCanvas(distWp)), guideWps.map(w => scale(toCanvas(w))), mmPerPixel / scaleX, 50);
+      // Search radius in buffer-pixel space. For typical XA display at dpr=2
+      // and fine calibrations (~0.03-0.05 mm/px), a 5 mm half-width corresponds
+      // to ~100-150 buffer pixels. The previous default of 50 clipped the
+      // scanline before reaching the background and forced the edge detector
+      // to pick the dense contrast core instead of the vessel wall.
+      const radiusMm = 6; // expected max half-width of coronary vessel
+      const radiusBufferPx = Math.max(40, Math.round(radiusMm / (mmPerPixel / scaleX)));
+      const searchRadius = Math.min(200, radiusBufferPx);
+      const contour = detectVesselContour(vpCanvas, scale(toCanvas(proxWp)), scale(toCanvas(distWp)), guideWps.map(w => scale(toCanvas(w))), mmPerPixel / scaleX, searchRadius);
       const pxToWorld = (p: Point2D): WorldPoint => vp.canvasToWorld([unscale(p).x, unscale(p).y]) as WorldPoint;
       const wc: VesselContour = {
         centerline: contour.centerline.map(pxToWorld),

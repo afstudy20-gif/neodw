@@ -25,19 +25,19 @@ interface Props {
 
 export function Toolbar({ renderingEngineId, volumeId, onReset }: Props) {
   const [activeTool, setActiveToolState] = useState<ToolName>('WindowLevel');
-  const [layout, setLayout] = useState<'single' | 'mpr'>('single');
+  type CctaLayout = 'single' | 'mpr' | 'quad';
+  const [layout, setLayout] = useState<CctaLayout>('single');
 
   useEffect(() => {
     function handleLayoutState(event: Event) {
       const detail = (event as CustomEvent).detail;
-      if (detail === 'single' || detail === 'mpr') setLayout(detail);
+      if (detail === 'single' || detail === 'mpr' || detail === 'quad') setLayout(detail);
     }
     window.addEventListener('ccta:layout-state', handleLayoutState);
     return () => window.removeEventListener('ccta:layout-state', handleLayoutState);
   }, []);
 
-  function toggleLayout() {
-    const next = layout === 'mpr' ? 'single' : 'mpr';
+  function setCctaLayout(next: CctaLayout) {
     setLayout(next);
     window.dispatchEvent(new CustomEvent('ccta:layout', { detail: next }));
   }
@@ -159,19 +159,46 @@ export function Toolbar({ renderingEngineId, volumeId, onReset }: Props) {
         </button>
       </div>
       <WindowLevelPresets renderingEngineId={renderingEngineId} />
-      <button
-        type="button"
-        className={`layout-toggle toolbar-inline ${layout === 'mpr' ? 'on' : ''}`}
-        onClick={toggleLayout}
-        title={layout === 'mpr' ? 'Tek pencere (Axial)' : 'MPR üçlü görünüm (Axial + Sagittal + Coronal)'}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-          <rect x="3" y="3" width="8" height="18" rx="1"/>
-          <rect x="13" y="3" width="8" height="8" rx="1"/>
-          <rect x="13" y="13" width="8" height="8" rx="1"/>
-        </svg>
-        <span>{layout === 'mpr' ? 'Tek Pencere' : 'MPR'}</span>
-      </button>
+      <div className="layout-group">
+        <button
+          type="button"
+          className={`layout-toggle toolbar-inline ${layout === 'single' ? 'on' : ''}`}
+          onClick={() => setCctaLayout('single')}
+          title="Tek pencere (Axial)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <rect x="3" y="3" width="18" height="18" rx="1"/>
+          </svg>
+          <span>Tek</span>
+        </button>
+        <button
+          type="button"
+          className={`layout-toggle toolbar-inline ${layout === 'mpr' ? 'on' : ''}`}
+          onClick={() => setCctaLayout('mpr')}
+          title="MPR üçlü görünüm (Axial büyük + Sagittal/Coronal)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <rect x="3" y="3" width="8" height="18" rx="1"/>
+            <rect x="13" y="3" width="8" height="8" rx="1"/>
+            <rect x="13" y="13" width="8" height="8" rx="1"/>
+          </svg>
+          <span>MPR</span>
+        </button>
+        <button
+          type="button"
+          className={`layout-toggle toolbar-inline ${layout === 'quad' ? 'on' : ''}`}
+          onClick={() => setCctaLayout('quad')}
+          title="2x2 tanı görünümü (Axial + Sagittal + Coronal + 3D slot)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <rect x="3" y="3" width="8" height="8" rx="1"/>
+            <rect x="13" y="3" width="8" height="8" rx="1"/>
+            <rect x="3" y="13" width="8" height="8" rx="1"/>
+            <rect x="13" y="13" width="8" height="8" rx="1"/>
+          </svg>
+          <span>Quad</span>
+        </button>
+      </div>
       <button className="toolbar-btn danger" onClick={handleReset}>
         <span>Reset</span>
         <kbd>R</kbd>

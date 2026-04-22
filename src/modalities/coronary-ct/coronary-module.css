@@ -402,6 +402,21 @@ textarea {
   grid-template-rows: auto 1fr;
 }
 
+/* Quad 2x2 diagnostic layout — axial/sagittal/coronal + spare slot. */
+.viewport-grid.layout-quad {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.viewport-grid.layout-quad .viewport-shell[data-viewport="axial"] { grid-column: 1; grid-row: 1; }
+.viewport-grid.layout-quad .viewport-shell[data-viewport="sagittal"] { grid-column: 2; grid-row: 1; }
+.viewport-grid.layout-quad .viewport-shell[data-viewport="coronal"] { grid-column: 1; grid-row: 2; }
+
+.layout-group {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+}
+
 .layout-toggle {
   display: inline-flex;
   align-items: center;

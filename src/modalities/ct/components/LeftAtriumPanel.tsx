@@ -35,6 +35,11 @@ export interface LeftAtriumPanelHandle {
 }
 
 const MESH_PRESETS: Array<{ name: string; rgb: [number, number, number] }> = [
+  { name: 'Vivid Yellow', rgb: [0.98, 0.88, 0.15] },
+  { name: 'Electric Cyan', rgb: [0.10, 0.85, 1.00] },
+  { name: 'Hot Magenta', rgb: [1.00, 0.25, 0.75] },
+  { name: 'Neon Lime', rgb: [0.55, 1.00, 0.25] },
+  { name: 'Vivid Orange', rgb: [1.00, 0.55, 0.10] },
   { name: 'LA red',  rgb: [0.88, 0.32, 0.35] },
   { name: 'Pink',    rgb: [1.00, 0.60, 0.75] },
   { name: 'Gold',    rgb: [0.95, 0.78, 0.25] },
@@ -323,7 +328,7 @@ export const LeftAtriumPanel = forwardRef<LeftAtriumPanelHandle, Props>(function
   const [handleCount, setHandleCount] = useState(16);
   const [meshTick, setMeshTick] = useState(0);
   const [meshVisible, setMeshVisible] = useState(false);
-  const [meshColor, setMeshColor] = useState<[number, number, number]>([0.88, 0.32, 0.35]);
+  const [meshColor, setMeshColor] = useState<[number, number, number]>([0.98, 0.88, 0.15]);
   const [meshBg, setMeshBg] = useState<[number, number, number]>([0.07, 0.08, 0.10]);
   const [meshAlpha, setMeshAlpha] = useState(1.0);
   const [flipMV, setFlipMV] = useState(false);

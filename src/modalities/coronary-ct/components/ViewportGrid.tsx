@@ -103,7 +103,7 @@ function isVolumeViewport(
 
 export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
   const [expanded, setExpanded] = useState<ViewportName | null>(null);
-  const [layout, setLayout] = useState<'single' | 'mpr'>('single');
+  const [layout, setLayout] = useState<'single' | 'mpr' | 'quad'>('single');
   const [syncMode, setSyncMode] = useState<boolean>(true);
   const [presentations, setPresentations] = useState<Record<OrthoViewportName, ViewportPresentation>>(
     clonePresentations
@@ -137,7 +137,7 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
   useEffect(() => {
     function handleLayoutChange(event: Event) {
       const detail = (event as CustomEvent).detail;
-      if (detail === 'single' || detail === 'mpr') setLayout(detail);
+      if (detail === 'single' || detail === 'mpr' || detail === 'quad') setLayout(detail);
     }
     window.addEventListener('ccta:layout', handleLayoutChange);
     return () => window.removeEventListener('ccta:layout', handleLayoutChange);
@@ -472,6 +472,7 @@ export function ViewportGrid({ renderingEngineId, setupToken }: Props) {
         return (
           <section
             key={viewport.key}
+            data-viewport={viewport.key}
             className={`viewport-shell ${hidden ? 'hidden' : ''} ${
               expanded === viewport.key ? 'focused' : ''
             }`}

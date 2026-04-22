@@ -10,12 +10,26 @@ interface Preset {
 
 // Multipliers relative to image's natural min/max range.
 // window = range * windowFactor, level = range * levelFactor + min
-const PRESETS: Array<{ name: string; windowFactor: number; levelFactor: number; description: string }> = [
+interface PresetSpec {
+  name: string;
+  windowFactor: number;
+  levelFactor: number;
+  description: string;
+  invert?: boolean;
+}
+const PRESETS: PresetSpec[] = [
   { name: 'Default', windowFactor: 1.6, levelFactor: 0.5, description: 'Soft (low contrast)' },
   { name: 'Bright', windowFactor: 1.2, levelFactor: 0.38, description: 'Lighter image' },
   { name: 'Dark', windowFactor: 1.2, levelFactor: 0.62, description: 'Darker image' },
   { name: 'High Contrast', windowFactor: 0.6, levelFactor: 0.5, description: 'Sharp vessel edges' },
   { name: 'Low Contrast', windowFactor: 2.2, levelFactor: 0.5, description: 'Very soft' },
+  // Stent visualization — vendor equivalents: CLEARstent (Siemens),
+  // StentBoost Live (Philips), StentViz (GE). True product needs
+  // motion-compensated frame averaging which we cannot replicate from a
+  // single-frame WL preset, but narrow-window + contrast shift + invert
+  // gets strut mesh and balloon markers to pop on any static frame.
+  { name: 'Stent Enhance', windowFactor: 0.35, levelFactor: 0.55, description: 'Narrow window, stent struts pop' },
+  { name: 'Stent Invert', windowFactor: 0.4, levelFactor: 0.5, description: 'Inverted — dark struts → bright', invert: true },
 ];
 
 interface Props {
@@ -48,6 +62,7 @@ export function WindowLevelPresets({ renderingEngineId, viewportId }: Props) {
 
     if (preset.name === 'Default') {
       try { viewport.resetProperties?.(); } catch {}
+      try { viewport.setProperties({ invert: false }); } catch {}
       viewport.render();
       setActivePreset(preset.name);
       setIsOpen(false);
@@ -71,6 +86,7 @@ export function WindowLevelPresets({ renderingEngineId, viewportId }: Props) {
     const level = minP + range * preset.levelFactor;
     viewport.setProperties({
       voiRange: { lower: level - window / 2, upper: level + window / 2 },
+      invert: !!preset.invert,
     });
     viewport.render();
 

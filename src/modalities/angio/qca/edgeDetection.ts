@@ -133,10 +133,14 @@ function detectVesselEdges(
   bgLeft /= outerN;
   bgRight /= outerN;
 
-  // Edge threshold: 35% between vessel (dark) and background (bright)
-  // Lower threshold = tighter contour (closer to vessel lumen)
-  const threshLeft = minVal + (bgLeft - minVal) * 0.35;
-  const threshRight = minVal + (bgRight - minVal) * 0.35;
+  // Edge threshold: 50% between vessel (dark) and background (bright).
+  // Standard QCA uses the full-width-half-maximum (FWHM) rule — the edge is
+  // the 50% point between lumen minimum and adjacent background. Prior value
+  // of 0.35 clamped contour to the dense contrast core and underestimated
+  // diameters by ~2-3× on larger vessels (e.g. reported 1.4 mm for a real
+  // ~3.5 mm RCA segment).
+  const threshLeft = minVal + (bgLeft - minVal) * 0.5;
+  const threshRight = minVal + (bgRight - minVal) * 0.5;
 
   // Find left edge: going from minIdx toward left, find where brightness crosses threshold
   let leftEdge = minIdx;
