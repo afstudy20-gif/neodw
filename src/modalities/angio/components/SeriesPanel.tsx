@@ -82,7 +82,8 @@ function exportSeriesAsVideo(
   series: DicomSeriesInfo,
   fps: number,
   onProgress: (msg: string) => void,
-  signal: AbortSignal
+  signal: AbortSignal,
+  loops: number = 1
 ): Promise<void> {
   return new Promise(async (resolve, reject) => {
     const imageIds = series.imageIds;
@@ -130,15 +131,17 @@ function exportSeriesAsVideo(
     // so we don't accumulate setTimeout drift.
     const frameDurationMs = 1000 / fps;
     const tStart = performance.now();
-    for (let i = 0; i < imageIds.length; i++) {
+    const totalFrames = imageIds.length * Math.max(1, loops);
+    for (let g = 0; g < totalFrames; g++) {
       if (signal.aborted) {
         recorder.stop();
         reject(new Error('Cancelled'));
         return;
       }
-      onProgress(`Rec ${i + 1}/${imageIds.length}`);
+      const i = g % imageIds.length;
+      onProgress(`Rec ${g + 1}/${totalFrames}`);
       if (cached[i]) renderFrameToCanvas(ctx, cached[i], width, height);
-      const target = tStart + (i + 1) * frameDurationMs;
+      const target = tStart + (g + 1) * frameDurationMs;
       const remain = target - performance.now();
       if (remain > 0) await new Promise((r) => setTimeout(r, remain));
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -165,6 +168,104 @@ interface ContextMenuState {
   x: number;
   y: number;
   series: DicomSeriesInfo;
+}
+
+/** Export multiple series concatenated into a single WebM. */
+async function exportSeriesListAsSingleVideo(
+  seriesList: DicomSeriesInfo[],
+  fps: number,
+  onProgress: (msg: string) => void,
+  signal: AbortSignal,
+  loops: number = 1
+): Promise<void> {
+  if (seriesList.length === 0) return;
+
+  onProgress('Resolving canvas size…');
+  let maxW = 0;
+  let maxH = 0;
+  const firstImages: Array<any | null> = [];
+  for (const s of seriesList) {
+    if (signal.aborted) throw new Error('Cancelled');
+    try {
+      const img: any = await cornerstone.imageLoader.loadAndCacheImage(s.imageIds[0]);
+      firstImages.push(img);
+      if (img.width > maxW) maxW = img.width;
+      if (img.height > maxH) maxH = img.height;
+    } catch {
+      firstImages.push(null);
+    }
+  }
+  if (maxW === 0 || maxH === 0) return;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = maxW;
+  canvas.height = maxH;
+  const ctx = canvas.getContext('2d')!;
+
+  const stream = canvas.captureStream(60);
+  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9' : 'video/webm';
+  const pixels = maxW * maxH;
+  const bitrate = Math.min(20_000_000, Math.max(6_000_000, Math.round(pixels * 0.08)));
+  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+  const recDone = new Promise<void>((r) => { recorder.onstop = () => r(); });
+  recorder.start();
+
+  const frameDurationMs = 1000 / Math.max(1, fps);
+  const tStart = performance.now();
+  let globalIdx = 0;
+
+  for (let si = 0; si < seriesList.length; si += 1) {
+    const s = seriesList[si];
+    // Pre-cache this series' frames
+    const cached: any[] = [];
+    for (let i = 0; i < s.imageIds.length; i += 1) {
+      if (signal.aborted) { recorder.stop(); throw new Error('Cancelled'); }
+      onProgress(`Pre-load ${si + 1}/${seriesList.length} · ${i + 1}/${s.imageIds.length}`);
+      try { cached.push(await cornerstone.imageLoader.loadAndCacheImage(s.imageIds[i])); }
+      catch { cached.push(null); }
+    }
+    const perSeriesTotal = s.imageIds.length * Math.max(1, loops);
+    for (let g = 0; g < perSeriesTotal; g += 1) {
+      if (signal.aborted) { recorder.stop(); throw new Error('Cancelled'); }
+      const i = g % s.imageIds.length;
+      onProgress(`Rec ${si + 1}/${seriesList.length} · ${g + 1}/${perSeriesTotal}`);
+      const img = cached[i];
+      if (img) {
+        // Render into tmp canvas at native size, then letterbox onto main canvas.
+        const tmp = document.createElement('canvas');
+        tmp.width = img.width;
+        tmp.height = img.height;
+        const tctx = tmp.getContext('2d')!;
+        renderFrameToCanvas(tctx, img, img.width, img.height);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, maxW, maxH);
+        const scale = Math.min(maxW / img.width, maxH / img.height);
+        const dw = img.width * scale;
+        const dh = img.height * scale;
+        ctx.drawImage(tmp, (maxW - dw) / 2, (maxH - dh) / 2, dw, dh);
+      }
+      globalIdx += 1;
+      const target = tStart + globalIdx * frameDurationMs;
+      const remain = target - performance.now();
+      if (remain > 0) await new Promise((r) => setTimeout(r, remain));
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    }
+  }
+
+  recorder.stop();
+  await recDone;
+  if (signal.aborted) throw new Error('Cancelled');
+
+  const blob = new Blob(chunks, { type: 'video/webm' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `angio_${seriesList.length}series_${Date.now()}.webm`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 async function exportSeriesAsDicom(
@@ -222,10 +323,8 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     return () => document.removeEventListener('click', handler);
   }, [contextMenu]);
 
-  const handleExportVideo = useCallback(async (list: DicomSeriesInfo[]) => {
+  const handleExportVideoSeparate = useCallback(async (list: DicomSeriesInfo[], loops: number = 1) => {
     setContextMenu(null);
-    // Pause active cine playback so the capture canvas is not being fought
-    // over by the on-screen cine RAF loop while we record our offscreen one.
     window.dispatchEvent(new CustomEvent('angio:cine-pause'));
     setExporting(true);
     setExportMsg('Starting…');
@@ -235,12 +334,32 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
       for (let i = 0; i < list.length; i += 1) {
         const s = list[i];
         setExportMsg(`Series ${i + 1}/${list.length}: ${s.seriesDescription || 'video'}`);
-        await exportSeriesAsVideo(s, 30, setExportMsg, ac.signal);
+        await exportSeriesAsVideo(s, 15, setExportMsg, ac.signal, loops);
       }
       setExportMsg('Done!');
       await new Promise((r) => setTimeout(r, 400));
     } catch (err: any) {
       if (err.message !== 'Cancelled') console.error('Export failed:', err);
+    } finally {
+      setExporting(false);
+      setExportMsg('');
+      abortRef.current = null;
+    }
+  }, []);
+
+  const handleExportVideoMerged = useCallback(async (list: DicomSeriesInfo[], loops: number = 1) => {
+    setContextMenu(null);
+    window.dispatchEvent(new CustomEvent('angio:cine-pause'));
+    setExporting(true);
+    setExportMsg('Starting…');
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      await exportSeriesListAsSingleVideo(list, 15, setExportMsg, ac.signal, loops);
+      setExportMsg('Done!');
+      await new Promise((r) => setTimeout(r, 400));
+    } catch (err: any) {
+      if (err.message !== 'Cancelled') console.error('Merged export failed:', err);
     } finally {
       setExporting(false);
       setExportMsg('');
@@ -349,14 +468,28 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
           ? seriesList.filter((s) => selectedUIDs.has(s.seriesInstanceUID))
           : [contextMenu.series];
         const label = targets.length > 1 ? `${targets.length} seri` : (contextMenu.series.seriesDescription || 'seri');
+        const totalFrames = targets.reduce((a, s) => a + s.numImages, 0);
         return (
           <div
             className="series-context-menu"
             style={{ top: contextMenu.y, left: contextMenu.x }}
           >
             <div className="series-context-label">{label}</div>
-            <button onClick={() => handleExportVideo(targets)}>
-              Export Video ({targets.reduce((a, s) => a + s.numImages, 0)} frames)
+            {targets.length > 1 && (
+              <>
+                <button onClick={() => handleExportVideoMerged(targets, 1)}>
+                  Tek video olarak indir ({targets.length} seri · {totalFrames} frame)
+                </button>
+                <button onClick={() => handleExportVideoMerged(targets, 2)}>
+                  Tek video olarak indir (2 loop)
+                </button>
+              </>
+            )}
+            <button onClick={() => handleExportVideoSeparate(targets, 1)}>
+              {targets.length > 1 ? `Ayrı ayrı video indir (${targets.length}×)` : `Export Video (${totalFrames} frames)`}
+            </button>
+            <button onClick={() => handleExportVideoSeparate(targets, 2)}>
+              {targets.length > 1 ? `Ayrı ayrı video indir (${targets.length}×) (2 loop)` : `Export Video (2 loop)`}
             </button>
             <button onClick={() => handleExportDicom(targets)}>
               Export DICOM
