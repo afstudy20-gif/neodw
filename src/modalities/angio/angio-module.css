@@ -342,6 +342,21 @@ textarea {
   flex: 1;
 }
 
+.series-context-group {
+  padding: 4px 10px 2px;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  opacity: 0.6;
+  border-top: 1px solid var(--line, #333);
+  margin-top: 2px;
+}
+.series-context-group:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
 .series-context-label {
   padding: 6px 10px;
   font-size: 10.5px;

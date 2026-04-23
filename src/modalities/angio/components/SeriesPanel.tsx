@@ -323,7 +323,7 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     return () => document.removeEventListener('click', handler);
   }, [contextMenu]);
 
-  const handleExportVideoSeparate = useCallback(async (list: DicomSeriesInfo[], loops: number = 1) => {
+  const handleExportVideoSeparate = useCallback(async (list: DicomSeriesInfo[], loops: number = 1, fps: number = 15) => {
     setContextMenu(null);
     window.dispatchEvent(new CustomEvent('angio:cine-pause'));
     setExporting(true);
@@ -334,7 +334,7 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
       for (let i = 0; i < list.length; i += 1) {
         const s = list[i];
         setExportMsg(`Series ${i + 1}/${list.length}: ${s.seriesDescription || 'video'}`);
-        await exportSeriesAsVideo(s, 15, setExportMsg, ac.signal, loops);
+        await exportSeriesAsVideo(s, fps, setExportMsg, ac.signal, loops);
       }
       setExportMsg('Done!');
       await new Promise((r) => setTimeout(r, 400));
@@ -347,7 +347,7 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     }
   }, []);
 
-  const handleExportVideoMerged = useCallback(async (list: DicomSeriesInfo[], loops: number = 1) => {
+  const handleExportVideoMerged = useCallback(async (list: DicomSeriesInfo[], loops: number = 1, fps: number = 15) => {
     setContextMenu(null);
     window.dispatchEvent(new CustomEvent('angio:cine-pause'));
     setExporting(true);
@@ -355,7 +355,7 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     const ac = new AbortController();
     abortRef.current = ac;
     try {
-      await exportSeriesListAsSingleVideo(list, 15, setExportMsg, ac.signal, loops);
+      await exportSeriesListAsSingleVideo(list, fps, setExportMsg, ac.signal, loops);
       setExportMsg('Done!');
       await new Promise((r) => setTimeout(r, 400));
     } catch (err: any) {
@@ -477,20 +477,28 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
             <div className="series-context-label">{label}</div>
             {targets.length > 1 && (
               <>
-                <button onClick={() => handleExportVideoMerged(targets, 1)}>
-                  Tek video olarak indir ({targets.length} seri · {totalFrames} frame)
-                </button>
-                <button onClick={() => handleExportVideoMerged(targets, 2)}>
-                  Tek video olarak indir (2 loop)
-                </button>
+                <div className="series-context-group">Tek video ({targets.length} seri · {totalFrames} frame)</div>
+                <button onClick={() => handleExportVideoMerged(targets, 1, 15)}>1 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoMerged(targets, 1, 30)}>1 loop · 30 fps</button>
+                <button onClick={() => handleExportVideoMerged(targets, 2, 15)}>2 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoMerged(targets, 2, 30)}>2 loop · 30 fps</button>
+                <div className="series-context-group">Ayrı ayrı video ({targets.length}×)</div>
+                <button onClick={() => handleExportVideoSeparate(targets, 1, 15)}>1 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 1, 30)}>1 loop · 30 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 2, 15)}>2 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 2, 30)}>2 loop · 30 fps</button>
               </>
             )}
-            <button onClick={() => handleExportVideoSeparate(targets, 1)}>
-              {targets.length > 1 ? `Ayrı ayrı video indir (${targets.length}×)` : `Export Video (${totalFrames} frames)`}
-            </button>
-            <button onClick={() => handleExportVideoSeparate(targets, 2)}>
-              {targets.length > 1 ? `Ayrı ayrı video indir (${targets.length}×) (2 loop)` : `Export Video (2 loop)`}
-            </button>
+            {targets.length === 1 && (
+              <>
+                <div className="series-context-group">Export Video ({totalFrames} frames)</div>
+                <button onClick={() => handleExportVideoSeparate(targets, 1, 15)}>1 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 1, 30)}>1 loop · 30 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 2, 15)}>2 loop · 15 fps</button>
+                <button onClick={() => handleExportVideoSeparate(targets, 2, 30)}>2 loop · 30 fps</button>
+              </>
+            )}
+            <div className="series-context-group">Diğer</div>
             <button onClick={() => handleExportDicom(targets)}>
               Export DICOM
             </button>
