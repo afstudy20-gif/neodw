@@ -270,9 +270,9 @@ textarea {
 }
 
 .series-thumbnail {
-  width: 90px;
-  height: 90px;
-  border-radius: 10px;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
   background: #000;
   object-fit: cover;
   flex-shrink: 0;
@@ -282,20 +282,75 @@ textarea {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   text-align: left;
-  padding: 14px;
-  border-radius: 16px;
+  padding: 6px 8px;
+  border-radius: 8px;
   background: color-mix(in oklch, var(--nd-ink) 4%, transparent);
   border: 1px solid transparent;
   color: var(--text-soft);
+  position: relative;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.series-card.compact strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.series-card.compact .series-card-info.compact span {
+  font-size: 10.5px;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.series-card.compact .panel-pill {
+  font-size: 10px;
+  padding: 1px 5px;
+}
+.series-card.compact .series-modality {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.series-card .series-check {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--accent-2, #79c7ff);
+  z-index: 2;
+}
+
+.series-card.selected {
+  outline: 1.5px solid var(--accent-2, #79c7ff);
 }
 
 .series-card-info {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
+  flex: 1;
+}
+
+.series-context-label {
+  padding: 6px 10px;
+  font-size: 10.5px;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--line, #333);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
 }
 
 .series-card.active {

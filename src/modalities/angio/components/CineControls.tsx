@@ -49,25 +49,65 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
     const vp = engine?.getViewport(viewportId) as cornerstone.Types.IStackViewport | undefined;
     if (!vp) return;
-    setExporting('Recording…');
+
+    // Pause cine during recording so playback RAF does not fight with our
+    // deterministic frame-by-frame walk.
+    setIsPlaying(false);
+    setExporting('Preparing…');
+
     try {
-      const stream = (canvas as any).captureStream?.(fps) as MediaStream | undefined;
+      // Pre-cache every image so setImageIdIndex during recording is instant.
+      const getIds = (vp as any).getImageIds?.bind(vp) as (() => string[]) | undefined;
+      const ids = getIds?.() ?? [];
+      for (let i = 0; i < ids.length; i += 1) {
+        setExporting(`Pre-load ${i + 1}/${ids.length}`);
+        try { await cornerstone.imageLoader.loadAndCacheImage(ids[i]); } catch { /* skip */ }
+      }
+
+      // Higher capture framerate than playback FPS so MediaRecorder doesn't
+      // drop the first frame after each setImageIdIndex and the output stays
+      // smooth. Encoder targets the same bitrate regardless.
+      const captureFps = 60;
+      const stream = (canvas as any).captureStream?.(captureFps) as MediaStream | undefined;
       if (!stream) throw new Error('captureStream unavailable');
       const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
       const chunks: Blob[] = [];
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       const done = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
       recorder.start();
 
       const frameInterval = 1000 / Math.max(1, fps);
-      const startIdx = 0;
+
+      // Frame step helper: set image, force immediate render, wait two rAFs so
+      // the compositor has definitely pushed pixels to captureStream.
+      const element = vp.element as HTMLElement | undefined;
+      const waitFrames = () =>
+        new Promise<void>((r) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => r()))
+        );
+      const waitForRender = () =>
+        new Promise<void>((r) => {
+          if (!element) return r();
+          const evt = (cornerstone as any).Enums?.Events?.IMAGE_RENDERED ?? 'IMAGE_RENDERED';
+          const handler = () => { element.removeEventListener(evt, handler); r(); };
+          element.addEventListener(evt, handler, { once: true });
+          try { vp.render(); } catch { handler(); }
+        });
+
       for (let i = 0; i < imageCount; i += 1) {
-        vp.setImageIdIndex(startIdx + i);
         setExporting(`Recording ${i + 1}/${imageCount}`);
+        try { (vp as any).setImageIdIndex?.(i); } catch { /* skip */ }
+        await waitForRender();
+        await waitFrames();
+        // Hold the frame on screen long enough for the encoder to sample it
+        // at the requested playback FPS.
         await new Promise<void>((r) => setTimeout(r, frameInterval));
       }
+
+      // Final idle flush so the last frame gets captured before stop().
+      await waitFrames();
       recorder.stop();
       await done;
 

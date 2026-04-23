@@ -55,7 +55,7 @@ function SeriesThumbnail({ imageId }: { imageId: string }) {
     return () => { cancelled = true; };
   }, [imageId]);
 
-  return <canvas ref={canvasRef} className="series-thumbnail" width={128} height={128} />;
+  return <canvas ref={canvasRef} className="series-thumbnail" width={72} height={72} />;
 }
 
 function renderFrameToCanvas(ctx: CanvasRenderingContext2D, image: any, w: number, h: number) {
@@ -103,7 +103,11 @@ function exportSeriesAsVideo(
     const chunks: Blob[] = [];
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9' : 'video/webm';
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5_000_000 });
+    // Bitrate scales with native resolution so 1024x1024 XA doesn't look
+    // compressed. Caps at 20 Mbps.
+    const pixels = width * height;
+    const bitrate = Math.min(20_000_000, Math.max(6_000_000, Math.round(pixels * 0.08)));
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     const recDone = new Promise<void>((r) => { recorder.onstop = () => r(); });
     recorder.start();
@@ -145,11 +149,53 @@ interface ContextMenuState {
   series: DicomSeriesInfo;
 }
 
+async function exportSeriesAsDicom(
+  series: DicomSeriesInfo,
+  onProgress: (msg: string) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const baseIds = new Set<string>();
+  for (const id of series.imageIds) {
+    const idx = id.indexOf('&frame=');
+    baseIds.add(idx >= 0 ? id.slice(0, idx) : id);
+  }
+  let count = 0;
+  for (const baseId of baseIds) {
+    if (signal.aborted) throw new Error('Cancelled');
+    count += 1;
+    onProgress(`DICOM ${count}/${baseIds.size}`);
+    const url = baseId.startsWith('wadouri:') ? baseId.slice('wadouri:'.length) : baseId;
+    if (!url.startsWith('blob:') && !url.startsWith('http')) continue;
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      const name = (series.seriesDescription || 'angio').replace(/[^a-zA-Z0-9]/g, '_');
+      a.download = `${name}_${count}.dcm`;
+      a.click();
+      await new Promise((r) => setTimeout(r, 80));
+      URL.revokeObjectURL(blobUrl);
+    } catch { /* skip file */ }
+  }
+}
+
 export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoading }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState('');
+  const [selectedUIDs, setSelectedUIDs] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
+
+  function toggleSelected(uid: string) {
+    setSelectedUIDs((prev) => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid);
+      else next.add(uid);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -158,16 +204,43 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     return () => document.removeEventListener('click', handler);
   }, [contextMenu]);
 
-  const handleExport = useCallback(async (series: DicomSeriesInfo) => {
+  const handleExportVideo = useCallback(async (list: DicomSeriesInfo[]) => {
     setContextMenu(null);
     setExporting(true);
-    setExportMsg('Starting...');
+    setExportMsg('Starting…');
     const ac = new AbortController();
     abortRef.current = ac;
     try {
-      await exportSeriesAsVideo(series, 15, setExportMsg, ac.signal);
+      for (let i = 0; i < list.length; i += 1) {
+        const s = list[i];
+        setExportMsg(`Series ${i + 1}/${list.length}: ${s.seriesDescription || 'video'}`);
+        await exportSeriesAsVideo(s, 15, setExportMsg, ac.signal);
+      }
       setExportMsg('Done!');
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 400));
+    } catch (err: any) {
+      if (err.message !== 'Cancelled') console.error('Export failed:', err);
+    } finally {
+      setExporting(false);
+      setExportMsg('');
+      abortRef.current = null;
+    }
+  }, []);
+
+  const handleExportDicom = useCallback(async (list: DicomSeriesInfo[]) => {
+    setContextMenu(null);
+    setExporting(true);
+    setExportMsg('Starting…');
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      for (let i = 0; i < list.length; i += 1) {
+        const s = list[i];
+        setExportMsg(`Series ${i + 1}/${list.length}: DICOM export`);
+        await exportSeriesAsDicom(s, setExportMsg, ac.signal);
+      }
+      setExportMsg('Done!');
+      await new Promise((r) => setTimeout(r, 400));
     } catch (err: any) {
       if (err.message !== 'Cancelled') console.error('Export failed:', err);
     } finally {
@@ -188,49 +261,72 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
         <span className="panel-pill">{seriesList.length}</span>
       </div>
       <div className="series-list">
-        {seriesList.map((series) => (
-          <button
-            key={series.seriesInstanceUID}
-            className={`series-card ${series.seriesInstanceUID === activeSeriesUID ? 'active' : ''}`}
-            onClick={() => onSelectSeries(series)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({ x: e.clientX, y: e.clientY, series });
-            }}
-            draggable={!isLoading}
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-angio-series', series.seriesInstanceUID);
-              e.dataTransfer.effectAllowed = 'copy';
-            }}
-            disabled={isLoading}
-            title="Sürükle → ana ekrana bırak = ikinci viewport açılır"
-          >
-            <SeriesThumbnail imageId={series.thumbnailImageId} />
-            <div className="series-card-info">
-              <div className="series-card-top">
-                <span className="series-modality">{series.modality}</span>
-                <span className="panel-pill">{series.numImages}</span>
+        {seriesList.map((series) => {
+          const uid = series.seriesInstanceUID;
+          const checked = selectedUIDs.has(uid);
+          return (
+            <div
+              key={uid}
+              className={`series-card compact ${uid === activeSeriesUID ? 'active' : ''} ${checked ? 'selected' : ''}`}
+              onClick={() => onSelectSeries(series)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu({ x: e.clientX, y: e.clientY, series });
+              }}
+              draggable={!isLoading}
+              onDragStart={(e) => {
+                e.dataTransfer.setData('application/x-angio-series', uid);
+                e.dataTransfer.effectAllowed = 'copy';
+              }}
+              title="Sol tık: aç · Sağ tık: export menüsü · Checkbox: toplu seçim"
+              style={{ opacity: isLoading ? 0.5 : 1, cursor: isLoading ? 'not-allowed' : 'pointer' }}
+            >
+              <input
+                type="checkbox"
+                className="series-check"
+                checked={checked}
+                onClick={(e) => e.stopPropagation()}
+                onChange={() => toggleSelected(uid)}
+                title="Toplu export için seç"
+              />
+              <SeriesThumbnail imageId={series.thumbnailImageId} />
+              <div className="series-card-info compact">
+                <div className="series-card-top">
+                  <span className="series-modality">{series.modality}</span>
+                  <span className="panel-pill">{series.numImages}</span>
+                </div>
+                <strong>{series.seriesDescription || 'Unknown Series'}</strong>
+                <span>{series.studyDescription || 'Unknown Study'}</span>
               </div>
-              <strong>{series.seriesDescription || 'Unknown Series'}</strong>
-              <span>{series.studyDescription || 'Unknown Study'}</span>
             </div>
-          </button>
-        ))}
+          );
+        })}
       </div>
 
-      {contextMenu && (
-        <div
-          className="series-context-menu"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-        >
-          <button onClick={() => handleExport(contextMenu.series)}>
-            Export Video ({contextMenu.series.numImages} frames)
-          </button>
-          <button onClick={() => { onSelectSeries(contextMenu.series); setContextMenu(null); }}>
-            Load Series
-          </button>
-        </div>
-      )}
+      {contextMenu && (() => {
+        const targets = selectedUIDs.size > 0
+          ? seriesList.filter((s) => selectedUIDs.has(s.seriesInstanceUID))
+          : [contextMenu.series];
+        const label = targets.length > 1 ? `${targets.length} seri` : (contextMenu.series.seriesDescription || 'seri');
+        return (
+          <div
+            className="series-context-menu"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+          >
+            <div className="series-context-label">{label}</div>
+            <button onClick={() => handleExportVideo(targets)}>
+              Export Video ({targets.reduce((a, s) => a + s.numImages, 0)} frames)
+            </button>
+            <button onClick={() => handleExportDicom(targets)}>
+              Export DICOM
+            </button>
+            <button onClick={() => { onSelectSeries(contextMenu.series); setContextMenu(null); }}>
+              Load Series
+            </button>
+          </div>
+        );
+      })()}
 
       {exporting && (
         <div className="series-export-overlay">
