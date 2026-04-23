@@ -135,6 +135,10 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     instanceNumber: getString('x00200013'),
     sliceLocation: getString('x00201041'),
     imagePositionPatient: getString('x00200032'),
+    acquisitionNumber: getString('x00200012'),
+    temporalPositionIdentifier: getString('x00200100'),
+    acquisitionTime: getString('x00080032'),
+    imageOrientationPatient: getString('x00200037'),
   };
 }
 
@@ -191,48 +195,127 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   const seriesList: DicomSeriesInfo[] = [];
 
   for (const [uid, filesList] of seriesMap) {
-    // 1. Sort strictly by ascending Z position using ImagePositionPatient
-    filesList.sort((a, b) => getSlicePosition(a.metadata) - getSlicePosition(b.metadata));
+    // Multi-phase / step-and-shoot / multi-kernel dedup pipeline ported from
+    // coronary-ct loader. Mixed-phase slices at overlapping Z produce striping
+    // in MPR when cornerstone extrudes the volume with non-uniform spacing —
+    // we split by acquisition identity, then by InstanceNumber-ordered
+    // Z-direction runs, then keep the longest pass that has ≥90% uniform
+    // slice spacing.
 
-    // 2. Separate interleaved phases and discard step-and-shoot redundant slices
-    const passes: typeof filesList[] = [];
-    const Z_TOLERANCE = 0.05; // 0.05mm minimum slice spacing
+    function acqKey(m: Record<string, string>): string {
+      return [
+        m.imageOrientationPatient || '',
+        m.acquisitionTime || '',
+        m.acquisitionNumber || '',
+        m.temporalPositionIdentifier || '',
+      ].join('|');
+    }
 
+    const acqGroups = new Map<string, typeof filesList>();
     for (const file of filesList) {
-      const z = getSlicePosition(file.metadata);
-      let placed = false;
+      const key = acqKey(file.metadata);
+      if (!acqGroups.has(key)) acqGroups.set(key, []);
+      acqGroups.get(key)!.push(file);
+    }
 
-      for (const pass of passes) {
-        if (pass.length === 0) {
-          pass.push(file); placed = true; break;
+    function instanceNumber(m: Record<string, string>): number {
+      const n = parseFloat(m.instanceNumber || '');
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    const passes: typeof filesList[] = [];
+    for (const group of acqGroups.values()) {
+      group.sort((a, b) => instanceNumber(a.metadata) - instanceNumber(b.metadata));
+      let current: typeof filesList = [];
+      let lastZ: number | null = null;
+      let direction: 0 | 1 | -1 = 0;
+      for (const file of group) {
+        const z = getSlicePosition(file.metadata);
+        if (current.length === 0 || lastZ === null) {
+          current.push(file);
+          lastZ = z;
+          continue;
         }
-        const lastZ = getSlicePosition(pass[pass.length - 1].metadata);
-        if (z - lastZ > Z_TOLERANCE) {
-          pass.push(file); placed = true; break;
+        const dz = z - lastZ;
+        const absDz = Math.abs(dz);
+        if (absDz < 1e-3) {
+          passes.push(current);
+          current = [file];
+          lastZ = z;
+          direction = 0;
+          continue;
         }
+        const newDir: 1 | -1 = dz > 0 ? 1 : -1;
+        if (direction !== 0 && newDir !== direction) {
+          passes.push(current);
+          current = [file];
+          lastZ = z;
+          direction = 0;
+          continue;
+        }
+        current.push(file);
+        lastZ = z;
+        direction = newDir;
       }
+      if (current.length > 0) passes.push(current);
+    }
 
-      if (!placed) {
-        passes.push([file]);
+    for (const pass of passes) {
+      if (pass.length >= 2) {
+        const first = getSlicePosition(pass[0].metadata);
+        const last = getSlicePosition(pass[pass.length - 1].metadata);
+        if (last < first) pass.reverse();
       }
     }
 
-    // A real sub-volume should have a similar number of slices to the main pass.
-    const maxSlices = Math.max(...passes.map(p => p.length));
-    const validPasses = passes.filter(p => p.length >= maxSlices * 0.4); // At least 40% of max
+    filesList.sort((a, b) => getSlicePosition(a.metadata) - getSlicePosition(b.metadata));
 
-    // We only keep the primary pass (the largest continuous volume) to prevent inflating the series count.
-    if (validPasses.length > 0) {
-      validPasses.sort((a, b) => b.length - a.length);
-      const primaryPass = validPasses[0];
+    function measureUniformity(pass: typeof filesList): { score: number; spacing: number } {
+      const n = pass.length;
+      if (n < 3) return { score: 0, spacing: 0 };
+      const positions = new Float64Array(n);
+      for (let i = 0; i < n; i += 1) positions[i] = getSlicePosition(pass[i].metadata);
+      const diffCount = n - 1;
+      const diffs = new Float64Array(diffCount);
+      const bins = new Map<number, number>();
+      let bestKey = 0;
+      let bestCount = 0;
+      for (let i = 0; i < diffCount; i += 1) {
+        const d = positions[i + 1] - positions[i];
+        diffs[i] = d;
+        const key = Math.round(d * 1000);
+        const nextC = (bins.get(key) ?? 0) + 1;
+        bins.set(key, nextC);
+        if (nextC > bestCount) { bestCount = nextC; bestKey = key; }
+      }
+      const spacing = bestKey / 1000;
+      if (spacing === 0) return { score: 0, spacing: 0 };
+      const tol = Math.abs(spacing) * 0.1;
+      let matches = 0;
+      for (let i = 0; i < diffCount; i += 1) if (Math.abs(diffs[i] - spacing) <= tol) matches += 1;
+      return { score: matches / diffCount, spacing };
+    }
+
+    const measured = passes.map((pass) => ({ pass, ...measureUniformity(pass) }));
+    let scored = measured
+      .filter((entry) => entry.pass.length >= 10 && entry.score >= 0.9)
+      .sort((a, b) => b.pass.length - a.pass.length);
+    if (scored.length === 0) {
+      scored = measured
+        .filter((entry) => entry.pass.length >= 2)
+        .sort((a, b) => b.pass.length - a.pass.length);
+    }
+
+    if (scored.length > 0) {
+      const primaryPass = scored[0].pass;
       const first = primaryPass[0]?.metadata ?? {};
 
       seriesList.push({
         seriesInstanceUID: uid,
         seriesDescription: first.seriesDescription || 'Unknown Series',
         modality: first.modality || 'Unknown',
-        numImages: filesList.length, // Display the true physical length for UI matching
-        imageIds: primaryPass.map((f) => f.imageId), // Only load geometrically contiguous slices
+        numImages: filesList.length,
+        imageIds: primaryPass.map((f) => f.imageId),
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
         studyDate: first.studyDate || '',

@@ -223,7 +223,7 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
     return () => window.removeEventListener('keydown', handleKeydown);
   }, [goToFrame, imageCount]);
 
-  if (imageCount <= 1) return null;
+  const singleFrame = imageCount <= 1;
 
   return (
     <div className="cine-controls">
@@ -241,6 +241,7 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
         <button
           className="cine-btn"
           onClick={() => { setIsPlaying(false); goToFrame(currentIndex - 1); }}
+          disabled={singleFrame}
           title="Önceki frame (Sol ok)"
         >
           &#x23F4;
@@ -248,6 +249,7 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
         <button
           className={`cine-btn cine-play ${isPlaying ? 'active' : ''}`}
           onClick={() => setIsPlaying(!isPlaying)}
+          disabled={singleFrame}
           title={isPlaying ? 'Duraklat (Space)' : 'Başlat (Space)'}
           aria-label={isPlaying ? 'Pause' : 'Play'}
         >
@@ -256,6 +258,7 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
         <button
           className="cine-btn"
           onClick={() => { setIsPlaying(false); goToFrame(currentIndex + 1); }}
+          disabled={singleFrame}
           title="Sonraki frame (Sağ ok)"
         >
           &#x23F5;&#xFE0E;
@@ -343,17 +346,19 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
         {exporting && <span className="cine-export-status">{exporting}</span>}
       </div>
 
-      <input
-        type="range"
-        className="cine-slider"
-        min="0"
-        max={imageCount - 1}
-        value={currentIndex}
-        onChange={(e) => {
-          setIsPlaying(false);
-          goToFrame(Number(e.target.value));
-        }}
-      />
+      {!singleFrame && (
+        <input
+          type="range"
+          className="cine-slider"
+          min="0"
+          max={imageCount - 1}
+          value={currentIndex}
+          onChange={(e) => {
+            setIsPlaying(false);
+            goToFrame(Number(e.target.value));
+          }}
+        />
+      )}
     </div>
   );
 }
