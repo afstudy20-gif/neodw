@@ -99,12 +99,26 @@ function exportSeriesAsVideo(
     canvas.height = height;
     const ctx = canvas.getContext('2d')!;
 
-    const stream = canvas.captureStream(fps);
+    // Pre-cache every frame so the recording loop never stalls on I/O —
+    // that was causing the output video to drift slower than the requested
+    // FPS (each setTimeout was overshooting by the decode latency).
+    const cached: any[] = [];
+    for (let i = 0; i < imageIds.length; i++) {
+      if (signal.aborted) { reject(new Error('Cancelled')); return; }
+      onProgress(`Pre-load ${i + 1}/${imageIds.length}`);
+      try {
+        cached.push(await cornerstone.imageLoader.loadAndCacheImage(imageIds[i]));
+      } catch {
+        cached.push(null);
+      }
+    }
+
+    // captureStream at 60fps ensures MediaRecorder oversamples held frames
+    // instead of dropping them when the source canvas updates.
+    const stream = canvas.captureStream(60);
     const chunks: Blob[] = [];
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9' : 'video/webm';
-    // Bitrate scales with native resolution so 1024x1024 XA doesn't look
-    // compressed. Caps at 20 Mbps.
     const pixels = width * height;
     const bitrate = Math.min(20_000_000, Math.max(6_000_000, Math.round(pixels * 0.08)));
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
@@ -112,18 +126,22 @@ function exportSeriesAsVideo(
     const recDone = new Promise<void>((r) => { recorder.onstop = () => r(); });
     recorder.start();
 
+    // Deterministic timing: schedule each frame against performance.now
+    // so we don't accumulate setTimeout drift.
+    const frameDurationMs = 1000 / fps;
+    const tStart = performance.now();
     for (let i = 0; i < imageIds.length; i++) {
       if (signal.aborted) {
         recorder.stop();
         reject(new Error('Cancelled'));
         return;
       }
-      onProgress(`Frame ${i + 1}/${imageIds.length}`);
-      try {
-        const image: any = await cornerstone.imageLoader.loadAndCacheImage(imageIds[i]);
-        renderFrameToCanvas(ctx, image, width, height);
-      } catch { /* skip */ }
-      await new Promise((r) => setTimeout(r, 1000 / fps));
+      onProgress(`Rec ${i + 1}/${imageIds.length}`);
+      if (cached[i]) renderFrameToCanvas(ctx, cached[i], width, height);
+      const target = tStart + (i + 1) * frameDurationMs;
+      const remain = target - performance.now();
+      if (remain > 0) await new Promise((r) => setTimeout(r, remain));
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
     }
 
     recorder.stop();
@@ -206,6 +224,9 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
 
   const handleExportVideo = useCallback(async (list: DicomSeriesInfo[]) => {
     setContextMenu(null);
+    // Pause active cine playback so the capture canvas is not being fought
+    // over by the on-screen cine RAF loop while we record our offscreen one.
+    window.dispatchEvent(new CustomEvent('angio:cine-pause'));
     setExporting(true);
     setExportMsg('Starting…');
     const ac = new AbortController();
@@ -214,7 +235,7 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
       for (let i = 0; i < list.length; i += 1) {
         const s = list[i];
         setExportMsg(`Series ${i + 1}/${list.length}: ${s.seriesDescription || 'video'}`);
-        await exportSeriesAsVideo(s, 15, setExportMsg, ac.signal);
+        await exportSeriesAsVideo(s, 30, setExportMsg, ac.signal);
       }
       setExportMsg('Done!');
       await new Promise((r) => setTimeout(r, 400));
@@ -254,11 +275,30 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, isLoa
     abortRef.current?.abort();
   }, []);
 
+  const allSelected = seriesList.length > 0 && selectedUIDs.size === seriesList.length;
+  const someSelected = selectedUIDs.size > 0 && !allSelected;
+
+  function toggleAll() {
+    if (allSelected) setSelectedUIDs(new Set());
+    else setSelectedUIDs(new Set(seriesList.map((s) => s.seriesInstanceUID)));
+  }
+
   return (
     <aside className="series-panel">
       <div className="panel-header">
-        <span>Series</span>
-        <span className="panel-pill">{seriesList.length}</span>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 11 }}>
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => { if (el) el.indeterminate = someSelected; }}
+            onChange={toggleAll}
+            className="series-check"
+            style={{ position: 'static', width: 14, height: 14 }}
+            title="Tümünü seç / temizle"
+          />
+          <span>Series</span>
+        </label>
+        <span className="panel-pill">{selectedUIDs.size > 0 ? `${selectedUIDs.size}/${seriesList.length}` : seriesList.length}</span>
       </div>
       <div className="series-list">
         {seriesList.map((series) => {

@@ -79,9 +79,6 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
       recorder.start();
 
       const frameInterval = 1000 / Math.max(1, fps);
-
-      // Frame step helper: set image, force immediate render, wait two rAFs so
-      // the compositor has definitely pushed pixels to captureStream.
       const element = vp.element as HTMLElement | undefined;
       const waitFrames = () =>
         new Promise<void>((r) =>
@@ -96,14 +93,17 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
           try { vp.render(); } catch { handler(); }
         });
 
+      // Deterministic schedule: target time for frame i+1 = start + (i+1)*interval.
+      // Prevents setTimeout drift from decode latency stretching output video.
+      const tStart = performance.now();
       for (let i = 0; i < imageCount; i += 1) {
         setExporting(`Recording ${i + 1}/${imageCount}`);
         try { (vp as any).setImageIdIndex?.(i); } catch { /* skip */ }
         await waitForRender();
         await waitFrames();
-        // Hold the frame on screen long enough for the encoder to sample it
-        // at the requested playback FPS.
-        await new Promise<void>((r) => setTimeout(r, frameInterval));
+        const target = tStart + (i + 1) * frameInterval;
+        const remain = target - performance.now();
+        if (remain > 0) await new Promise<void>((r) => setTimeout(r, remain));
       }
 
       // Final idle flush so the last frame gets captured before stop().
@@ -172,6 +172,14 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
   useEffect(() => {
     frameIndexRef.current = 0;
   }, [imageCount]);
+
+  // Global pause signal — emitted by SeriesPanel before starting a video/DICOM
+  // export so our cine RAF loop doesn't fight the recorder.
+  useEffect(() => {
+    const handler = () => setIsPlaying(false);
+    window.addEventListener('angio:cine-pause', handler);
+    return () => window.removeEventListener('angio:cine-pause', handler);
+  }, []);
 
   const goToFrame = useCallback((index: number) => {
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
