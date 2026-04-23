@@ -3,7 +3,7 @@ import { getToolNames } from './initCornerstone';
 
 const TOOL_GROUP_ID = 'angioStackToolGroup';
 
-export type ToolName = 'WindowLevel' | 'Pan' | 'Zoom' | 'Length';
+export type ToolName = 'WindowLevel' | 'Pan' | 'Zoom' | 'Length' | 'ArrowAnnotate';
 
 let toolGroup: cornerstoneTools.Types.IToolGroup | undefined;
 
@@ -24,6 +24,7 @@ export function setupToolGroup(renderingEngineId: string, viewportId: string): v
   group.addTool(names.Zoom);
   group.addTool(names.StackScroll);
   group.addTool(names.Length);
+  group.addTool(names.ArrowAnnotate);
 
   group.addViewport(viewportId, renderingEngineId);
 
@@ -60,7 +61,7 @@ export function setActiveTool(name: ToolName): void {
   const selectedTool = (names as Record<string, string>)[name];
   if (!selectedTool) return;
 
-  const allPrimaryTools = [names.WindowLevel, names.Length, names.Pan, names.Zoom];
+  const allPrimaryTools = [names.WindowLevel, names.Length, names.Pan, names.Zoom, names.ArrowAnnotate];
 
   for (const t of allPrimaryTools) {
     toolGroup.setToolPassive(t);

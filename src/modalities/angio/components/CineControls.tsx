@@ -17,9 +17,111 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
   const [isPlaying, setIsPlaying] = useState(false);
   const [fps, setFps] = useState(15);
   const [loop, setLoop] = useState(true);
+  const [exporting, setExporting] = useState<string | null>(null);
   const rafRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
   const frameIndexRef = useRef(currentIndex);
+
+  function getViewportCanvas(): HTMLCanvasElement | null {
+    const engine = cornerstone.getRenderingEngine(renderingEngineId);
+    const vp = engine?.getViewport(viewportId) as cornerstone.Types.IStackViewport | undefined;
+    const el = vp?.element;
+    return (el?.querySelector('canvas.cornerstone-canvas') as HTMLCanvasElement) ?? null;
+  }
+
+  function savePNG() {
+    const canvas = getViewportCanvas();
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `angio-frame-${currentIndex + 1}-${Date.now()}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, 'image/png');
+  }
+
+  async function saveVideo() {
+    const canvas = getViewportCanvas();
+    if (!canvas || imageCount < 2) return;
+    const engine = cornerstone.getRenderingEngine(renderingEngineId);
+    const vp = engine?.getViewport(viewportId) as cornerstone.Types.IStackViewport | undefined;
+    if (!vp) return;
+    setExporting('Recording…');
+    try {
+      const stream = (canvas as any).captureStream?.(fps) as MediaStream | undefined;
+      if (!stream) throw new Error('captureStream unavailable');
+      const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+      const mime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      const done = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
+      recorder.start();
+
+      const frameInterval = 1000 / Math.max(1, fps);
+      const startIdx = 0;
+      for (let i = 0; i < imageCount; i += 1) {
+        vp.setImageIdIndex(startIdx + i);
+        setExporting(`Recording ${i + 1}/${imageCount}`);
+        await new Promise<void>((r) => setTimeout(r, frameInterval));
+      }
+      recorder.stop();
+      await done;
+
+      const blob = new Blob(chunks, { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `angio-series-${seriesIndex != null ? seriesIndex + 1 : ''}-${Date.now()}.webm`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error('[angio] video export failed', err);
+    } finally {
+      setExporting(null);
+    }
+  }
+
+  async function saveDicom() {
+    const engine = cornerstone.getRenderingEngine(renderingEngineId);
+    const vp = engine?.getViewport(viewportId) as cornerstone.Types.IStackViewport | undefined;
+    if (!vp) return;
+    const getIds = (vp as any).getImageIds?.bind(vp) as (() => string[]) | undefined;
+    const ids = getIds?.() ?? [];
+    if (ids.length === 0) return;
+    setExporting('Exporting DICOM…');
+    try {
+      // Dedup multi-frame base (imageIds like `wadouri:blob:...&frame=N` share a base file)
+      const baseIds = new Set<string>();
+      for (const id of ids) {
+        const idx = id.indexOf('&frame=');
+        baseIds.add(idx >= 0 ? id.slice(0, idx) : id);
+      }
+      let count = 0;
+      for (const baseId of baseIds) {
+        count += 1;
+        setExporting(`Exporting ${count}/${baseIds.size}`);
+        const blobUrl = baseId.startsWith('wadouri:') ? baseId.slice('wadouri:'.length) : baseId;
+        if (!blobUrl.startsWith('blob:') && !blobUrl.startsWith('http')) continue;
+        const resp = await fetch(blobUrl);
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `angio-series-${seriesIndex != null ? seriesIndex + 1 : ''}-${count}.dcm`;
+        a.click();
+        await new Promise((r) => setTimeout(r, 80));
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.error('[angio] DICOM export failed', err);
+    } finally {
+      setExporting(null);
+    }
+  }
 
   useEffect(() => {
     frameIndexRef.current = currentIndex;
@@ -208,6 +310,37 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
             Seri {(seriesIndex ?? 0) + 1}/{seriesCount}
           </span>
         )}
+
+        <span className="toolbar-separator" />
+
+        <button
+          className="cine-btn"
+          onClick={savePNG}
+          disabled={!!exporting}
+          title="Frame resim olarak indir (PNG)"
+          aria-label="Save frame PNG"
+        >
+          📷
+        </button>
+        <button
+          className="cine-btn"
+          onClick={saveVideo}
+          disabled={!!exporting || imageCount < 2}
+          title="Seriyi video olarak indir (WebM)"
+          aria-label="Save series video"
+        >
+          {exporting?.startsWith('Recording') ? '⏺' : '🎞'}
+        </button>
+        <button
+          className="cine-btn"
+          onClick={saveDicom}
+          disabled={!!exporting}
+          title="Seriyi DICOM olarak indir"
+          aria-label="Save series DICOM"
+        >
+          💾
+        </button>
+        {exporting && <span className="cine-export-status">{exporting}</span>}
       </div>
 
       <input
