@@ -143,11 +143,18 @@ function detectVesselEdges(
   const threshRight = minVal + (bgRight - minVal) * 0.5;
 
   // Find left edge: going from minIdx toward left, find where brightness crosses threshold
+  // Subpixel interpolation: denominator is the brightness step between adjacent
+  // samples. When both samples are equal (saturated vessel, flat artifact) the
+  // step is zero — without a guard we propagate NaN/Infinity into the contour
+  // and corrupt MLD / stenosis downstream.
+  const SUBPIXEL_EPS = 1e-6;
   let leftEdge = minIdx;
   for (let i = minIdx - 1; i >= 0; i--) {
     if (samples[i] >= threshLeft) {
-      // Subpixel interpolation
-      const frac = (threshLeft - samples[i + 1]) / (samples[i] - samples[i + 1]);
+      const denom = samples[i] - samples[i + 1];
+      const frac = Math.abs(denom) > SUBPIXEL_EPS
+        ? (threshLeft - samples[i + 1]) / denom
+        : 0.5;
       leftEdge = i + 1 - frac;
       break;
     }
@@ -158,7 +165,10 @@ function detectVesselEdges(
   let rightEdge = minIdx;
   for (let i = minIdx + 1; i < n; i++) {
     if (samples[i] >= threshRight) {
-      const frac = (threshRight - samples[i - 1]) / (samples[i] - samples[i - 1]);
+      const denom = samples[i] - samples[i - 1];
+      const frac = Math.abs(denom) > SUBPIXEL_EPS
+        ? (threshRight - samples[i - 1]) / denom
+        : 0.5;
       rightEdge = i - 1 + frac;
       break;
     }
