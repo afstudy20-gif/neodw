@@ -29,8 +29,10 @@ export async function initCornerstone(): Promise<void> {
     return;
   }
 
-  // 1. Core Init
-  cornerstone.init();
+  // 1. Core Init — must await: worker registration and tool init below depend
+  // on core state. Calling sync left a race window where workerManager was
+  // unavailable or codecs unregistered on cold load.
+  await cornerstone.init();
   cornerstone.Settings.getRuntimeSettings().set('useCursors', false);
 
   // 2. Loaders & Metadata

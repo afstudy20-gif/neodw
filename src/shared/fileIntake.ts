@@ -61,16 +61,25 @@ async function extractZip(file: File): Promise<File[]> {
   return out;
 }
 
-let libarchiveInit = false;
+// Store the init promise (not a bool flag) so two concurrent extractRar
+// calls share one init pass. Prior `if (!flag) { init(); flag = true; }`
+// raced when both calls passed the check before either flipped the flag,
+// potentially calling Archive.init() twice and double-registering the
+// WASM worker.
+let libarchiveInitPromise: Promise<void> | null = null;
 async function extractRar(file: File): Promise<File[]> {
   try {
     const mod: any = await import('libarchive.js');
     const Archive = mod.Archive ?? mod.default?.Archive ?? mod.default;
-    if (!libarchiveInit && Archive?.init) {
-      Archive.init({
-        workerUrl: new URL('libarchive.js/dist/worker-bundle.js', import.meta.url).toString(),
-      });
-      libarchiveInit = true;
+    if (!libarchiveInitPromise && Archive?.init) {
+      libarchiveInitPromise = Promise.resolve(
+        Archive.init({
+          workerUrl: new URL('libarchive.js/dist/worker-bundle.js', import.meta.url).toString(),
+        })
+      );
+    }
+    if (libarchiveInitPromise) {
+      await libarchiveInitPromise;
     }
     const archive = await Archive.open(file);
     const entries = await archive.getFilesArray();
