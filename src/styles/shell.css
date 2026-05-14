@@ -1150,3 +1150,5 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 }
 
 .nd-btn.outline:hover { background: var(--nd-accent-soft); }
+
+@keyframes spin { 100% { transform: rotate(360deg); } }
