@@ -508,7 +508,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       // Auto-rotate 120° to expected NCC location
       if (controller) {
         setCuspRotating(true);
-        controller.rotateAroundAxis(120, 500).then(() => setCuspRotating(false));
+        controller.rotateAroundAxis(120, 500)
+              .then(() => setCuspRotating(false))
+              .catch((err) => { console.warn('[tavi] auto-rotate failed', err); setCuspRotating(false); });
       }
     } else if (cuspStep === 'ncc') {
       setCuspPoints(prev => ({ ...prev, ncc: worldPoint }));
@@ -516,7 +518,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       // Auto-rotate another 120° to expected RCC location
       if (controller) {
         setCuspRotating(true);
-        controller.rotateAroundAxis(120, 500).then(() => setCuspRotating(false));
+        controller.rotateAroundAxis(120, 500)
+              .then(() => setCuspRotating(false))
+              .catch((err) => { console.warn('[tavi] auto-rotate failed', err); setCuspRotating(false); });
       }
     } else if (cuspStep === 'rcc') {
       const updated = { ...cuspPoints, rcc: worldPoint };
@@ -993,7 +997,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           const controller = controllerRef.current;
           if (controller && id !== 'rc') {
             setCuspRotating(true);
-            controller.rotateAroundAxis(120, 500).then(() => setCuspRotating(false));
+            controller.rotateAroundAxis(120, 500)
+              .then(() => setCuspRotating(false))
+              .catch((err) => { console.warn('[tavi] auto-rotate failed', err); setCuspRotating(false); });
           }
         },
         onMarkerMoved: (id: CuspId, point: TAVIVector3D) => {
