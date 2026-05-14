@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
-import { loadEchoFiles, getDopplerSpectralRegion, type EchoSeriesInfo } from './echoLoader';
+import { loadEchoFiles, getDopplerSpectralRegion, revokeEchoBlobs, type EchoSeriesInfo } from './echoLoader';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import echoModuleCss from './echo-module.css?inline';
@@ -217,6 +217,9 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
       }
       renderingEngineRef.current?.destroy();
       renderingEngineRef.current = null;
+      // Revoke blob URLs minted by loadEchoFiles so they don't leak for the
+      // lifetime of the tab. Also clears per-image calibration/Doppler caches.
+      revokeEchoBlobs();
     };
   }, []);
 
