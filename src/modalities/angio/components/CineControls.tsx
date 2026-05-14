@@ -21,6 +21,10 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
   const rafRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
   const frameIndexRef = useRef(currentIndex);
+  // Abort handle for in-flight video export. Aborted on unmount or when the
+  // active viewport disappears mid-recording, so the frame loop can break
+  // cleanly instead of writing garbage frames after teardown.
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   function getViewportCanvas(): HTMLCanvasElement | null {
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
@@ -55,11 +59,19 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
     setIsPlaying(false);
     setExporting('Preparing…');
 
+    // Cancel any prior in-flight export and start a new one.
+    exportAbortRef.current?.abort();
+    const abortCtrl = new AbortController();
+    exportAbortRef.current = abortCtrl;
+    const signal = abortCtrl.signal;
+
+    let recorder: MediaRecorder | null = null;
     try {
       // Pre-cache every image so setImageIdIndex during recording is instant.
       const getIds = (vp as any).getImageIds?.bind(vp) as (() => string[]) | undefined;
       const ids = getIds?.() ?? [];
       for (let i = 0; i < ids.length; i += 1) {
+        if (signal.aborted) return;
         setExporting(`Pre-load ${i + 1}/${ids.length}`);
         try { await cornerstone.imageLoader.loadAndCacheImage(ids[i]); } catch { /* skip */ }
       }
@@ -72,34 +84,44 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
       if (!stream) throw new Error('captureStream unavailable');
       const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
+      recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
       const chunks: Blob[] = [];
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-      const done = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
+      const done = new Promise<void>((resolve) => { recorder!.onstop = () => resolve(); });
       recorder.start();
 
       const frameInterval = 1000 / Math.max(1, fps);
-      const element = vp.element as HTMLElement | undefined;
       const waitFrames = () =>
         new Promise<void>((r) =>
           requestAnimationFrame(() => requestAnimationFrame(() => r()))
         );
-      const waitForRender = () =>
+      const waitForRender = (liveVp: cornerstone.Types.IStackViewport) =>
         new Promise<void>((r) => {
+          const element = liveVp.element as HTMLElement | undefined;
           if (!element) return r();
           const evt = (cornerstone as any).Enums?.Events?.IMAGE_RENDERED ?? 'IMAGE_RENDERED';
           const handler = () => { element.removeEventListener(evt, handler); r(); };
           element.addEventListener(evt, handler, { once: true });
-          try { vp.render(); } catch { handler(); }
+          try { liveVp.render(); } catch { handler(); }
         });
 
       // Deterministic schedule: target time for frame i+1 = start + (i+1)*interval.
       // Prevents setTimeout drift from decode latency stretching output video.
       const tStart = performance.now();
+      let aborted = false;
       for (let i = 0; i < imageCount; i += 1) {
+        if (signal.aborted) { aborted = true; break; }
+        // Re-fetch viewport each iteration — series switch / unmount can dispose it.
+        const liveEngine = cornerstone.getRenderingEngine(renderingEngineId);
+        const liveVp = liveEngine?.getViewport(viewportId) as cornerstone.Types.IStackViewport | undefined;
+        if (!liveVp || (liveVp as any).getImageIds?.()?.length !== imageCount) {
+          aborted = true;
+          console.warn('[angio] video export aborted — viewport disposed or series changed');
+          break;
+        }
         setExporting(`Recording ${i + 1}/${imageCount}`);
-        try { (vp as any).setImageIdIndex?.(i); } catch { /* skip */ }
-        await waitForRender();
+        try { (liveVp as any).setImageIdIndex?.(i); } catch { aborted = true; break; }
+        await waitForRender(liveVp);
         await waitFrames();
         const target = tStart + (i + 1) * frameInterval;
         const remain = target - performance.now();
@@ -111,6 +133,8 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
       recorder.stop();
       await done;
 
+      if (aborted) return; // Don't write a truncated/garbage download.
+
       const blob = new Blob(chunks, { type: mime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -121,6 +145,10 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
     } catch (err) {
       console.error('[angio] video export failed', err);
     } finally {
+      if (recorder && recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch { /* already stopped */ }
+      }
+      if (exportAbortRef.current === abortCtrl) exportAbortRef.current = null;
       setExporting(null);
     }
   }
@@ -180,6 +208,24 @@ export function CineControls({ renderingEngineId, viewportId, imageCount, curren
     window.addEventListener('angio:cine-pause', handler);
     return () => window.removeEventListener('angio:cine-pause', handler);
   }, []);
+
+  // Abort any in-flight video export on unmount so the frame loop doesn't keep
+  // calling setImageIdIndex / render on a torn-down viewport.
+  useEffect(() => {
+    return () => {
+      exportAbortRef.current?.abort();
+      exportAbortRef.current = null;
+    };
+  }, []);
+
+  // When series changes mid-export, abort. The frame loop's per-iteration
+  // viewport re-fetch handles this defensively too, but signalling abort is
+  // cheaper than waiting for the next iteration to notice.
+  useEffect(() => {
+    return () => {
+      exportAbortRef.current?.abort();
+    };
+  }, [renderingEngineId, viewportId, imageCount]);
 
   const goToFrame = useCallback((index: number) => {
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
