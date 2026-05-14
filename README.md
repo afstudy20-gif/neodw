@@ -41,6 +41,16 @@ npm run preview    # serve build locally
 
 Cross-Origin-Embedder-Policy and Cross-Origin-Opener-Policy headers are required for `SharedArrayBuffer` (volume rendering). See `nginx.conf`, `netlify.toml`, `vercel.json` for deployment configs.
 
+### Debugging DICOM files
+
+When a user reports a file NeoDW won't load, [`scripts/dcm-debug.sh`](scripts/dcm-debug.sh) runs the dcm4che CLI utilities (`dcmdump` + `dcmvalidate` + `dcm2dcm`) to dump the header, validate against the IOD, and re-encode to Explicit-VR Little-Endian. If the re-encoded file loads but the original doesn't, the bug is in the codec / pixel decode path — not the parser.
+
+Install dcm4che (Java 17+ required) from https://sourceforge.net/projects/dcm4che/files/dcm4che3/ and add its `bin/` directory to `PATH`. Usage:
+
+```bash
+./scripts/dcm-debug.sh path/to/problem.dcm
+```
+
 ## Disclaimer
 
 Research scaffold. Not a medical device. Not for clinical decision-making. No regulatory clearance (FDA / CE / etc.). All measurements are advisory.
