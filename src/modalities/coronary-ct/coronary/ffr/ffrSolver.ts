@@ -47,6 +47,12 @@ export function solveVesselFFR(
 
   const pullback: FFRPullbackPoint[] = [];
   let pressurePa = Pa_Pa;
+  // Track clamp engagement so an artificially-clamped result is visible to
+  // anyone debugging "why is FFR exactly 0.235 / hovering at the floor".
+  // Without diagnostics, the pressure floor below silently turns a divergent
+  // solver into a plausible-looking ischemic reading.
+  let areaClampHits = 0;
+  let pressureFloorHits = 0;
 
   // Initial point = ostium, full aortic pressure.
   pullback.push({
@@ -70,7 +76,9 @@ export function solveVesselFFR(
     }
 
     // Use prev sample's geometry for segment integration.
-    const A_m2 = Math.max(prev.areaMm2 * 1e-6, 1e-10);
+    const A_m2_raw = prev.areaMm2 * 1e-6;
+    const A_m2 = Math.max(A_m2_raw, 1e-10);
+    if (A_m2_raw < 1e-10) areaClampHits += 1;
     const Aref_m2 = Math.max(prev.referenceAreaMm2 * 1e-6, A_m2);
 
     const V = Q_m3_s / A_m2; // m/s
@@ -92,6 +100,7 @@ export function solveVesselFFR(
     // tandem stenoses, which is non-physical.
     if (pressurePa < 20 * PA_PER_MMHG) {
       pressurePa = 20 * PA_PER_MMHG;
+      pressureFloorHits += 1;
     }
 
     pullback.push({
@@ -99,6 +108,13 @@ export function solveVesselFFR(
       pressureMmHg: pressurePa * MMHG_PER_PA,
       ffr: pressurePa / Pa_Pa,
     });
+  }
+
+  if (areaClampHits > 0 || pressureFloorHits > 0) {
+    console.warn(
+      `[ffr] ${label}: solver clamps engaged — areaClamp=${areaClampHits} pressureFloor=${pressureFloorHits} ` +
+      `(distalFFR may be floor-limited rather than physiologic)`
+    );
   }
 
   const distal = pullback[pullback.length - 1];
