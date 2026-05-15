@@ -5,6 +5,7 @@ import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 import { RefreshButton } from '../../shared/components/RefreshButton';
+import { PseudoPCCTPanel } from './pcct/PseudoPCCTPanel';
 // Rebind on every module eval so HMR / debug overwrites get restored
 Object.defineProperty(window, '__cornerstone', {
   configurable: true,
@@ -77,6 +78,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const [volumeResults, setVolumeResults] = useState<VolumeResult[]>([]);
   const [viewportMode, setViewportMode] = useState<ViewportMode>('standard');
   const [hide3dPanel, setHide3dPanel] = useState(true);
+  const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
   // Source DICOM files (post-archive-expansion). Used by PatientNameEditor
   // to re-serialize the loaded study with an edited PatientName tag.
@@ -786,12 +788,30 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             }}
           />
           {activeSeries && (
+            <button
+              type="button"
+              className="pcct-trigger-btn"
+              onClick={() => setPseudoPcctOpen(true)}
+              title="Pseudo-PCCT filter karşılaştırması (deneysel, klinik değil)"
+            >
+              Pseudo-PCCT
+            </button>
+          )}
+          {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ct" />
           )}
           <RefreshButton />
           <ThemeToggleBtn />
         </div>
       </header>
+      {pseudoPcctOpen && (
+        <PseudoPCCTPanel
+          renderingEngineId={RENDERING_ENGINE_ID}
+          volumeId={VOLUME_ID}
+          axialViewportId="axial"
+          onClose={() => setPseudoPcctOpen(false)}
+        />
+      )}
 
       {activeSeries && (
         <div className="toolbar-row">

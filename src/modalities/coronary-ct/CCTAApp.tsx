@@ -6,6 +6,7 @@ import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 import { RefreshButton } from '../../shared/components/RefreshButton';
+import { PseudoPCCTPanel } from '../ct/pcct/PseudoPCCTPanel';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -39,6 +40,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   // Source DICOM files (post-archive-expansion). Fed to PatientNameEditor
   // so it can re-serialize them with an updated PatientName tag.
   const loadedFilesRef = useRef<File[]>([]);
+  const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -442,6 +444,16 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
         </div>
         <div className="header-actions">
           {activeSeries && (
+            <button
+              type="button"
+              className="pcct-trigger-btn"
+              onClick={() => setPseudoPcctOpen(true)}
+              title="Pseudo-PCCT filter karşılaştırması (deneysel, klinik değil)"
+            >
+              Pseudo-PCCT
+            </button>
+          )}
+          {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
           )}
           <RefreshButton />
@@ -451,6 +463,14 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           <ThemeToggleBtn />
         </div>
       </header>
+      {pseudoPcctOpen && (
+        <PseudoPCCTPanel
+          renderingEngineId={RENDERING_ENGINE_ID}
+          volumeId={VOLUME_ID}
+          axialViewportId="axial"
+          onClose={() => setPseudoPcctOpen(false)}
+        />
+      )}
 
       {activeSeries && (
         <Toolbar
