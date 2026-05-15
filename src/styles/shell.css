@@ -1150,3 +1150,51 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 }
 
 .nd-btn.outline:hover { background: var(--nd-accent-soft); }
+
+/* Cache-clear + hard reload trigger. Styled to read as a maintenance
+   action (warm tone) rather than a primary command. */
+.nd-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  background: rgba(255, 180, 80, 0.08);
+  color: rgba(255, 200, 120, 0.95);
+  border: 1px solid rgba(255, 180, 80, 0.28);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
+  user-select: none;
+}
+.nd-refresh-btn:hover {
+  background: rgba(255, 180, 80, 0.18);
+  color: #ffd9a0;
+  border-color: rgba(255, 180, 80, 0.45);
+}
+.nd-refresh-btn:active { transform: scale(0.97); }
+.nd-refresh-btn:disabled { cursor: not-allowed; opacity: 0.7; }
+.nd-refresh-btn.spinning svg { animation: nd-refresh-spin 0.8s linear infinite; }
+
+@keyframes nd-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* PatientName edit trigger — same visual weight as a secondary action. */
+.patient-name-edit-btn {
+  padding: 7px 12px;
+  background: var(--nd-accent-soft, rgba(88, 166, 255, 0.12));
+  color: var(--nd-text, inherit);
+  border: 1px solid var(--nd-border, rgba(255, 255, 255, 0.18));
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.patient-name-edit-btn:hover {
+  background: var(--nd-accent-soft-hover, rgba(88, 166, 255, 0.22));
+  border-color: var(--nd-primary, rgba(88, 166, 255, 0.45));
+}

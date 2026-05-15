@@ -4,6 +4,8 @@ import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import coronaryModuleCss from './coronary-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
+import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
+import { RefreshButton } from '../../shared/components/RefreshButton';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -34,6 +36,9 @@ interface CtAppProps {
 
 export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
+  // Source DICOM files (post-archive-expansion). Fed to PatientNameEditor
+  // so it can re-serialize them with an updated PatientName tag.
+  const loadedFilesRef = useRef<File[]>([]);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -107,8 +112,10 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
       if (expanded.length === 0) {
         setError('No DICOM files found (including inside ZIP/RAR).');
         setIsLoading(false);
+        loadedFilesRef.current = [];
         return;
       }
+      loadedFilesRef.current = expanded;
       setLoadingProgress('Parsing DICOM files...');
       const series = await loadDicomFiles(expanded);
       setSeriesList(series);
@@ -434,6 +441,10 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           )}
         </div>
         <div className="header-actions">
+          {activeSeries && (
+            <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
+          )}
+          <RefreshButton />
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}

@@ -12,6 +12,8 @@ import { createInitialSession, qcaReducer, type QCASession, type QCAAction } fro
 import angioModuleCss from './angio-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
+import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
+import { RefreshButton } from '../../shared/components/RefreshButton';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -33,6 +35,9 @@ interface AngioAppProps {
 export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
   const initialFilesConsumedRef = useRef(false);
+  // Track expanded source DICOM files so the PatientName editor can
+  // re-serialize them after the user edits the tag.
+  const loadedFilesRef = useRef<File[]>([]);
 
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -155,6 +160,7 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
         setIsLoading(false);
         return;
       }
+      loadedFilesRef.current = expanded;
       setLoadingProgress('Parsing DICOM files...');
       const series = await loadDicomFiles(expanded);
       setSeriesList(series);
@@ -400,6 +406,10 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
           )}
         </div>
         <div className="header-actions">
+          {activeSeries && (
+            <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="angio" />
+          )}
+          <RefreshButton />
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}
