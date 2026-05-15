@@ -48,6 +48,7 @@ const IcoScan = (p: { s?: number }) => <Ico s={p.s}><><path d="M3 7V5a2 2 0 0 1 
 const IcoActivity = (p: { s?: number }) => <Ico s={p.s}><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></Ico>;
 const IcoWave = (p: { s?: number }) => <Ico s={p.s}><path d="M3 12h3l2-4 3 8 3-12 3 16 2-8h2"/></Ico>;
 const IcoUpload = (p: { s?: number }) => <Ico s={p.s}><><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></></Ico>;
+const IcoRefresh = (p: { s?: number }) => <Ico s={p.s}><><path d="M3 12a9 9 0 0 1 15.5-6.36L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.36L3 16"/><path d="M3 21v-5h5"/></></Ico>;
 
 /* ── Brand mark: outlined heart with ECG trace ────── */
 export function NeoDWMark({ size = 28 }: { size?: number }) {
@@ -177,6 +178,27 @@ export default function Welcome({ onLaunch }: Props) {
   const { t, lang, setLang } = useI18n();
   const { theme, toggle: toggleTheme } = useTheme();
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    if (!window.confirm('Önbelleği temizleyip sayfayı yenilemek istediğinize emin misiniz?')) return;
+    setIsRefreshing(true);
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister().catch(() => null)));
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k).catch(() => null)));
+      }
+    } catch (err) {
+      console.warn('[refresh]', err);
+    }
+    const url = new URL(location.href);
+    url.searchParams.set('_r', Date.now().toString(36));
+    window.location.replace(url.toString());
+  };
 
   const [stats, setStats] = useState<{ total: number | null; daily: number | null; active: number | null; countries: CountryStat[]; myCc: string | null; myName: string | null }>({
     total: null, daily: null, active: null, countries: [], myCc: null, myName: null,
@@ -360,6 +382,15 @@ export default function Welcome({ onLaunch }: Props) {
           </div>
           <button className="nd-icon-btn" onClick={toggleTheme} title={t('btn.theme')} aria-label="theme">
             {theme === 'dark' ? <IcoSun/> : <IcoMoon/>}
+          </button>
+          <button 
+            className="nd-icon-btn" 
+            onClick={handleRefresh} 
+            title="Önbelleği Temizle ve Yenile" 
+            aria-label="refresh"
+            style={isRefreshing ? { animation: 'spin 1s linear infinite' } : {}}
+          >
+            <IcoRefresh/>
           </button>
           <button className="nd-icon-btn" onClick={() => setAboutOpen(true)} title={t('btn.about')} aria-label="about">
             <IcoInfo/>

@@ -1300,3 +1300,8 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   background: rgba(140, 90, 255, 0.22);
   border-color: rgba(140, 90, 255, 0.65);
 }
+
+/* Generic `spin` keyframe used by the Welcome-screen refresh button
+   (added in main). Kept alongside `nd-refresh-spin` so neither button
+   loses its animation. */
+@keyframes spin { 100% { transform: rotate(360deg); } }
