@@ -4,7 +4,6 @@ import ctModuleCss from './ct-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
-import { RefreshButton } from '../../shared/components/RefreshButton';
 import { PseudoPCCTPanel } from './pcct/PseudoPCCTPanel';
 // Rebind on every module eval so HMR / debug overwrites get restored
 Object.defineProperty(window, '__cornerstone', {
@@ -800,7 +799,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ct" />
           )}
-          <RefreshButton />
           <ThemeToggleBtn />
         </div>
       </header>

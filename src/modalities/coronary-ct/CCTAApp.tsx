@@ -5,7 +5,6 @@ import coronaryModuleCss from './coronary-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
-import { RefreshButton } from '../../shared/components/RefreshButton';
 import { PseudoPCCTPanel } from '../ct/pcct/PseudoPCCTPanel';
 
 function ThemeToggleBtn() {
@@ -456,7 +455,6 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
           )}
-          <RefreshButton />
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}

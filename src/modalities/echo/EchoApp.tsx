@@ -4,7 +4,6 @@ import * as cornerstoneTools from '@cornerstonejs/tools';
 import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
 import { loadEchoFiles, getDopplerSpectralRegion, revokeEchoBlobs, type EchoSeriesInfo } from './echoLoader';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
-import { RefreshButton } from '../../shared/components/RefreshButton';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import echoModuleCss from './echo-module.css?inline';
@@ -1226,7 +1225,6 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
           {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel={isXray ? 'xray' : 'echo'} />
           )}
-          <RefreshButton />
           <ThemeToggleBtn />
         </div>
       </header>
