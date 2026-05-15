@@ -372,6 +372,14 @@ export class DoubleObliqueController {
       const startTime = performance.now();
 
       const animate = (now: number) => {
+        // If dispose() ran between this tick being scheduled and executing,
+        // bail before touching state / cameras — dispose() already cleared
+        // animationFrameId, but the already-scheduled RAF still fires once.
+        if (this.disposed) {
+          this.animationFrameId = null;
+          resolve();
+          return;
+        }
         const elapsed = now - startTime;
         const t = Math.min(1, elapsed / durationMs);
         // Ease in-out

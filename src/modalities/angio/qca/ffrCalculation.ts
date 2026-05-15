@@ -54,8 +54,33 @@ export function calculateVFFR(
     };
   }
 
-  // Reference areas from reference diameters
-  const refAreas = referenceDiameters.map(d => Math.PI * (d / 2) ** 2);
+  // Reference areas from reference diameters. The previous `refAreas[i] ?? areas[i]`
+  // fallback silently substituted the *stenosed* area as the reference whenever
+  // referenceDiameters was shorter than areas — collapsing the expansion-loss
+  // term to ~0 and over-estimating FFR in that region (could mask significant
+  // lesions). Pad explicitly with the last valid reference so the contract
+  // (refAreas.length === areas.length) holds.
+  const rawRefAreas = referenceDiameters.map(d => Math.PI * (d / 2) ** 2);
+  if (rawRefAreas.length === 0) {
+    console.warn('[vFFR] No reference diameters supplied — returning vFFR=1.0');
+    return {
+      vffr: 1.0,
+      pullbackCurve: new Array(n).fill(1.0),
+      aoPress: aorticPressure,
+      isSignificant: false,
+    };
+  }
+  const refAreas: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (i < rawRefAreas.length && Number.isFinite(rawRefAreas[i])) {
+      refAreas[i] = rawRefAreas[i];
+    } else {
+      refAreas[i] = refAreas[i - 1] ?? rawRefAreas[rawRefAreas.length - 1];
+    }
+  }
+  if (rawRefAreas.length !== n) {
+    console.warn(`[vFFR] referenceDiameters length ${rawRefAreas.length} != areas length ${n} — padded with last valid value`);
+  }
 
   // Convert units: mm -> cm for CGS system
   const V_cm = HYPEREMIC_VELOCITY * 100; // m/s -> cm/s
@@ -81,7 +106,7 @@ export function calculateVFFR(
     // Clamp minimum area to prevent numerical explosion
     const minArea_cm2 = 0.005; // ~0.25mm diameter minimum
     const A_cm2 = Math.max(areas[i] / 100, minArea_cm2);
-    const Aref_cm2 = Math.max((refAreas[i] ?? areas[i]) / 100, minArea_cm2);
+    const Aref_cm2 = Math.max(refAreas[i] / 100, minArea_cm2);
 
     // Poiseuille viscous friction loss
     const f_viscous = (8 * Math.PI * mu * ds_cm) / (A_cm2 * A_cm2);

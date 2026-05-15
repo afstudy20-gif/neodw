@@ -433,18 +433,30 @@ export const STRINGS: Record<Lang, Dict> = {
 
 const STORAGE_KEY = 'neodw_lang';
 
+const SUPPORTED_LANGS: readonly Lang[] = ['tr', 'en', 'de', 'es', 'hi', 'zh'];
+
+function isLang(value: string | null | undefined): value is Lang {
+  return !!value && (SUPPORTED_LANGS as readonly string[]).includes(value);
+}
+
 function detectInitial(): Lang {
   try {
-    const s = localStorage.getItem(STORAGE_KEY) as Lang | null;
-    if (s === 'tr' || s === 'en') return s;
+    const s = localStorage.getItem(STORAGE_KEY);
+    if (isLang(s)) return s;
   } catch {}
   // Quick heuristic: Intl timezone + nav language. Geo fetched async elsewhere.
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
     if (tz.includes('Istanbul') || tz.includes('Ankara')) return 'tr';
   } catch {}
+  // Match navigator.language against every supported locale, not just tr/en.
+  // Previous code returned 'en' for de/es/hi/zh users even though the strings
+  // dict supports those locales.
   const nav = typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : 'en';
-  if (nav.startsWith('tr')) return 'tr';
+  for (const lang of SUPPORTED_LANGS) {
+    if (nav.startsWith(lang)) return lang;
+  }
+  // zh is sometimes reported as zh-CN, zh-TW, zh-HK; startsWith('zh') already covers those.
   return 'en';
 }
 
@@ -476,7 +488,16 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
         if (!res.ok) return;
         const cc = (await res.text()).trim().toUpperCase();
         if (cancelled) return;
-        const want: Lang = cc === 'TR' ? 'tr' : 'en';
+        // Map common country codes to supported UI locales. Others fall back
+        // to whatever detectInitial chose (likely the user's navigator.language).
+        const countryToLang: Record<string, Lang> = {
+          TR: 'tr',
+          DE: 'de', AT: 'de', CH: 'de',
+          ES: 'es', MX: 'es', AR: 'es', CL: 'es', CO: 'es', PE: 'es',
+          IN: 'hi',
+          CN: 'zh', TW: 'zh', HK: 'zh', SG: 'zh',
+        };
+        const want: Lang = countryToLang[cc] ?? 'en';
         setLangState((prev) => (prev === want ? prev : want));
       } catch {}
     })();

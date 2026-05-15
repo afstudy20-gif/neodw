@@ -47,8 +47,26 @@ export interface DopplerSpectralRegion {
 
 const calibrationByImageId = new Map<string, EchoCalibration>();
 const dopplerByImageId = new Map<string, DopplerSpectralRegion>();
+// Blob URLs created during loadEchoFiles. Held so the caller can revoke them
+// on session unload — otherwise each loaded echo file leaks until tab close.
+const createdBlobUrls = new Set<string>();
+
 export function getDopplerSpectralRegion(imageId: string): DopplerSpectralRegion | undefined {
   return dopplerByImageId.get(imageId) ?? dopplerByImageId.get(imageId.split('?')[0]);
+}
+
+/**
+ * Revoke every blob URL minted by `loadEchoFiles` and clear the per-image
+ * calibration / Doppler caches. Call on EchoApp unmount so blobs created for
+ * DICOM-path echoes don't linger for the lifetime of the tab.
+ */
+export function revokeEchoBlobs(): void {
+  for (const url of createdBlobUrls) {
+    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+  }
+  createdBlobUrls.clear();
+  calibrationByImageId.clear();
+  dopplerByImageId.clear();
 }
 let providerRegistered = false;
 
@@ -545,6 +563,7 @@ export async function loadEchoFiles(files: File[]): Promise<EchoSeriesInfo[]> {
         toLoad = new Blob([wrapped], { type: 'application/dicom' });
       }
       const blobUrl = URL.createObjectURL(toLoad);
+      createdBlobUrls.add(blobUrl);
       baseId = `wadouri:${blobUrl}`;
       const nFrames = Math.max(1, meta.numberOfFrames);
       imageIds = nFrames > 1

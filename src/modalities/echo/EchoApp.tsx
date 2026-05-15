@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
-import { loadEchoFiles, getDopplerSpectralRegion, type EchoSeriesInfo } from './echoLoader';
+import { loadEchoFiles, getDopplerSpectralRegion, revokeEchoBlobs, type EchoSeriesInfo } from './echoLoader';
+import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import echoModuleCss from './echo-module.css?inline';
@@ -153,6 +154,9 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
   const toolGroupInitRef = useRef(false);
   const initialFilesConsumedRef = useRef(false);
+  // Source DICOM files (post-archive-expansion) — fed to PatientNameEditor
+  // so it can re-serialize them with a new PatientName.
+  const loadedFilesRef = useRef<File[]>([]);
 
   const [isInitialized, setIsInitialized] = useState(false);
   const [seriesList, setSeriesList] = useState<DicomSeriesInfo[]>([]);
@@ -217,6 +221,9 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
       }
       renderingEngineRef.current?.destroy();
       renderingEngineRef.current = null;
+      // Revoke blob URLs minted by loadEchoFiles so they don't leak for the
+      // lifetime of the tab. Also clears per-image calibration/Doppler caches.
+      revokeEchoBlobs();
     };
   }, []);
 
@@ -241,6 +248,7 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
         setIsLoading(false);
         return;
       }
+      loadedFilesRef.current = expanded;
       const series = await loadEchoFiles(expanded);
       setSeriesList(series);
       if (series.length > 0) {
@@ -1214,6 +1222,9 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
         <div className="echo-header-actions">
           <button className="echo-tool-btn" onClick={() => pickFiles(false)} disabled={isLoading}>Dosya Aç</button>
           <button className="echo-tool-btn" onClick={() => pickFiles(true)} disabled={isLoading}>Klasör Aç</button>
+          {activeSeries && (
+            <PatientNameEditor filesRef={loadedFilesRef} modalityLabel={isXray ? 'xray' : 'echo'} />
+          )}
           <ThemeToggleBtn />
         </div>
       </header>

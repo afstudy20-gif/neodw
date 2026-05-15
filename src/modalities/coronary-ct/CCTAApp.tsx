@@ -4,6 +4,8 @@ import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import coronaryModuleCss from './coronary-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
+import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
+import { PseudoPCCTPanel } from '../ct/pcct/PseudoPCCTPanel';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -34,6 +36,10 @@ interface CtAppProps {
 
 export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
+  // Source DICOM files (post-archive-expansion). Fed to PatientNameEditor
+  // so it can re-serialize them with an updated PatientName tag.
+  const loadedFilesRef = useRef<File[]>([]);
+  const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -107,8 +113,10 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
       if (expanded.length === 0) {
         setError('No DICOM files found (including inside ZIP/RAR).');
         setIsLoading(false);
+        loadedFilesRef.current = [];
         return;
       }
+      loadedFilesRef.current = expanded;
       setLoadingProgress('Parsing DICOM files...');
       const series = await loadDicomFiles(expanded);
       setSeriesList(series);
@@ -434,12 +442,33 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           )}
         </div>
         <div className="header-actions">
+          {activeSeries && (
+            <button
+              type="button"
+              className="pcct-trigger-btn"
+              onClick={() => setPseudoPcctOpen(true)}
+              title="Pseudo-PCCT filter karşılaştırması (deneysel, klinik değil)"
+            >
+              Pseudo-PCCT
+            </button>
+          )}
+          {activeSeries && (
+            <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
+          )}
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}
           <ThemeToggleBtn />
         </div>
       </header>
+      {pseudoPcctOpen && (
+        <PseudoPCCTPanel
+          renderingEngineId={RENDERING_ENGINE_ID}
+          volumeId={VOLUME_ID}
+          axialViewportId="axial"
+          onClose={() => setPseudoPcctOpen(false)}
+        />
+      )}
 
       {activeSeries && (
         <Toolbar

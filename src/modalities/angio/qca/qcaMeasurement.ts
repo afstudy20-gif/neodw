@@ -81,6 +81,29 @@ export function computeQCAMeasurements(
   const { diameters, areas, cumulativeLength } = contour;
   const n = diameters.length;
 
+  // Empty / pathologically-short contour: every downstream calculation here
+  // implicitly requires at least one diameter sample plus matching reference
+  // entry; without this guard `mld` stays Infinity, `dMax` becomes -Infinity,
+  // and stenosis percentages propagate NaN into the report.
+  if (n === 0 || referenceDiameters.length === 0) {
+    console.warn('[qca] empty diameters / referenceDiameters — returning zero measurements');
+    return {
+      mld: 0,
+      mldIndex: 0,
+      mldPosition: 0,
+      referenceDiameter: 0,
+      diameterStenosis: 0,
+      areaStenosis: 0,
+      lesionLength: 0,
+      lesionStartIndex: 0,
+      lesionEndIndex: 0,
+      proximalRefDiameter: 0,
+      distalRefDiameter: 0,
+      dMax: 0,
+      segmentLength: 0,
+    };
+  }
+
   // Find MLD
   let mld = Infinity;
   let mldIndex = 0;

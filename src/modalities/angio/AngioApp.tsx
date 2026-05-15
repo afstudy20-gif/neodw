@@ -12,6 +12,7 @@ import { createInitialSession, qcaReducer, type QCASession, type QCAAction } fro
 import angioModuleCss from './angio-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
+import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -33,6 +34,9 @@ interface AngioAppProps {
 export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
   const renderingEngineRef = useRef<cornerstone.RenderingEngine | null>(null);
   const initialFilesConsumedRef = useRef(false);
+  // Track expanded source DICOM files so the PatientName editor can
+  // re-serialize them after the user edits the tag.
+  const loadedFilesRef = useRef<File[]>([]);
 
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -47,14 +51,21 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
   const undoStackRef = useRef<QCASession[]>([]);
   const MAX_UNDO = 50;
 
+  // Keep a ref in sync with qcaSession every render. The previous closure-
+  // captured version saved the wrong snapshot when two actions fired before
+  // React re-rendered: both used the same pre-action state, so the second
+  // action's effect was lost on undo.
+  const qcaSessionRef = useRef(qcaSession);
+  qcaSessionRef.current = qcaSession;
+
   const qcaDispatch = useCallback((action: QCAAction) => {
     // Don't push undo for trivial/frequent actions
     const skipUndo = action.type === 'SET_CHART_MODE' || action.type === 'SET_ANALYSIS_TAB' || action.type === 'SET_INTERACTION' || action.type === 'SET_FRAME';
     if (!skipUndo) {
-      undoStackRef.current = [...undoStackRef.current.slice(-(MAX_UNDO - 1)), qcaSession];
+      undoStackRef.current = [...undoStackRef.current.slice(-(MAX_UNDO - 1)), qcaSessionRef.current];
     }
     qcaDispatchRaw(action);
-  }, [qcaSession]);
+  }, []);
 
   const qcaUndo = useCallback(() => {
     const stack = undoStackRef.current;
@@ -148,6 +159,7 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
         setIsLoading(false);
         return;
       }
+      loadedFilesRef.current = expanded;
       setLoadingProgress('Parsing DICOM files...');
       const series = await loadDicomFiles(expanded);
       setSeriesList(series);
@@ -393,6 +405,9 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
           )}
         </div>
         <div className="header-actions">
+          {activeSeries && (
+            <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="angio" />
+          )}
           {onBack && (
             <button className="secondary-btn" onClick={onBack}>{'<- Modality'}</button>
           )}

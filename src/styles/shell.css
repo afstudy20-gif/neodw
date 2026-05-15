@@ -1151,4 +1151,126 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 
 .nd-btn.outline:hover { background: var(--nd-accent-soft); }
 
+/* PatientName edit trigger — same visual weight as a secondary action. */
+.patient-name-edit-btn {
+  padding: 7px 12px;
+  background: var(--nd-accent-soft, rgba(88, 166, 255, 0.12));
+  color: var(--nd-text, inherit);
+  border: 1px solid var(--nd-border, rgba(255, 255, 255, 0.18));
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.patient-name-edit-btn:hover {
+  background: var(--nd-accent-soft-hover, rgba(88, 166, 255, 0.22));
+  border-color: var(--nd-primary, rgba(88, 166, 255, 0.45));
+}
+
+/* Pseudo-PCCT modal overlay. Side-by-side filter comparison. */
+.pcct-overlay {
+  position: fixed; inset: 0; z-index: 1100;
+  background: rgba(0,0,0,0.72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.pcct-modal {
+  background: var(--nd-surface, #14181d);
+  color: var(--nd-text, #e6edf3);
+  border: 1px solid var(--nd-border, #2a2f37);
+  border-radius: 10px;
+  width: min(1320px, 96vw);
+  max-height: 92vh; overflow-y: auto;
+  padding: 16px 20px 24px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+}
+.pcct-banner {
+  background: rgba(255, 90, 90, 0.10);
+  border: 1px solid rgba(255, 90, 90, 0.40);
+  color: #ffc8c8;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin-bottom: 14px;
+}
+.pcct-banner strong { color: #ff9b9b; }
+.pcct-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.pcct-header h3 { margin: 0; font-size: 16px; }
+.pcct-close {
+  padding: 6px 14px; font-size: 13px;
+  background: transparent; color: inherit;
+  border: 1px solid var(--nd-border, #2a2f37);
+  border-radius: 5px; cursor: pointer;
+}
+.pcct-close:hover { background: rgba(255,255,255,0.05); }
+.pcct-error {
+  padding: 10px; background: rgba(255,80,80,0.15);
+  border-radius: 5px; font-size: 13px; margin-bottom: 12px;
+}
+.pcct-controls {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  padding: 10px 0 14px;
+  border-bottom: 1px solid var(--nd-border, #2a2f37);
+  margin-bottom: 14px;
+}
+.pcct-controls label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; min-width: 180px;
+}
+.pcct-controls input[type=range] { width: 100%; }
+.pcct-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+.pcct-tile {
+  border: 1px solid var(--nd-border, #2a2f37);
+  border-radius: 6px;
+  background: #0a0d11;
+  padding: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pcct-tile-title {
+  font-size: 12px; font-weight: 600;
+  color: var(--nd-accent, #2f81f7);
+  letter-spacing: 0.2px;
+}
+.pcct-canvas {
+  width: 100%; height: auto; aspect-ratio: 1 / 1;
+  background: #000; image-rendering: pixelated;
+  border-radius: 4px;
+}
+.pcct-sliders { display: flex; flex-direction: column; gap: 4px; }
+.pcct-slider {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 11px; opacity: 0.92;
+}
+.pcct-slider input[type=range] { width: 100%; }
+
+/* "PCCT" trigger button in modality header — visually distinct from
+   the standard secondary buttons so users notice the experimental tool. */
+.pcct-trigger-btn {
+  padding: 7px 12px;
+  background: rgba(140, 90, 255, 0.12);
+  color: #d6c1ff;
+  border: 1px solid rgba(140, 90, 255, 0.40);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.pcct-trigger-btn:hover {
+  background: rgba(140, 90, 255, 0.22);
+  border-color: rgba(140, 90, 255, 0.65);
+}
+
+/* Generic `spin` keyframe used by the Welcome-screen refresh button
+   (added in main). Kept alongside `nd-refresh-spin` so neither button
+   loses its animation. */
 @keyframes spin { 100% { transform: rotate(360deg); } }
