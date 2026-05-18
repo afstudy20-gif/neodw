@@ -60,7 +60,7 @@ export function HUProbeOverlay({ renderingEngineId, volumeId }: Props) {
         const volume = cornerstone.cache.getVolume(volumeId);
         if (!volume?.imageData) return null;
         const imageData = volume.imageData;
-        const ijkFloat = imageData.worldToIndex(worldPos);
+        const ijkFloat = imageData.worldToIndex(worldPos as [number, number, number]);
         const dims = imageData.getDimensions();
         const i = Math.round(ijkFloat[0]);
         const j = Math.round(ijkFloat[1]);

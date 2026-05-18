@@ -14,6 +14,7 @@
     "@cornerstonejs/tools": "^4.20.4",
     "comlink": "^4.4.2",
     "dicom-parser": "^1.8.21",
+    "jspdf": "^4.2.1",
     "jszip": "^3.10.1",
     "libarchive.js": "^2.0.2",
     "react": "^18.3.1",

@@ -56,7 +56,7 @@ export interface TAVIContourSnapshot {
   patientID?: string;
   patientUID?: string;
   patientBirthDate?: string;
-  pixelPoints: TAPoint2D[]; // Optional pixel representation
+  pixelPoints?: TAPoint2D[]; // Optional pixel representation
   worldPoints: TAVIVector3D[];
   pixelValues?: Float32Array;
   pixelAreaMm2?: number;

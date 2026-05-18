@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
+import * as cornerstoneTools from '@cornerstonejs/tools';
 import { DicomDropzone } from './components/DicomDropzone';
 import { SeriesPanel } from './components/SeriesPanel';
 import { Toolbar } from './components/Toolbar';
@@ -13,6 +14,7 @@ import angioModuleCss from './angio-module.css?inline';
 import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
+import { BiplanePanel } from './biplane/BiplanePanel';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -46,6 +48,9 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
   const [loadingProgress, setLoadingProgress] = useState('');
   const [qcaActive, setQcaActive] = useState(false);
   const [currentFrame, setCurrentFrame] = useState(0);
+  const [biplaneOpen, setBiplaneOpen] = useState(false);
+
+  const xaSeriesCount = seriesList.filter((s) => s.geometry != null).length;
 
   const [qcaSession, qcaDispatchRaw] = useReducer(qcaReducer, undefined, createInitialSession);
   const undoStackRef = useRef<QCASession[]>([]);
@@ -405,6 +410,15 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
           )}
         </div>
         <div className="header-actions">
+          {activeSeries && xaSeriesCount >= 1 && (
+            <button
+              className="biplane-trigger-btn"
+              onClick={() => setBiplaneOpen(true)}
+              title={xaSeriesCount < 2 ? 'Biplane için en az 2 angio serisi gerekli' : 'Biplane 3D Reconstruction'}
+            >
+              Biplane 3D
+            </button>
+          )}
           {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="angio" />
           )}
@@ -477,6 +491,10 @@ export default function AngioApp({ onBack, initialFiles }: AngioAppProps = {}) {
             <p>{loadingProgress || 'Loading angiography...'}</p>
           </div>
         </div>
+      )}
+
+      {biplaneOpen && (
+        <BiplanePanel seriesList={seriesList} onClose={() => setBiplaneOpen(false)} />
       )}
     </div>
   );

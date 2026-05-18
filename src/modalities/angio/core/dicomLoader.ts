@@ -2,6 +2,16 @@ import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import dicomParser from 'dicom-parser';
 
+export interface CArmGeometry {
+  primaryAngle: number;    // PositionerPrimaryAngle, degrees (LAO+/RAO-)
+  secondaryAngle: number;  // PositionerSecondaryAngle, degrees (CRA+/CAU-)
+  sid: number;             // DistanceSourceToDetector, mm
+  sod: number;             // DistanceSourceToPatient, mm
+  pixelSpacing: number;    // ImagerPixelSpacing or PixelSpacing, mm/px
+  rows: number;
+  columns: number;
+}
+
 export interface DicomSeriesInfo {
   seriesInstanceUID: string;
   seriesDescription: string;
@@ -11,6 +21,7 @@ export interface DicomSeriesInfo {
   patientName: string;
   studyDescription: string;
   thumbnailImageId: string;  // first frame imageId for thumbnail
+  geometry?: CArmGeometry;   // present when C-arm tags available (XA series)
 }
 
 interface ParsedFile {
@@ -112,6 +123,48 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     numberOfFrames: getString('x00280008'),
     acquisitionNumber: getString('x00200012'),
     acquisitionTime: getString('x00080032'),
+    primaryAngle: getString('x00181510'),
+    secondaryAngle: getString('x00181511'),
+    sid: getString('x00181110'),
+    sod: getString('x00181111'),
+    imagerPixelSpacing: getString('x00181164'),
+    pixelSpacing: getString('x00280030'),
+    rows: getString('x00280010'),
+    columns: getString('x00280011'),
+  };
+}
+
+function parseGeometry(metadata: Record<string, string>): CArmGeometry | undefined {
+  const primaryAngle = Number.parseFloat(metadata.primaryAngle);
+  const secondaryAngle = Number.parseFloat(metadata.secondaryAngle);
+  const sid = Number.parseFloat(metadata.sid);
+  const sod = Number.parseFloat(metadata.sod);
+  if (
+    Number.isNaN(primaryAngle) ||
+    Number.isNaN(secondaryAngle) ||
+    Number.isNaN(sid) ||
+    Number.isNaN(sod) ||
+    sid <= 0 ||
+    sod <= 0
+  ) {
+    return undefined;
+  }
+
+  const spacingStr = metadata.imagerPixelSpacing || metadata.pixelSpacing;
+  const spacingParts = spacingStr ? spacingStr.split('\\') : [];
+  const pixelSpacing = spacingParts.length > 0 ? Number.parseFloat(spacingParts[0]) : Number.NaN;
+
+  const rows = Number.parseInt(metadata.rows, 10);
+  const columns = Number.parseInt(metadata.columns, 10);
+
+  return {
+    primaryAngle,
+    secondaryAngle,
+    sid,
+    sod,
+    pixelSpacing: Number.isFinite(pixelSpacing) && pixelSpacing > 0 ? pixelSpacing : 0.2,
+    rows: Number.isFinite(rows) ? rows : 512,
+    columns: Number.isFinite(columns) ? columns : 512,
   };
 }
 
@@ -226,6 +279,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       patientName: first.patientName || 'Unknown',
       studyDescription: first.studyDescription || 'Unknown Study',
       thumbnailImageId: parsedFiles[0]?.imageId ?? '',
+      geometry: parseGeometry(first),
     });
   }
 
