@@ -212,26 +212,10 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // Z-direction runs, then keep the longest pass that has ≥90% uniform
     // slice spacing.
 
-    function acqKey(m: Record<string, string>): string {
-      // Conservative discriminator set — pixelSpacing/imageType caused
-      // over-splitting on multi-recon studies. Kernel + thickness + explicit
-      // cardiac-phase tags are the clean splitters.
-      return [
-        m.imageOrientationPatient || '',
-        m.acquisitionNumber || '',
-        m.temporalPositionIdentifier || '',
-        m.convolutionKernel || '',
-        m.sliceThickness || '',
-        m.nominalPercentageOfCardiacPhase || '',
-      ].join('|');
-    }
-
-    const acqGroups = new Map<string, typeof filesList>();
-    for (const file of filesList) {
-      const key = acqKey(file.metadata);
-      if (!acqGroups.has(key)) acqGroups.set(key, []);
-      acqGroups.get(key)!.push(file);
-    }
+    // Trust SeriesInstanceUID as primary grouping (matches Horos/OsiriX).
+    // Only sub-UID splitter: uniform z-bucket detection for 4D cardiac
+    // interleave. acqKey-based splitting caused single UIDs to emit 12
+    // separate series — too aggressive — so we drop it entirely.
 
     function instanceNumber(m: Record<string, string>): number {
       const n = parseFloat(m.instanceNumber || '');
@@ -278,12 +262,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       return [group];
     }
 
-    const passes: typeof filesList[] = [];
-    for (const group of acqGroups.values()) {
-      for (const pass of splitGroup(group)) {
-        passes.push(pass);
-      }
-    }
+    const passes: typeof filesList[] = splitGroup(filesList);
 
     for (const pass of passes) {
       if (pass.length >= 2) {
@@ -335,7 +314,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     const emitted = [...preferred, ...auxiliary];
 
     console.log(
-      `[DICOM] UID ${uid.slice(-12)}: ${acqGroups.size} acqGroups → ${passes.length} passes → ${emitted.length} emitted`
+      `[DICOM] UID ${uid.slice(-12)}: ${passes.length} passes → ${emitted.length} emitted`
     );
 
     for (let idx = 0; idx < emitted.length; idx += 1) {
