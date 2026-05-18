@@ -133,6 +133,7 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     seriesDescription: getString('x0008103e'),
     seriesInstanceUID: getString('x0020000e'),
     sopInstanceUID: getString('x00080018'),
+    sopClassUID: getString('x00080016'),
     modality: getString('x00080060'),
     instanceNumber: getString('x00200013'),
     sliceLocation: getString('x00201041'),
@@ -152,11 +153,36 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
   };
 }
 
+// Non-image SOP class denylist — hidden from series tile list to match
+// Horos/OsiriX behavior. Files are still parseable; just not surfaced
+// as user-facing series.
+const NON_IMAGE_SOP_PREFIXES = [
+  '1.2.840.10008.5.1.4.1.1.11',
+  '1.2.840.10008.5.1.4.1.1.66',
+  '1.2.840.10008.5.1.4.1.1.67',
+  '1.2.840.10008.5.1.4.1.1.78',
+  '1.2.840.10008.5.1.4.1.1.88',
+  '1.2.840.10008.5.1.4.1.1.9',
+  '1.2.840.10008.5.1.4.1.1.104',
+  '1.2.840.10008.5.1.4.1.1.481',
+];
+
+function isNonImageSopClass(sopClassUID: string): boolean {
+  if (!sopClassUID) return false;
+  for (const prefix of NON_IMAGE_SOP_PREFIXES) {
+    if (sopClassUID === prefix || sopClassUID.startsWith(`${prefix}.`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Load files and group by series, sorted by most images first
 export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> {
   const seriesMap = new Map<string, ParsedFile[]>();
 
   let parseFailCount = 0;
+  let filteredNonImage = 0;
   const ioConcurrency = Math.max(4, Math.min(32, navigator.hardwareConcurrency || 8));
   const parsed: Array<{ imageId: string; metadata: Record<string, string>; seriesUID: string } | null> =
     new Array(files.length).fill(null);
@@ -330,6 +356,10 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       const entry = emitted[idx];
       if (entry.pass.length < 1) continue;
       const first = entry.pass[0]?.metadata ?? {};
+      if (isNonImageSopClass(first.sopClassUID || '')) {
+        filteredNonImage += 1;
+        continue;
+      }
       const kernel = first.convolutionKernel ? ` ${first.convolutionKernel}` : '';
       const thickness = first.sliceThickness ? ` ${first.sliceThickness}mm` : '';
       const phaseTag = first.nominalPercentageOfCardiacPhase
@@ -358,7 +388,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
   seriesList.sort((a, b) => b.numImages - a.numImages);
 
-  console.log(`[DICOM] Loaded ${files.length} files: ${files.length - parseFailCount} parsed, ${parseFailCount} failed, ${seriesList.length} series found`);
+  console.log(`[DICOM] Loaded ${files.length} files: ${files.length - parseFailCount} parsed, ${parseFailCount} failed, ${seriesList.length} series, filtered ${filteredNonImage} non-image`);
 
   return seriesList;
 }

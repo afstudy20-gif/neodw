@@ -2,14 +2,25 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
-type RenderMode = 'volume' | 'mip' | 'soft-tissue' | 'bone' | 'cardiac';
+type RenderMode =
+  | 'volume'
+  | 'mip'
+  | 'soft-tissue'
+  | 'bone'
+  | 'cardiac'
+  | 'cardiac3'
+  | 'coronary'
+  | 'coronary3';
 
 const PRESETS: { key: RenderMode; label: string; preset: string; description: string }[] = [
-  { key: 'volume', label: 'Volume', preset: 'CT-Chest-Contrast-Enhanced', description: 'Standard volume rendering' },
+  { key: 'volume', label: 'Volume', preset: 'CT-Chest-Contrast-Enhanced', description: 'Standard contrast-enhanced volume rendering' },
+  { key: 'cardiac3', label: 'Cardiac VRT', preset: 'CT-Cardiac3', description: 'Cinematic heart VRT — multi-color myocardium + calcium' },
+  { key: 'coronary3', label: 'Coronary VRT', preset: 'CT-Coronary-Arteries-3', description: 'Coronary arteries with vessel/myocardium contrast' },
+  { key: 'cardiac', label: 'Cardiac', preset: 'CT-Cardiac', description: 'Cardiac optimized — bone removed' },
+  { key: 'coronary', label: 'Coronary', preset: 'CT-Coronary-Arteries-2', description: 'Coronary arteries (alt preset)' },
   { key: 'mip', label: 'MIP', preset: 'CT-MIP', description: 'Maximum Intensity Projection' },
   { key: 'soft-tissue', label: 'Soft Tissue', preset: 'CT-Soft-Tissue', description: 'Soft tissue only — bone removed' },
   { key: 'bone', label: 'Bone', preset: 'CT-Bone', description: 'Bone structures only' },
-  { key: 'cardiac', label: 'Cardiac', preset: 'CT-Cardiac', description: 'Cardiac optimized — bone removed' },
 ];
 
 // Cinematic-like shading presets (ambient, diffuse, specular, specularPower)
@@ -75,8 +86,8 @@ const TISSUE_LAYERS: TissueLayer[] = [
 ];
 
 export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
-  const [mode, setMode] = useState<RenderMode>('volume');
-  const [shadingPreset, setShadingPreset] = useState<ShadingPreset>('standard');
+  const [mode, setMode] = useState<RenderMode>('cardiac3');
+  const [shadingPreset, setShadingPreset] = useState<ShadingPreset>('cinematic');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Tissue visibility toggles
@@ -90,10 +101,12 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   const presetCounterRef = useRef(0); // Force unique preset names to bypass cache
 
   // Advanced shading sliders
-  const [ambient, setAmbient] = useState(0.1);
-  const [diffuse, setDiffuse] = useState(0.9);
-  const [specular, setSpecular] = useState(0.2);
-  const [specularPower, setSpecularPower] = useState(10);
+  // Defaults match the 'cinematic' shading preset for crisper, more
+  // VRT-like output (closer to Horos look) than the flat 'standard' values.
+  const [ambient, setAmbient] = useState(0.05);
+  const [diffuse, setDiffuse] = useState(0.7);
+  const [specular, setSpecular] = useState(0.65);
+  const [specularPower, setSpecularPower] = useState(64);
   const [sampleQuality, setSampleQuality] = useState(1.0);
 
   const getViewport3d = () => {
