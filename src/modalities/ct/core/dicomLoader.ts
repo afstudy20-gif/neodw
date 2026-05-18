@@ -132,6 +132,7 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     studyDate: getString('x00080020'),
     seriesDescription: getString('x0008103e'),
     seriesInstanceUID: getString('x0020000e'),
+    sopInstanceUID: getString('x00080018'),
     modality: getString('x00080060'),
     instanceNumber: getString('x00200013'),
     sliceLocation: getString('x00201041'),
@@ -140,6 +141,14 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     temporalPositionIdentifier: getString('x00200100'),
     acquisitionTime: getString('x00080032'),
     imageOrientationPatient: getString('x00200037'),
+    convolutionKernel: getString('x00181210'),
+    sliceThickness: getString('x00180050'),
+    pixelSpacing: getString('x00280030'),
+    contrastBolusAgent: getString('x00180010'),
+    imageType: getString('x00080008'),
+    cardiacRRIntervalSpecified: getString('x0018a005'),
+    nominalPercentageOfCardiacPhase: getString('x00209241'),
+    triggerTime: getString('x00181060'),
   };
 }
 
@@ -209,6 +218,13 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         m.acquisitionTime || '',
         m.acquisitionNumber || '',
         m.temporalPositionIdentifier || '',
+        m.convolutionKernel || '',
+        m.sliceThickness || '',
+        m.pixelSpacing || '',
+        m.imageType || '',
+        m.cardiacRRIntervalSpecified || '',
+        m.nominalPercentageOfCardiacPhase || '',
+        m.triggerTime || '',
       ].join('|');
     }
 
@@ -224,9 +240,39 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       return Number.isFinite(n) ? n : 0;
     }
 
-    const passes: typeof filesList[] = [];
-    for (const group of acqGroups.values()) {
+    function splitGroup(group: typeof filesList): typeof filesList[] {
+      if (group.length < 2) return [group];
+      // Z-bucket parallel-phase split.
+      const zBuckets = new Map<number, typeof filesList>();
+      for (const f of group) {
+        const z = Math.round(getSlicePosition(f.metadata) * 100);
+        if (!zBuckets.has(z)) zBuckets.set(z, []);
+        zBuckets.get(z)!.push(f);
+      }
+      let maxBucket = 0;
+      for (const bucket of zBuckets.values()) {
+        if (bucket.length > maxBucket) maxBucket = bucket.length;
+      }
+      if (maxBucket > 1) {
+        for (const bucket of zBuckets.values()) {
+          bucket.sort((a, b) =>
+            (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
+            instanceNumber(a.metadata) - instanceNumber(b.metadata)
+          );
+        }
+        const sortedZ = [...zBuckets.keys()].sort((a, b) => a - b);
+        const phases: typeof filesList[] = Array.from({ length: maxBucket }, () => []);
+        for (const z of sortedZ) {
+          const bucket = zBuckets.get(z)!;
+          for (let i = 0; i < bucket.length; i += 1) {
+            phases[i].push(bucket[i]);
+          }
+        }
+        return phases.filter((p) => p.length > 0);
+      }
+      // Sequential direction-reversal split.
       group.sort((a, b) => instanceNumber(a.metadata) - instanceNumber(b.metadata));
+      const out: typeof filesList[] = [];
       let current: typeof filesList = [];
       let lastZ: number | null = null;
       let direction: 0 | 1 | -1 = 0;
@@ -238,9 +284,8 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
           continue;
         }
         const dz = z - lastZ;
-        const absDz = Math.abs(dz);
-        if (absDz < 1e-3) {
-          passes.push(current);
+        if (Math.abs(dz) < 1e-3) {
+          out.push(current);
           current = [file];
           lastZ = z;
           direction = 0;
@@ -248,7 +293,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         }
         const newDir: 1 | -1 = dz > 0 ? 1 : -1;
         if (direction !== 0 && newDir !== direction) {
-          passes.push(current);
+          out.push(current);
           current = [file];
           lastZ = z;
           direction = 0;
@@ -258,7 +303,15 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         lastZ = z;
         direction = newDir;
       }
-      if (current.length > 0) passes.push(current);
+      if (current.length > 0) out.push(current);
+      return out;
+    }
+
+    const passes: typeof filesList[] = [];
+    for (const group of acqGroups.values()) {
+      for (const pass of splitGroup(group)) {
+        passes.push(pass);
+      }
     }
 
     for (const pass of passes) {
@@ -310,17 +363,30 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       .sort((a, b) => b.pass.length - a.pass.length);
     const emitted = [...preferred, ...auxiliary];
 
+    console.log(
+      `[DICOM] UID ${uid.slice(-12)}: ${acqGroups.size} acqGroups → ${passes.length} passes → ${emitted.length} emitted`
+    );
+
     for (let idx = 0; idx < emitted.length; idx += 1) {
       const entry = emitted[idx];
       if (entry.pass.length < 1) continue;
       const first = entry.pass[0]?.metadata ?? {};
+      const kernel = first.convolutionKernel ? ` ${first.convolutionKernel}` : '';
+      const thickness = first.sliceThickness ? ` ${first.sliceThickness}mm` : '';
+      const phaseTag = first.nominalPercentageOfCardiacPhase
+        ? ` ${first.nominalPercentageOfCardiacPhase}%`
+        : first.triggerTime
+          ? ` ${first.triggerTime}ms`
+          : first.acquisitionTime
+            ? ` @ ${first.acquisitionTime}`
+            : '';
       const phaseLabel = emitted.length > 1
-        ? ` · phase ${idx + 1}/${emitted.length}${first.acquisitionTime ? ` @ ${first.acquisitionTime}` : ''}`
-        : '';
+        ? ` · ${idx + 1}/${emitted.length}${kernel}${thickness}${phaseTag}`
+        : `${kernel}${thickness}`;
 
       seriesList.push({
         seriesInstanceUID: emitted.length > 1 ? `${uid}__pass${idx}` : uid,
-        seriesDescription: `${first.seriesDescription || 'Unknown Series'}${phaseLabel}`,
+        seriesDescription: `${first.seriesDescription || 'Unknown Series'}${phaseLabel}`.trim(),
         modality: first.modality || 'Unknown',
         numImages: entry.pass.length,
         imageIds: entry.pass.map((f) => f.imageId),
