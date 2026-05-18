@@ -10,6 +10,19 @@ export interface DicomSeriesInfo {
   imageIds: string[];
   patientName: string;
   studyDescription: string;
+  sopClassUID?: string;
+}
+
+// Secondary Capture variants (incl. multi-frame true/grayscale/color).
+// Cornerstone OrthographicViewport expects a multi-slice MONOCHROME2
+// volume; SC is typically 1-frame RGB and must render via stack
+// viewport instead.
+export function isSecondaryCaptureSopClass(sopClassUID: string | undefined): boolean {
+  if (!sopClassUID) return false;
+  return (
+    sopClassUID === '1.2.840.10008.5.1.4.1.1.7' ||
+    sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7.')
+  );
 }
 
 interface ParsedFile {
@@ -451,6 +464,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         imageIds: entry.pass.map((f) => f.imageId),
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
+        sopClassUID: first.sopClassUID || '',
       });
     }
   }
