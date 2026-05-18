@@ -99,19 +99,20 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     // Fallback: parse as raw/implicit little-endian DICOM (no Part 10 header).
     // Many PACS exports and older scanners produce files without the DICM preamble.
     // We create a ByteStream and parse directly as implicit LE, stopping before pixel data.
+    const parser = dicomParser as any;
     try {
-      const byteStream = new dicomParser.ByteStream(dicomParser.littleEndianByteArrayParser, byteArray, 0);
+      const byteStream = new parser.ByteStream(parser.littleEndianByteArrayParser, byteArray, 0);
       const elements: Record<string, any> = {};
-      dataSet = new dicomParser.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      (dicomParser as any).parseDicomDataSetImplicit(dataSet, byteStream, byteArray.length, {
+      dataSet = new parser.DataSet(byteStream.byteArrayParser, byteArray, elements);
+      parser.parseDicomDataSetImplicit(dataSet, byteStream, byteArray.length, {
         untilTag: 'x7fe00010',
       });
     } catch {
       // If implicit parsing also fails, try explicit LE without header
-      const byteStream = new dicomParser.ByteStream(dicomParser.littleEndianByteArrayParser, byteArray, 0);
+      const byteStream = new parser.ByteStream(parser.littleEndianByteArrayParser, byteArray, 0);
       const elements: Record<string, any> = {};
-      dataSet = new dicomParser.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      (dicomParser as any).parseDicomDataSetExplicit(dataSet, byteStream, byteArray.length, {
+      dataSet = new parser.DataSet(byteStream.byteArrayParser, byteArray, elements);
+      parser.parseDicomDataSetExplicit(dataSet, byteStream, byteArray.length, {
         untilTag: 'x7fe00010',
       });
     }
@@ -166,7 +167,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         let fileToLoad: File = file;
         if (needsWrapper) {
           const wrapped = wrapWithPart10Header(byteArray);
-          fileToLoad = new File([wrapped], file.name, { type: 'application/dicom' });
+          fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
         }
         const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
         parsed[index] = {
@@ -296,26 +297,33 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       return { score: matches / diffCount, spacing };
     }
 
+    // Emit one series per acquisition pass (phase, kernel, orientation) so the
+    // UI matches what Horos/OsiriX show. Each pass is a geometrically coherent
+    // slab; vendors stuff multiple per SeriesInstanceUID.
     const measured = passes.map((pass) => ({ pass, ...measureUniformity(pass) }));
-    let scored = measured
+
+    const preferred = measured
       .filter((entry) => entry.pass.length >= 10 && entry.score >= 0.9)
       .sort((a, b) => b.pass.length - a.pass.length);
-    if (scored.length === 0) {
-      scored = measured
-        .filter((entry) => entry.pass.length >= 2)
-        .sort((a, b) => b.pass.length - a.pass.length);
-    }
+    const auxiliary = measured
+      .filter((entry) => !(entry.pass.length >= 10 && entry.score >= 0.9))
+      .sort((a, b) => b.pass.length - a.pass.length);
+    const emitted = [...preferred, ...auxiliary];
 
-    if (scored.length > 0) {
-      const primaryPass = scored[0].pass;
-      const first = primaryPass[0]?.metadata ?? {};
+    for (let idx = 0; idx < emitted.length; idx += 1) {
+      const entry = emitted[idx];
+      if (entry.pass.length < 1) continue;
+      const first = entry.pass[0]?.metadata ?? {};
+      const phaseLabel = emitted.length > 1
+        ? ` · phase ${idx + 1}/${emitted.length}${first.acquisitionTime ? ` @ ${first.acquisitionTime}` : ''}`
+        : '';
 
       seriesList.push({
-        seriesInstanceUID: uid,
-        seriesDescription: first.seriesDescription || 'Unknown Series',
+        seriesInstanceUID: emitted.length > 1 ? `${uid}__pass${idx}` : uid,
+        seriesDescription: `${first.seriesDescription || 'Unknown Series'}${phaseLabel}`,
         modality: first.modality || 'Unknown',
-        numImages: filesList.length,
-        imageIds: primaryPass.map((f) => f.imageId),
+        numImages: entry.pass.length,
+        imageIds: entry.pass.map((f) => f.imageId),
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
         studyDate: first.studyDate || '',

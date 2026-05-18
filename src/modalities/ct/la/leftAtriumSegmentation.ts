@@ -280,7 +280,7 @@ export function worldToIJK(
 ): [number, number, number] | null {
   const volume = cornerstone.cache.getVolume(sourceVolumeId);
   if (!volume?.imageData) return null;
-  const ijk = volume.imageData.worldToIndex(worldPos);
+  const ijk = volume.imageData.worldToIndex(worldPos as [number, number, number]);
   const dims = volume.imageData.getDimensions();
   const i = Math.round(ijk[0]);
   const j = Math.round(ijk[1]);

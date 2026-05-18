@@ -346,28 +346,42 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       return { score: matches / diffCount, spacing };
     }
 
-    // Score passes: prefer long + uniformly-spaced.
+    // Emit one series per *acquisition pass* (different phase, kernel, or orientation
+    // within the same SeriesInstanceUID). Vendors routinely stuff 8-20 cardiac
+    // phases under a single SeriesInstanceUID — Horos/OsiriX split them, and so
+    // should we. Score-based ordering still applies (best volumetric pass first).
     const measured = passes.map((pass) => ({ pass, ...measureUniformity(pass) }));
-    let scored = measured
+
+    // Preferred set: long, uniformly spaced volumetric passes.
+    const preferred = measured
       .filter((entry) => entry.pass.length >= 10 && entry.score >= 0.9)
       .sort((a, b) => b.pass.length - a.pass.length);
-    if (scored.length === 0) {
-      // Fallback: largest pass (older data without AcquisitionTime/Number tags).
-      scored = measured
-        .filter((entry) => entry.pass.length >= 2)
-        .sort((a, b) => b.pass.length - a.pass.length);
-    }
 
-    if (scored.length > 0) {
-      const primaryPass = scored[0].pass;
-      const first = primaryPass[0]?.metadata ?? {};
+    // Auxiliary set: localizers, topograms, derived screenshots, short stacks.
+    // Kept so the UI mirrors what the scanner produced — user can pick any.
+    const auxiliary = measured
+      .filter((entry) => !(entry.pass.length >= 10 && entry.score >= 0.9))
+      .sort((a, b) => b.pass.length - a.pass.length);
+
+    const emitted = [...preferred, ...auxiliary];
+
+    for (let idx = 0; idx < emitted.length; idx += 1) {
+      const entry = emitted[idx];
+      if (entry.pass.length < 1) continue;
+      const first = entry.pass[0]?.metadata ?? {};
+      const baseDescription = first.seriesDescription || 'Unknown Series';
+      const phaseLabel = emitted.length > 1
+        ? ` · phase ${idx + 1}/${emitted.length}${first.acquisitionTime ? ` @ ${first.acquisitionTime}` : ''}`
+        : '';
 
       seriesList.push({
-        seriesInstanceUID: seriesInstanceUID,
-        seriesDescription: first.seriesDescription || 'Unknown Series',
+        seriesInstanceUID: emitted.length > 1
+          ? `${seriesInstanceUID}__pass${idx}`
+          : seriesInstanceUID,
+        seriesDescription: `${baseDescription}${phaseLabel}`,
         modality: first.modality || 'Unknown',
-        numImages: filesList.length, // Display the true physical length for UI matching
-        imageIds: primaryPass.map((entry) => entry.imageId), // Only load geometrically contiguous slices
+        numImages: entry.pass.length,
+        imageIds: entry.pass.map((f) => f.imageId),
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
       });

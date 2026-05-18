@@ -401,7 +401,7 @@ function parseWithCreator(ds: any, cb: number, hint?: { rows?: number; columns?:
           g, 
           width: winner.cand.w, 
           height: winner.cand.h, 
-          samplesPerPixel: winner.spp, 
+          samplesPerPixel: winner.spp as 1 | 3,
           frameCount: winner.count, 
           bytesPerFrame: winner.cand.w * winner.cand.h * winner.spp, 
           pixEl, 

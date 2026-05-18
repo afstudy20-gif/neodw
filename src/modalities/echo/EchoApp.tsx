@@ -446,7 +446,7 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
     }
     let tg = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
     if (!tg) {
-      tg = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_ID) ?? null;
+      tg = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_ID) ?? undefined;
     }
     if (tg) {
       // Add tools if not present (safe to call even if already added)
@@ -964,11 +964,11 @@ export default function EchoApp({ onBack, initialFiles, title, mode = 'echo' }: 
       try { renderingEngineRef.current?.render(); } catch {}
     };
     try {
-      (cornerstoneTools as any).eventTarget?.addEventListener?.(evt, handler);
+      (cornerstone as any).eventTarget?.addEventListener?.(evt, handler);
     } catch {}
     return () => {
       try {
-        (cornerstoneTools as any).eventTarget?.removeEventListener?.(evt, handler);
+        (cornerstone as any).eventTarget?.removeEventListener?.(evt, handler);
       } catch {}
     };
   }, []);

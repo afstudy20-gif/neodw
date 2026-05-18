@@ -6,6 +6,8 @@ import { useTheme } from '../../theme/ThemeProvider';
 import { expandAndFilterDicom } from '../../shared/fileIntake';
 import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 import { PseudoPCCTPanel } from '../ct/pcct/PseudoPCCTPanel';
+import { SlabProjection } from '../ct/components/SlabProjection';
+import { CoronarySegPanel } from './segmentation/CoronarySegPanel';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -40,6 +42,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   // so it can re-serialize them with an updated PatientName tag.
   const loadedFilesRef = useRef<File[]>([]);
   const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
+  const [coronarySegOpen, setCoronarySegOpen] = useState(false);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -453,6 +456,16 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
             </button>
           )}
           {activeSeries && (
+            <button
+              type="button"
+              className="coronary-seg-trigger-btn"
+              onClick={() => setCoronarySegOpen(true)}
+              title="Coronary Tree Segmentation (scaffold — heuristik HU flood fill)"
+            >
+              Coronary Seg
+            </button>
+          )}
+          {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
           )}
           {onBack && (
@@ -467,6 +480,15 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           volumeId={VOLUME_ID}
           axialViewportId="axial"
           onClose={() => setPseudoPcctOpen(false)}
+        />
+      )}
+
+      {coronarySegOpen && (
+        <CoronarySegPanel
+          renderingEngineId={RENDERING_ENGINE_ID}
+          volumeId={VOLUME_ID}
+          axialViewportId="axial"
+          onClose={() => setCoronarySegOpen(false)}
         />
       )}
 
@@ -497,11 +519,17 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
             onExportSeries={exportSeriesAsDicom}
             isLoading={isLoading}
           />
-          <div className="viewer-column">
+          <div className="viewer-column" style={{ position: 'relative' }}>
             <ViewportGrid
               renderingEngineId={RENDERING_ENGINE_ID}
               setupToken={viewportSetupToken}
             />
+            <div className="slab-overlay-controls">
+              <SlabProjection
+                renderingEngineId={RENDERING_ENGINE_ID}
+                viewportIds={[...ORTHO_VIEWPORT_IDS]}
+              />
+            </div>
             <div className="ccta-transport">
               {seriesList.length > 1 && (
                 <button

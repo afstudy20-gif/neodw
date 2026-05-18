@@ -22,6 +22,7 @@ import { MetadataPanel } from './components/MetadataPanel';
 import { SegmentationPanel } from './components/SegmentationPanel';
 import { VolumeStats } from './components/VolumeStats';
 import { RenderModeSelector } from './components/RenderModeSelector';
+import { SlabProjection } from './components/SlabProjection';
 import { SeriesPanel } from './components/SeriesPanel';
 import { TAVIPanel, TAVIPanelHandle } from './components/TAVIPanel';
 import { ViewAnglePresets } from './components/ViewAnglePresets';
@@ -362,7 +363,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     await new Promise(r => setTimeout(r, 300));
 
     try {
-      const stackEl = document.getElementById('viewport-stack2d');
+      const stackEl = document.getElementById('viewport-stack2d') as HTMLDivElement | null;
       if (!stackEl) throw new Error('Stack viewport element not found');
 
       // Enable a StackViewport on the stack2d element
@@ -615,8 +616,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             }
           }
         }, 150);
-      } else if (prev === 'tavi' && next !== 'tavi') {
-        setViewportMode(next === 'hand-mr' ? 'hand-mr' : 'standard');
+      } else if (prev === 'tavi' && (next as RightPanel) !== 'tavi') {
+        setViewportMode((next as RightPanel) === 'hand-mr' ? 'hand-mr' : 'standard');
         setReportExpanded(false);
         exitDoubleObliqueMode(RENDERING_ENGINE_ID);
         resizeViewports();
@@ -628,7 +629,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           const engine = renderingEngineRef.current;
           if (engine) engine.resize(true, false);
         }, 150);
-      } else if (prev === 'hand-mr' && next !== 'hand-mr' && next !== 'tavi') {
+      } else if (prev === 'hand-mr' && (next as RightPanel) !== 'hand-mr' && (next as RightPanel) !== 'tavi') {
         setViewportMode('standard');
         resizeViewports();
       }
@@ -930,6 +931,16 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             {viewportMode === 'volume-3d' && (
               <div className="vol3d-overlay-controls">
                 <RenderModeSelector renderingEngineId={RENDERING_ENGINE_ID} volumeId={VOLUME_ID} />
+              </div>
+            )}
+
+            {/* MPR modes: slab projection floating panel */}
+            {viewportMode !== 'volume-3d' && activeSeries && (
+              <div className="slab-overlay-controls">
+                <SlabProjection
+                  renderingEngineId={RENDERING_ENGINE_ID}
+                  viewportIds={MPR_VIEWPORT_IDS}
+                />
               </div>
             )}
 

@@ -560,7 +560,7 @@ export async function loadEchoFiles(files: File[]): Promise<EchoSeriesInfo[]> {
       let toLoad: Blob = file;
       if (!hasPart10Header(bytes)) {
         const wrapped = wrapPart10(bytes);
-        toLoad = new Blob([wrapped], { type: 'application/dicom' });
+        toLoad = new Blob([wrapped.buffer as ArrayBuffer], { type: 'application/dicom' });
       }
       const blobUrl = URL.createObjectURL(toLoad);
       createdBlobUrls.add(blobUrl);

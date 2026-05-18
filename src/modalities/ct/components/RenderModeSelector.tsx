@@ -631,7 +631,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     if (!viewport) return;
     try {
       const actor = viewport.getDefaultActor()?.actor;
-      const mapper = actor?.getMapper?.();
+      const mapper = actor?.getMapper?.() as any;
       if (!mapper) return;
 
       // Remove existing clipping planes
@@ -1305,3 +1305,4 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     </div>
   );
 }
+

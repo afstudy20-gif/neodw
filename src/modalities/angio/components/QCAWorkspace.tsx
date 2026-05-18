@@ -94,6 +94,57 @@ export function QCAWorkspace({ session, dispatch, currentFrame, imageCount }: Pr
     URL.revokeObjectURL(url);
   }
 
+  async function exportPDF(s: QCASession, encapsulate: boolean) {
+    if (!s.measurements) return;
+    const m = s.measurements;
+    const { buildPdfReport, downloadPdf } = await import('../../../shared/dicom/pdfReport');
+    const { downloadEncapsulatedPdf } = await import('../../../shared/dicom/encapsulatedPdf');
+    const sections: import('../../../shared/dicom/pdfReport').ReportSection[] = [
+      {
+        title: 'Stenosis Metrics',
+        rows: [
+          { label: 'Diameter Stenosis', value: fmt(m.diameterStenosis, 1), unit: '%' },
+          { label: 'MLD', value: fmt(m.mld), unit: 'mm' },
+          { label: 'Reference Diameter', value: fmt(m.referenceDiameter), unit: 'mm' },
+          { label: 'Lesion Length', value: fmt(m.lesionLength), unit: 'mm' },
+          { label: 'Area Stenosis', value: fmt(m.areaStenosis, 1), unit: '%' },
+          { label: 'DMax', value: fmt(m.dMax), unit: 'mm' },
+        ],
+      },
+      {
+        title: 'Reference Segment',
+        rows: [
+          { label: 'Proximal Ref Diameter', value: fmt(m.proximalRefDiameter), unit: 'mm' },
+          { label: 'Distal Ref Diameter', value: fmt(m.distalRefDiameter), unit: 'mm' },
+          { label: 'Segment Length', value: fmt(m.segmentLength), unit: 'mm' },
+          ...(s.calibration ? [{ label: 'Pixel Size', value: s.calibration.mmPerPixel.toFixed(4), unit: 'mm/px' }] : []),
+        ],
+      },
+    ];
+    if (s.ffrResult) {
+      sections.push({
+        title: 'Virtual FFR',
+        rows: [
+          { label: 'vFFR', value: s.ffrResult.vffr.toFixed(2) },
+          { label: 'Aortic Pressure', value: String(s.ffrResult.aoPress), unit: 'mmHg' },
+          { label: 'Significant', value: s.ffrResult.isSignificant ? 'Yes' : 'No' },
+        ],
+      });
+    }
+    const pdf = await buildPdfReport({
+      title: 'Quantitative Coronary Angiography Report',
+      modality: 'XA',
+      sections,
+      footnote: 'NeoDW QCA + vFFR. Research use only.',
+    });
+    const stamp = Date.now();
+    if (encapsulate) {
+      downloadEncapsulatedPdf({ pdfBytes: pdf, documentTitle: 'QCA Report' }, `qca-report-${stamp}.dcm`);
+    } else {
+      downloadPdf(pdf, `qca-report-${stamp}.pdf`);
+    }
+  }
+
   function handleCalculateFFR() {
     if (!session.contour || !session.referenceDiameters.length) return;
     const result = calculateVFFR(session.contour, session.referenceDiameters, aoPress);
@@ -423,6 +474,12 @@ export function QCAWorkspace({ session, dispatch, currentFrame, imageCount }: Pr
               </button>
               <button className="secondary-btn small" onClick={() => exportCSV(session)}>
                 Export CSV
+              </button>
+              <button className="secondary-btn small" onClick={() => void exportPDF(session, false)}>
+                Export PDF
+              </button>
+              <button className="secondary-btn small" onClick={() => void exportPDF(session, true)} title="PDF wrapped in DICOM Encapsulated PDF SOP">
+                PDF-in-DCM
               </button>
             </div>
           </div>
