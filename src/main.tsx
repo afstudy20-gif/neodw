@@ -3,6 +3,42 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles/shell.css';
 
+// ── PWA auto-update via vite-plugin-pwa / Workbox ────────────────────────
+// Registers the generated service worker (dist/sw.js). On every page load
+// the SW pings for a new revision; when found it installs in the
+// background and `skipWaiting + clientsClaim` (set in vite.config.ts)
+// promote it immediately. We listen for the activation event and reload
+// the page silently so the user sees fresh code without manual cache-
+// clearing. Falls through gracefully if SW is unsupported.
+if ('serviceWorker' in navigator) {
+  void import('virtual:pwa-register').then(({ registerSW }) => {
+    const updateSW = registerSW({
+      immediate: true,
+      onRegisteredSW(swUrl, registration) {
+        if (!registration) return;
+        // Belt-and-suspenders: poll for SW updates every 30 minutes in case
+        // the user keeps the PWA open for a long session.
+        setInterval(() => {
+          registration.update().catch(() => undefined);
+        }, 30 * 60 * 1000);
+      },
+      onNeedRefresh() {
+        // A new SW has installed and is waiting. Activate immediately and
+        // reload to pick up the fresh app shell + chunks.
+        void updateSW(true);
+      },
+      onOfflineReady() {
+        // App shell is fully precached — no UX needed; this is informational.
+        // eslint-disable-next-line no-console
+        console.info('[pwa] offline-ready');
+      },
+    });
+  }).catch((err) => {
+    // Module may be absent in dev (devOptions.enabled === false) — safe to ignore.
+    console.warn('[pwa] registerSW skipped:', err);
+  });
+}
+
 // Chunk-load recovery. After a new build is deployed the hashed asset
 // filenames change. If a browser still has the old index.html cached,
 // React.lazy()'s dynamic import resolves to a 404 and the whole screen
