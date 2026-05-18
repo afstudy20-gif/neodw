@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
+import * as cornerstoneTools from '@cornerstonejs/tools';
+import { getToolNames } from '../../../shared/core/cornerstone';
 import { RenderModeSelector } from '../../ct/components/RenderModeSelector';
 
 interface Props {
@@ -7,6 +9,8 @@ interface Props {
   volumeId: string;
   onClose: () => void;
 }
+
+const CARDIAC_3D_TOOL_GROUP_ID = 'cardiac3dToolGroup';
 
 // Full-screen 3D Volume Rendering panel for CCTA. Mounts a fresh VOLUME_3D
 // viewport on top of the existing rendering engine, attaches the volume,
@@ -43,6 +47,41 @@ export function Cardiac3DView({ renderingEngineId, volumeId, onClose }: Props) {
           viewport.setProperties({ preset: 'CT-Cardiac3' });
           viewport.render();
         }
+
+        // Mouse interaction. VOLUME_3D viewport without a tool group is a
+        // static image — primary-drag for trackball rotation, middle/shift
+        // for pan, right for zoom. Tool group is scoped to this modal and
+        // destroyed on close so it doesn't bleed into MPR interactions.
+        try {
+          const names = getToolNames();
+          try {
+            cornerstoneTools.ToolGroupManager.destroyToolGroup(CARDIAC_3D_TOOL_GROUP_ID);
+          } catch { /* may not exist yet */ }
+          const tg = cornerstoneTools.ToolGroupManager.createToolGroup(CARDIAC_3D_TOOL_GROUP_ID);
+          if (tg) {
+            tg.addTool(names.TrackballRotate);
+            tg.addTool(names.Pan);
+            tg.addTool(names.Zoom);
+            tg.addViewport(viewportId, renderingEngineId);
+            tg.setToolActive(names.TrackballRotate, {
+              bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+            });
+            tg.setToolActive(names.Pan, {
+              bindings: [
+                { mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary },
+                {
+                  mouseButton: cornerstoneTools.Enums.MouseBindings.Primary,
+                  modifierKey: cornerstoneTools.Enums.KeyboardBindings.Shift,
+                },
+              ],
+            });
+            tg.setToolActive(names.Zoom, {
+              bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
+            });
+          }
+        } catch (toolErr) {
+          console.warn('[cardiac-3d] tool group setup failed', toolErr);
+        }
       } catch (err) {
         console.warn('[cardiac-3d] setup failed', err);
       }
@@ -51,10 +90,11 @@ export function Cardiac3DView({ renderingEngineId, volumeId, onClose }: Props) {
     return () => {
       mounted = false;
       try {
+        cornerstoneTools.ToolGroupManager.destroyToolGroup(CARDIAC_3D_TOOL_GROUP_ID);
+      } catch { /* ignore */ }
+      try {
         engine.disableElement('volume3d');
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     };
   }, [renderingEngineId, volumeId]);
 
