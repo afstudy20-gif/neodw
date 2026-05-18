@@ -82,6 +82,7 @@ export interface DicomSeriesInfo {
   patientName: string;
   studyDescription: string;
   studyDate: string;
+  sopClassUID?: string;
 }
 
 interface ParsedFile {
@@ -382,6 +383,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         patientName: first.patientName || 'Unknown',
         studyDescription: first.studyDescription || 'Unknown Study',
         studyDate: first.studyDate || '',
+        sopClassUID: first.sopClassUID || '',
       });
     }
   }

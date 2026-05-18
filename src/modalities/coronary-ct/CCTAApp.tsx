@@ -23,7 +23,8 @@ import { SeriesPanel } from './components/SeriesPanel';
 import { Toolbar } from './components/Toolbar';
 import { ViewportGrid } from './components/ViewportGrid';
 import { CoronaryWorkspace } from './components/CoronaryWorkspace';
-import { createVolume, loadDicomFiles, type DicomSeriesInfo } from './core/dicomLoader';
+import { createVolume, loadDicomFiles, isSecondaryCaptureSopClass, type DicomSeriesInfo } from './core/dicomLoader';
+import { SecondaryCaptureViewer } from './components/SecondaryCaptureViewer';
 import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
 import { attachAdvancedInteractions, destroyToolGroups, resetCrosshairsToCenter, setupToolGroups } from './core/toolManager';
 
@@ -45,6 +46,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
   const [coronarySegOpen, setCoronarySegOpen] = useState(false);
   const [cardiac3dOpen, setCardiac3dOpen] = useState(false);
+  const [scViewerSeries, setScViewerSeries] = useState<DicomSeriesInfo | null>(null);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -131,7 +133,10 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
         return;
       }
 
-      await loadSeries(series[0]);
+      // Auto-pick first volumetric series (skip SC screenshots so the
+      // study opens on MPR rather than a 1-frame preview).
+      const firstVolumetric = series.find((s) => !isSecondaryCaptureSopClass(s.sopClassUID) && s.numImages >= 2);
+      await loadSeries(firstVolumetric ?? series[0]);
     } catch (loadError: any) {
       setError(`Failed to load DICOM files: ${loadError.message}`);
     } finally {
@@ -142,6 +147,14 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   async function loadSeries(series: DicomSeriesInfo) {
     const engine = renderingEngineRef.current;
     if (!engine) {
+      return;
+    }
+
+    // Secondary Capture (pre-rendered 3D screenshot from the scanner
+    // workstation, typically RGB) cannot form a meaningful MPR volume.
+    // Route directly to the 2D SC viewer instead of the volume pipeline.
+    if (isSecondaryCaptureSopClass(series.sopClassUID)) {
+      setScViewerSeries(series);
       return;
     }
 
@@ -509,6 +522,13 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           renderingEngineId={RENDERING_ENGINE_ID}
           volumeId={VOLUME_ID}
           onClose={() => setCardiac3dOpen(false)}
+        />
+      )}
+
+      {scViewerSeries && (
+        <SecondaryCaptureViewer
+          series={scViewerSeries}
+          onClose={() => setScViewerSeries(null)}
         />
       )}
 
