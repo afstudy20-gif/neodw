@@ -150,10 +150,12 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
       return;
     }
 
-    // Secondary Capture (pre-rendered 3D screenshot from the scanner
-    // workstation, typically RGB) cannot form a meaningful MPR volume.
-    // Route directly to the 2D SC viewer instead of the volume pipeline.
-    if (isSecondaryCaptureSopClass(series.sopClassUID)) {
+    // Single-frame series (Secondary Capture screenshots, derived CT
+    // renderings stored as 1-slice CT Image Storage, scanner 3D
+    // screenshots) cannot form a volumetric MPR. Route to the 2D SC
+    // viewer regardless of declared SOP class — many vendors stuff
+    // pre-rendered 3D into CT Image Storage rather than SC.
+    if (series.numImages <= 1 || isSecondaryCaptureSopClass(series.sopClassUID)) {
       setScViewerSeries(series);
       return;
     }
