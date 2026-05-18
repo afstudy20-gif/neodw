@@ -105,6 +105,7 @@ function parseMetadata(byteArray: Uint8Array): Record<string, string> {
     seriesDescription: getString('x0008103e'),
     seriesInstanceUID: getString('x0020000e'),
     sopInstanceUID: getString('x00080018'),
+    sopClassUID: getString('x00080016'),
     modality: getString('x00080060'),
     instanceNumber: getString('x00200013'),
     sliceLocation: getString('x00201041'),
@@ -194,9 +195,36 @@ export function getSeriesPreferenceScore(series: Pick<DicomSeriesInfo, 'seriesDe
   return score;
 }
 
+// SOP Classes that are not image objects and should be hidden from the
+// series tile list (radiologist-facing). Horos / OsiriX hide these by
+// default. The underlying files are still readable; they just don't
+// appear as separate user-facing series. Pattern-based match — any
+// prefix in this list deny-lists the series.
+const NON_IMAGE_SOP_PREFIXES = [
+  '1.2.840.10008.5.1.4.1.1.11',   // Presentation State variants
+  '1.2.840.10008.5.1.4.1.1.66',   // Segmentation / Surface Segmentation
+  '1.2.840.10008.5.1.4.1.1.67',   // Realworld Value Map
+  '1.2.840.10008.5.1.4.1.1.78',   // Spectacle Prescription, Macular Grid
+  '1.2.840.10008.5.1.4.1.1.88',   // Structured Report variants
+  '1.2.840.10008.5.1.4.1.1.9',    // Waveform (covers 9.x — guarded by exact prefix below for image overlap)
+  '1.2.840.10008.5.1.4.1.1.104',  // Encapsulated PDF / CDA
+  '1.2.840.10008.5.1.4.1.1.481',  // RT Plan / Structure Set / Dose / Image
+];
+
+function isNonImageSopClass(sopClassUID: string): boolean {
+  if (!sopClassUID) return false;
+  for (const prefix of NON_IMAGE_SOP_PREFIXES) {
+    if (sopClassUID === prefix || sopClassUID.startsWith(`${prefix}.`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> {
   const seriesMap = new Map<string, ParsedFile[]>();
   let parseFailCount = 0;
+  let filteredNonImage = 0;
 
   // Parallel I/O: bounded concurrency so huge studies don't OOM, but all CPU-bound
   // parsing runs concurrently with file reads.
@@ -395,6 +423,10 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       const entry = emitted[idx];
       if (entry.pass.length < 1) continue;
       const first = entry.pass[0]?.metadata ?? {};
+      if (isNonImageSopClass(first.sopClassUID || '')) {
+        filteredNonImage += 1;
+        continue;
+      }
       const baseDescription = first.seriesDescription || 'Unknown Series';
       const kernel = first.convolutionKernel ? ` ${first.convolutionKernel}` : '';
       const thickness = first.sliceThickness ? ` ${first.sliceThickness}mm` : '';
@@ -437,7 +469,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     return lhs.seriesDescription.localeCompare(rhs.seriesDescription);
   });
   console.log(
-    `[DICOM] Loaded ${files.length} files, parsed ${files.length - parseFailCount}, failed ${parseFailCount}`
+    `[DICOM] Loaded ${files.length} files, parsed ${files.length - parseFailCount}, failed ${parseFailCount}, filtered ${filteredNonImage} non-image series`
   );
 
   return seriesList;

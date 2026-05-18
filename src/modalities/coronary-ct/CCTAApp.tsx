@@ -8,6 +8,7 @@ import { PatientNameEditor } from '../../shared/components/PatientNameEditor';
 import { PseudoPCCTPanel } from '../ct/pcct/PseudoPCCTPanel';
 import { SlabProjection } from '../ct/components/SlabProjection';
 import { CoronarySegPanel } from './segmentation/CoronarySegPanel';
+import { Cardiac3DView } from './components/Cardiac3DView';
 
 function ThemeToggleBtn() {
   const { theme, toggle } = useTheme();
@@ -43,6 +44,7 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
   const loadedFilesRef = useRef<File[]>([]);
   const [pseudoPcctOpen, setPseudoPcctOpen] = useState(false);
   const [coronarySegOpen, setCoronarySegOpen] = useState(false);
+  const [cardiac3dOpen, setCardiac3dOpen] = useState(false);
   const initialFilesConsumedRef = useRef(false);
   const advancedInteractionsCleanupRef = useRef<(() => void) | null>(null);
 
@@ -466,6 +468,16 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
             </button>
           )}
           {activeSeries && (
+            <button
+              type="button"
+              className="cardiac-3d-trigger-btn"
+              onClick={() => setCardiac3dOpen(true)}
+              title="Cardiac 3D — Volume Rendering"
+            >
+              Cardiac 3D
+            </button>
+          )}
+          {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ccta" />
           )}
           {onBack && (
@@ -489,6 +501,14 @@ export default function CtApp({ onBack, initialFiles }: CtAppProps = {}) {
           volumeId={VOLUME_ID}
           axialViewportId="axial"
           onClose={() => setCoronarySegOpen(false)}
+        />
+      )}
+
+      {cardiac3dOpen && (
+        <Cardiac3DView
+          renderingEngineId={RENDERING_ENGINE_ID}
+          volumeId={VOLUME_ID}
+          onClose={() => setCardiac3dOpen(false)}
         />
       )}
 
