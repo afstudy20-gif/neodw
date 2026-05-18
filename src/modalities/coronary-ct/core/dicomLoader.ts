@@ -259,22 +259,18 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     //  3. Among all resulting passes, pick the one with the most slices that also has
     //     uniform spacing (≥90% of consecutive deltas match modal spacing within tolerance).
     function acqKey(m: Record<string, string>): string {
-      // Discriminators that should produce distinct series in the UI even when
-      // SeriesInstanceUID is shared. Each value below corresponds to a distinct
-      // vendor recon / phase / kernel. Triggering on ANY of them yields one
-      // series per (orientation, time, kernel, thickness, phase, image-type).
+      // Discriminators that produce distinct series within the same UID.
+      // Conservative set — pixelSpacing + imageType were too noisy and
+      // caused over-splitting on multi-recon studies. Reconstruction kernel,
+      // slice thickness, and explicit cardiac-phase tags are the cleanest
+      // splitters in practice.
       return [
         m.imageOrientationPatient || '',
-        m.acquisitionTime || '',
         m.acquisitionNumber || '',
         m.temporalPositionIdentifier || '',
         m.convolutionKernel || '',
         m.sliceThickness || '',
-        m.pixelSpacing || '',
-        m.imageType || '',
-        m.cardiacRRIntervalSpecified || '',
         m.nominalPercentageOfCardiacPhase || '',
-        m.triggerTime || '',
       ].join('|');
     }
 
@@ -293,9 +289,10 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
 
-      // Strategy A: z-bucket splitting. If multiple slices share the same Z
-      // within this acqGroup, they belong to parallel phases. Distribute the
-      // nth occurrence at each Z to phase n.
+      // Strategy A: z-bucket splitting. Only fires for *uniform* 4D interleave
+      // where every Z position has exactly N samples (N = phase count). This
+      // catches the classic 4×111 = 444 cardiac case cleanly but ignores
+      // partial overlaps that would over-split single-volume acquisitions.
       const zBuckets = new Map<number, typeof filesList>();
       for (const f of group) {
         const z = Math.round(getSlicePosition(f.metadata) * 100);
@@ -303,10 +300,14 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         zBuckets.get(z)!.push(f);
       }
       let maxBucket = 0;
+      let minBucket = Number.POSITIVE_INFINITY;
       for (const bucket of zBuckets.values()) {
         if (bucket.length > maxBucket) maxBucket = bucket.length;
+        if (bucket.length < minBucket) minBucket = bucket.length;
       }
-      if (maxBucket > 1) {
+      // Require uniform N at every Z AND N >= 2 to call it interleave.
+      const uniformInterleave = maxBucket > 1 && maxBucket === minBucket;
+      if (uniformInterleave) {
         for (const bucket of zBuckets.values()) {
           bucket.sort((a, b) =>
             (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
