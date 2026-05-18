@@ -24,15 +24,28 @@ export function SecondaryCaptureViewer({ series, onClose }: Props) {
   useEffect(() => {
     let cancelled = false;
     async function render() {
-      if (!canvasRef.current || !imageId) return;
+      const canvas = canvasRef.current;
+      if (!canvas || !imageId) return;
       setLoading(true);
       setError(null);
       try {
+        // Seed canvas with a reasonable size so loadImageToCanvas has
+        // something to draw into even if metadata isn't pre-resolved.
+        if (canvas.width === 0 || canvas.height === 0) {
+          canvas.width = 512;
+          canvas.height = 512;
+        }
         await cornerstone.utilities.loadImageToCanvas({
-          canvas: canvasRef.current,
+          canvas,
           imageId,
           requestType: cornerstone.Enums.RequestType.Interaction,
           imageAspect: true,
+        });
+        // Force a redraw frame for browsers that don't repaint canvas after
+        // out-of-React mutation.
+        canvas.style.opacity = '0.999';
+        requestAnimationFrame(() => {
+          canvas.style.opacity = '1';
         });
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load SC image');
