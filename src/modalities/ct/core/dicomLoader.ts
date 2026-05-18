@@ -213,18 +213,16 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // slice spacing.
 
     function acqKey(m: Record<string, string>): string {
+      // Conservative discriminator set — pixelSpacing/imageType caused
+      // over-splitting on multi-recon studies. Kernel + thickness + explicit
+      // cardiac-phase tags are the clean splitters.
       return [
         m.imageOrientationPatient || '',
-        m.acquisitionTime || '',
         m.acquisitionNumber || '',
         m.temporalPositionIdentifier || '',
         m.convolutionKernel || '',
         m.sliceThickness || '',
-        m.pixelSpacing || '',
-        m.imageType || '',
-        m.cardiacRRIntervalSpecified || '',
         m.nominalPercentageOfCardiacPhase || '',
-        m.triggerTime || '',
       ].join('|');
     }
 
@@ -242,7 +240,9 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
-      // Z-bucket parallel-phase split.
+      // Uniform 4D interleave detection — only split when EVERY Z position
+      // has exactly N samples. Catches classic 4×111 cardiac case without
+      // over-splitting partial-overlap data.
       const zBuckets = new Map<number, typeof filesList>();
       for (const f of group) {
         const z = Math.round(getSlicePosition(f.metadata) * 100);
@@ -250,10 +250,13 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         zBuckets.get(z)!.push(f);
       }
       let maxBucket = 0;
+      let minBucket = Number.POSITIVE_INFINITY;
       for (const bucket of zBuckets.values()) {
         if (bucket.length > maxBucket) maxBucket = bucket.length;
+        if (bucket.length < minBucket) minBucket = bucket.length;
       }
-      if (maxBucket > 1) {
+      const uniformInterleave = maxBucket > 1 && maxBucket === minBucket;
+      if (uniformInterleave) {
         for (const bucket of zBuckets.values()) {
           bucket.sort((a, b) =>
             (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
