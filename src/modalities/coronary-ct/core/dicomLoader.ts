@@ -291,8 +291,17 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         if (bucket.length > maxBucket) maxBucket = bucket.length;
         if (bucket.length < minBucket) minBucket = bucket.length;
       }
-      // Require uniform N at every Z AND N >= 2 to call it interleave.
-      const uniformInterleave = maxBucket > 1 && maxBucket === minBucket;
+      // Require uniform N at every Z, N >= 2, AND enough unique Z positions
+      // to look like a real volume. Without the uniqueZ floor, a series of
+      // 12 secondary-capture screenshots all at Z=0 would falsely trigger a
+      // 12-way split, producing 12 single-frame phases. A real 4D cardiac
+      // slab has dozens of Z positions; 10 is a safe lower bound that
+      // excludes localizers, 3D screenshots, and topograms.
+      const uniformInterleave =
+        maxBucket > 1 &&
+        maxBucket === minBucket &&
+        zBuckets.size >= 10 &&
+        maxBucket <= 20;
       if (uniformInterleave) {
         for (const bucket of zBuckets.values()) {
           bucket.sort((a, b) =>
