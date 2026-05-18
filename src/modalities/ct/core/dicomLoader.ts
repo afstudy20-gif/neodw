@@ -239,7 +239,16 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         if (bucket.length > maxBucket) maxBucket = bucket.length;
         if (bucket.length < minBucket) minBucket = bucket.length;
       }
-      const uniformInterleave = maxBucket > 1 && maxBucket === minBucket;
+      // Real 4D cardiac volume needs many unique Z positions. Without this
+      // floor, a series of 12 same-Z screenshots would falsely trigger a
+      // 12-way split into single-frame phases. uniqueZ >= 10 excludes
+      // localizers and SC screenshots; maxBucket <= 20 sanity caps phase
+      // count.
+      const uniformInterleave =
+        maxBucket > 1 &&
+        maxBucket === minBucket &&
+        zBuckets.size >= 10 &&
+        maxBucket <= 20;
       if (uniformInterleave) {
         for (const bucket of zBuckets.values()) {
           bucket.sort((a, b) =>
