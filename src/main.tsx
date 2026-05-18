@@ -4,39 +4,36 @@ import App from './App';
 import './styles/shell.css';
 
 // ── PWA auto-update via vite-plugin-pwa / Workbox ────────────────────────
-// Registers the generated service worker (dist/sw.js). On every page load
-// the SW pings for a new revision; when found it installs in the
-// background and `skipWaiting + clientsClaim` (set in vite.config.ts)
-// promote it immediately. We listen for the activation event and reload
-// the page silently so the user sees fresh code without manual cache-
-// clearing. Falls through gracefully if SW is unsupported.
+// Static import keeps the registerSW shim in the main bundle so an old
+// cached index.html never references a missing dynamic chunk hash.
+// On each page load the SW pings for a new revision; when found it
+// installs in the background, then `skipWaiting + clientsClaim` (set in
+// vite.config.ts) promote it immediately. Activation reloads the page
+// silently so the user sees fresh code without manual cache-clearing.
+import { registerSW } from 'virtual:pwa-register';
 if ('serviceWorker' in navigator) {
-  void import('virtual:pwa-register').then(({ registerSW }) => {
+  try {
     const updateSW = registerSW({
       immediate: true,
-      onRegisteredSW(swUrl, registration) {
+      onRegisteredSW(_swUrl, registration) {
         if (!registration) return;
-        // Belt-and-suspenders: poll for SW updates every 30 minutes in case
-        // the user keeps the PWA open for a long session.
+        // Poll for SW updates every 30 minutes for long sessions.
         setInterval(() => {
           registration.update().catch(() => undefined);
         }, 30 * 60 * 1000);
       },
       onNeedRefresh() {
-        // A new SW has installed and is waiting. Activate immediately and
-        // reload to pick up the fresh app shell + chunks.
+        // New SW installed and waiting. Activate immediately and reload.
         void updateSW(true);
       },
       onOfflineReady() {
-        // App shell is fully precached — no UX needed; this is informational.
         // eslint-disable-next-line no-console
         console.info('[pwa] offline-ready');
       },
     });
-  }).catch((err) => {
-    // Module may be absent in dev (devOptions.enabled === false) — safe to ignore.
+  } catch (err) {
     console.warn('[pwa] registerSW skipped:', err);
-  });
+  }
 }
 
 // Chunk-load recovery. After a new build is deployed the hashed asset

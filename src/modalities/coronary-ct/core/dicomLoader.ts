@@ -258,28 +258,14 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     //     forward and start a new pass whenever Z direction reverses or a duplicate Z occurs.
     //  3. Among all resulting passes, pick the one with the most slices that also has
     //     uniform spacing (≥90% of consecutive deltas match modal spacing within tolerance).
-    function acqKey(m: Record<string, string>): string {
-      // Discriminators that produce distinct series within the same UID.
-      // Conservative set — pixelSpacing + imageType were too noisy and
-      // caused over-splitting on multi-recon studies. Reconstruction kernel,
-      // slice thickness, and explicit cardiac-phase tags are the cleanest
-      // splitters in practice.
-      return [
-        m.imageOrientationPatient || '',
-        m.acquisitionNumber || '',
-        m.temporalPositionIdentifier || '',
-        m.convolutionKernel || '',
-        m.sliceThickness || '',
-        m.nominalPercentageOfCardiacPhase || '',
-      ].join('|');
-    }
-
-    const acqGroups = new Map<string, typeof filesList>();
-    for (const file of filesList) {
-      const key = acqKey(file.metadata);
-      if (!acqGroups.has(key)) acqGroups.set(key, []);
-      acqGroups.get(key)!.push(file);
-    }
+    // Splitting strategy: trust SeriesInstanceUID as the primary grouping
+    // (matches how Horos/OsiriX/PACS systems present series). The ONLY
+    // sub-UID splitter is uniform z-bucket detection for 4D cardiac
+    // interleave, where multiple cardiac-phase reconstructions are stuffed
+    // under one SeriesInstanceUID. acqKey-based splitting (kernel,
+    // thickness, acquisitionNumber, temporalPosition) caused massive
+    // over-splitting — single UIDs emitted 12 series — so we drop it and
+    // let the natural UID grouping carry the load.
 
     function instanceNumber(m: Record<string, string>): number {
       const n = Number.parseFloat(m.instanceNumber || '');
@@ -332,12 +318,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       return [group];
     }
 
-    const passes: typeof filesList[] = [];
-    for (const group of acqGroups.values()) {
-      for (const pass of splitGroup(group)) {
-        passes.push(pass);
-      }
-    }
+    const passes: typeof filesList[] = splitGroup(filesList);
 
     // Normalise passes so Z increases within each (sagittal/coronal MPR expects ascending Z).
     for (const pass of passes) {
@@ -398,7 +379,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     const emitted = [...preferred, ...auxiliary];
 
     console.log(
-      `[DICOM] UID ${seriesInstanceUID.slice(-12)}: ${acqGroups.size} acqGroups → ${passes.length} passes → ${emitted.length} emitted`
+      `[DICOM] UID ${seriesInstanceUID.slice(-12)}: ${passes.length} passes → ${emitted.length} emitted`
     );
 
     for (let idx = 0; idx < emitted.length; idx += 1) {
