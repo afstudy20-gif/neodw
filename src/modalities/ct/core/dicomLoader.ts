@@ -273,41 +273,9 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         }
         return phases.filter((p) => p.length > 0);
       }
-      // Sequential direction-reversal split.
-      group.sort((a, b) => instanceNumber(a.metadata) - instanceNumber(b.metadata));
-      const out: typeof filesList[] = [];
-      let current: typeof filesList = [];
-      let lastZ: number | null = null;
-      let direction: 0 | 1 | -1 = 0;
-      for (const file of group) {
-        const z = getSlicePosition(file.metadata);
-        if (current.length === 0 || lastZ === null) {
-          current.push(file);
-          lastZ = z;
-          continue;
-        }
-        const dz = z - lastZ;
-        if (Math.abs(dz) < 1e-3) {
-          out.push(current);
-          current = [file];
-          lastZ = z;
-          direction = 0;
-          continue;
-        }
-        const newDir: 1 | -1 = dz > 0 ? 1 : -1;
-        if (direction !== 0 && newDir !== direction) {
-          out.push(current);
-          current = [file];
-          lastZ = z;
-          direction = 0;
-          continue;
-        }
-        current.push(file);
-        lastZ = z;
-        direction = newDir;
-      }
-      if (current.length > 0) out.push(current);
-      return out;
+      // No uniform interleave — trust acqKey grouping. Direction-reversal
+      // splitting was over-aggressive on real-world motion-corrected data.
+      return [group];
     }
 
     const passes: typeof filesList[] = [];
