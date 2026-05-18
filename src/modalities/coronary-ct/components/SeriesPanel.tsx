@@ -86,7 +86,12 @@ export function SeriesPanel({ seriesList, activeSeriesUID, onSelectSeries, onExp
                 e.preventDefault();
                 onExportSeries(series);
               }}
-              disabled={isLoading}
+              // Only disable the actively-loading tile. Keep every other tile
+              // clickable so the user can interrupt a long volume load by
+              // picking a different series (especially a single-frame SC
+              // pre-rendered 3D screenshot, which would otherwise be
+              // unreachable until the initial MPR autopick finishes).
+              disabled={isLoading && series.seriesInstanceUID === activeSeriesUID}
               title="Sol tık: aç · Sağ tık: DICOM indir"
             >
               <SeriesThumb imageId={thumbId} />
