@@ -110,8 +110,12 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   let parseFailCount = 0;
   let filteredNonImage = 0;
   const ioConcurrency = Math.max(4, Math.min(32, navigator.hardwareConcurrency || 8));
-  const parsed: Array<{ imageId: string; metadata: Record<string, string>; seriesUID: string } | null> =
-    new Array(files.length).fill(null);
+  
+  type Outcome = {
+    seriesUID: string;
+    entries: ParsedFile[];
+  } | null;
+  const outcomes: Outcome[] = new Array(files.length).fill(null);
 
   let next = 0;
   async function worker() {
@@ -128,12 +132,28 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
           const wrapped = wrapWithPart10Header(fullBytes);
           fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
         }
-        const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
-        parsed[index] = {
-          imageId,
-          metadata,
-          seriesUID: metadata.seriesInstanceUID || 'unknown',
-        };
+        const baseImageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
+        
+        const numFrames = Math.max(1, parseInt(metadata.numberOfFrames, 10) || 1);
+        const isMultiFrame = numFrames > 1;
+        
+        const seriesUID = isMultiFrame 
+          ? `mf_${metadata.sopInstanceUID || file.name}`
+          : (metadata.seriesInstanceUID || 'unknown');
+
+        const entries: ParsedFile[] = [];
+        if (isMultiFrame) {
+          for (let frame = 1; frame <= numFrames; frame++) {
+            entries.push({
+              imageId: `${baseImageId}&frame=${frame}`,
+              metadata: { ...metadata, instanceNumber: String(frame) },
+            });
+          }
+        } else {
+          entries.push({ imageId: baseImageId, metadata });
+        }
+        
+        outcomes[index] = { seriesUID, entries };
       } catch (e) {
         parseFailCount++;
         if (parseFailCount <= 3) {
@@ -144,12 +164,15 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   }
   await Promise.all(Array.from({ length: Math.min(ioConcurrency, files.length) }, worker));
 
-  for (const entry of parsed) {
-    if (!entry) continue;
-    if (!seriesMap.has(entry.seriesUID)) {
-      seriesMap.set(entry.seriesUID, []);
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    if (!seriesMap.has(outcome.seriesUID)) {
+      seriesMap.set(outcome.seriesUID, []);
     }
-    seriesMap.get(entry.seriesUID)!.push({ imageId: entry.imageId, metadata: entry.metadata });
+    const bucket = seriesMap.get(outcome.seriesUID)!;
+    for (const entry of outcome.entries) {
+      bucket.push(entry);
+    }
   }
 
   const seriesList: DicomSeriesInfo[] = [];
@@ -344,8 +367,20 @@ async function preloadAllImages(
   concurrency = Math.max(8, Math.min(32, (navigator.hardwareConcurrency || 8) * 2)),
   onProgress?: (loaded: number, total: number) => void
 ): Promise<void> {
+  // Deduplicate base imageIds for multi-frame so we only download the file once
+  const uniqueBaseIds = new Set<string>();
+  const idsToLoad: string[] = [];
+  for (const id of imageIds) {
+    const ampIdx = id.indexOf('&frame=');
+    const base = ampIdx >= 0 ? id.slice(0, ampIdx) : id;
+    if (!uniqueBaseIds.has(base)) {
+      uniqueBaseIds.add(base);
+      idsToLoad.push(id);
+    }
+  }
+
   let loaded = 0;
-  const total = imageIds.length;
+  const total = idsToLoad.length;
 
   const pool = async (ids: string[]) => {
     for (const imageId of ids) {
@@ -360,10 +395,10 @@ async function preloadAllImages(
   };
 
   // Split into chunks for concurrent loading
-  const chunkSize = Math.ceil(imageIds.length / concurrency);
+  const chunkSize = Math.max(1, Math.ceil(idsToLoad.length / concurrency));
   const chunks: string[][] = [];
-  for (let i = 0; i < imageIds.length; i += chunkSize) {
-    chunks.push(imageIds.slice(i, i + chunkSize));
+  for (let i = 0; i < idsToLoad.length; i += chunkSize) {
+    chunks.push(idsToLoad.slice(i, i + chunkSize));
   }
 
   await Promise.all(chunks.map(pool));

@@ -175,7 +175,12 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   // Parallel I/O: bounded concurrency so huge studies don't OOM, but all CPU-bound
   // parsing runs concurrently with file reads.
   const ioConcurrency = Math.max(4, Math.min(32, navigator.hardwareConcurrency || 8));
-  const parsed: Array<{ imageId: string; metadata: Record<string, string> } | null> = new Array(files.length).fill(null);
+  
+  type Outcome = {
+    seriesUID: string;
+    entries: ParsedFile[];
+  } | null;
+  const outcomes: Outcome[] = new Array(files.length).fill(null);
 
   async function processFile(file: File, index: number) {
     try {
@@ -192,8 +197,27 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
       }
 
-      const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
-      parsed[index] = { imageId, metadata };
+      const baseImageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);
+      const numFrames = Math.max(1, parseInt(metadata.numberOfFrames, 10) || 1);
+      const isMultiFrame = numFrames > 1;
+
+      const seriesUID = isMultiFrame 
+        ? `mf_${metadata.sopInstanceUID || file.name}`
+        : (metadata.seriesInstanceUID || 'unknown');
+
+      const entries: ParsedFile[] = [];
+      if (isMultiFrame) {
+        for (let frame = 1; frame <= numFrames; frame++) {
+          entries.push({
+            imageId: `${baseImageId}&frame=${frame}`,
+            metadata: { ...metadata, instanceNumber: String(frame) },
+          });
+        }
+      } else {
+        entries.push({ imageId: baseImageId, metadata });
+      }
+      
+      outcomes[index] = { seriesUID, entries };
     } catch (error) {
       parseFailCount += 1;
       if (parseFailCount <= 3) {
@@ -213,13 +237,15 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
   }
   await Promise.all(Array.from({ length: Math.min(ioConcurrency, files.length) }, worker));
 
-  for (const entry of parsed) {
-    if (!entry) continue;
-    const seriesUid = entry.metadata.seriesInstanceUID || 'unknown';
-    if (!seriesMap.has(seriesUid)) {
-      seriesMap.set(seriesUid, []);
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    if (!seriesMap.has(outcome.seriesUID)) {
+      seriesMap.set(outcome.seriesUID, []);
     }
-    seriesMap.get(seriesUid)!.push(entry);
+    const bucket = seriesMap.get(outcome.seriesUID)!;
+    for (const entry of outcome.entries) {
+      bucket.push(entry);
+    }
   }
 
   const seriesList: DicomSeriesInfo[] = [];
@@ -430,12 +456,24 @@ async function preloadAllImages(
 ): Promise<void> {
   let loaded = 0;
   let failed = 0;
-  const total = imageIds.length;
-  const chunkSize = Math.max(1, Math.ceil(imageIds.length / concurrency));
+
+  const uniqueBaseIds = new Set<string>();
+  const idsToLoad: string[] = [];
+  for (const id of imageIds) {
+    const ampIdx = id.indexOf('&frame=');
+    const base = ampIdx >= 0 ? id.slice(0, ampIdx) : id;
+    if (!uniqueBaseIds.has(base)) {
+      uniqueBaseIds.add(base);
+      idsToLoad.push(id);
+    }
+  }
+
+  const total = idsToLoad.length;
+  const chunkSize = Math.max(1, Math.ceil(idsToLoad.length / concurrency));
   const chunks: string[][] = [];
 
-  for (let i = 0; i < imageIds.length; i += chunkSize) {
-    chunks.push(imageIds.slice(i, i + chunkSize));
+  for (let i = 0; i < idsToLoad.length; i += chunkSize) {
+    chunks.push(idsToLoad.slice(i, i + chunkSize));
   }
 
   await Promise.all(
