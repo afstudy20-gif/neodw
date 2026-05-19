@@ -368,7 +368,12 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // Force 3D texture update
     const viewport = getViewport3d();
     if (viewport) {
-      if (volume.imageData) volume.imageData.modified();
+      if (volume.imageData) {
+        volume.imageData.modified();
+        if (volume.imageData.getPointData) {
+          volume.imageData.getPointData().getScalars()?.modified?.();
+        }
+      }
       const actor = viewport.getDefaultActor()?.actor;
       const mapper = actor?.getMapper?.();
       if (mapper) (mapper as any).modified?.();
@@ -476,12 +481,13 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
 
     if (erased > 0) {
-      // CRITICAL: Sync modified slices to per-image cache so the streaming
-      // 3D texture picks up the changes. Without this, erased voxels are
-      // invisible because the GPU texture reads from cached image data.
       syncVolumeToCachedImages(volume, modifiedSlices);
 
       imageData.modified();
+      if (imageData.getPointData) {
+        imageData.getPointData().getScalars()?.modified?.();
+      }
+      
       // Force mapper to detect data change and rebuild scalar texture
       const actor = viewport.getDefaultActor()?.actor;
       const mapper = actor?.getMapper?.();
@@ -802,6 +808,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     syncVolumeToCachedImages(volume, modifiedSlices);
 
     imageData.modified();
+    if (imageData.getPointData) {
+      imageData.getPointData().getScalars()?.modified?.();
+    }
     const actor = viewport.getDefaultActor()?.actor;
     const mapper = actor?.getMapper?.();
     if (mapper) (mapper as any).modified?.();

@@ -33,6 +33,7 @@ import { LeftAtriumPanel, type LeftAtriumPanelHandle } from './components/LeftAt
 import { AortaPanel, type AortaPanelHandle } from './components/AortaPanel';
 import { LAAPanel, type LAAPanelHandle } from './components/LAAPanel';
 import { LVADASPanel, type LVADASPanelHandle } from './components/LVADASPanel';
+import { SecondaryCaptureViewer } from './components/SecondaryCaptureViewer';
 
 const RENDERING_ENGINE_ID = 'myRenderingEngine';
 const VOLUME_ID = 'cornerstoneStreamingImageVolume:myVolume';
@@ -69,6 +70,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const [isLoading, setIsLoading] = useState(false);
   const [seriesList, setSeriesList] = useState<DicomSeriesInfo[]>([]);
   const [activeSeries, setActiveSeries] = useState<DicomSeriesInfo | null>(null);
+  const [scViewerSeries, setScViewerSeries] = useState<DicomSeriesInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingProgress, setLoadingProgress] = useState('');
   const [showMetadata, setShowMetadata] = useState(false);
@@ -438,7 +440,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     if (!engine) return;
 
     if (series.numImages <= 1 || isSecondaryCaptureSopClass(series.sopClassUID)) {
-      void open2DViewer(series);
+      setScViewerSeries(series);
       return;
     }
 
@@ -1112,6 +1114,13 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             })()}
           </div>
         </div>
+      )}
+      
+      {scViewerSeries && (
+        <SecondaryCaptureViewer
+          series={scViewerSeries}
+          onClose={() => setScViewerSeries(null)}
+        />
       )}
     </div>
   );

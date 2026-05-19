@@ -268,104 +268,90 @@ export function CoronarySegPanel({ renderingEngineId, volumeId, axialViewportId,
       <div className="coronary-seg-modal">
         <header className="coronary-seg-header">
           <div>
-            <h2>Coronary Tree Segmentation</h2>
-            <p>
-              Scaffold: HU-window + 3D flood fill heuristic. Real neural model (TorchScript via ONNX
-              Runtime Web) integration deferred.
-            </p>
+            <h2>Koroner Ağaç Segmentasyonu</h2>
+            <p>Heuristik HU (Hounsfield Unit) tabanlı 3D flood-fill segmentasyon aracı.</p>
           </div>
           <button className="coronary-seg-close" onClick={onClose} aria-label="Kapat">✕</button>
         </header>
 
         <div className="coronary-seg-body">
           <section className="coronary-seg-section">
-            <h3>Compute backend</h3>
-            {!caps ? (
-              <p>Probing GPU…</p>
-            ) : (
-              <ul className="coronary-seg-caps">
-                <li>WebGPU: <strong>{caps.hasWebGpu ? 'available' : 'unavailable'}</strong></li>
-                <li>WebGL2: <strong>{caps.hasWebGl2 ? 'available' : 'unavailable'}</strong></li>
-                {caps.adapterName && <li>Adapter: {caps.adapterName}</li>}
-                {caps.adapterVendor && <li>Vendor: {caps.adapterVendor}</li>}
-                {caps.reason && <li className="coronary-seg-warn">Reason: {caps.reason}</li>}
-                <li>Recommended: <strong>{backend}</strong></li>
-              </ul>
-            )}
-            <p className="coronary-seg-note">
-              Neural inference path (ONNX Runtime Web + TotalSegmentator-Cardiac) requires WebGPU and
-              a hosted model file. Heuristic fallback below runs on CPU.
+            <h3>1. Başlangıç Noktası (Seed) Seçimi</h3>
+            <p className="coronary-seg-note" style={{ marginBottom: '10px' }}>
+              Koroner damar lümeni içinde (örneğin sol ana koroner veya sağ koroner arter çıkışı) bir noktaya tıklayarak segmentasyonun başlayacağı yeri belirleyin.
             </p>
-          </section>
-
-          <section className="coronary-seg-section">
-            <h3>Heuristic seed-fill (fallback)</h3>
             <div className="coronary-seg-row">
               <button
                 className={`coronary-seg-btn ${picking ? 'active' : ''}`}
                 onClick={() => setPicking((p) => !p)}
+                style={{ padding: '8px 16px', fontSize: '14px', fontWeight: 'bold' }}
               >
-                {picking ? 'Cancel pick' : 'Pick seed on axial'}
+                {picking ? 'Seçimi İptal Et' : 'Axial Görüntüden Seed Seç (Tıkla)'}
               </button>
               {seed.ijk && (
-                <span className="coronary-seg-seed">
-                  Seed ijk: ({seed.ijk[0]}, {seed.ijk[1]}, {seed.ijk[2]})
-                  {seed.hu !== undefined ? ` · HU ${seed.hu.toFixed(0)}` : ''}
+                <span className="coronary-seg-seed" style={{ color: '#00e676', fontWeight: 'bold' }}>
+                  ✓ Seçildi: ({seed.ijk[0]}, {seed.ijk[1]}, {seed.ijk[2]})
+                  {seed.hu !== undefined ? ` · HU: ${seed.hu.toFixed(0)}` : ''}
                 </span>
               )}
             </div>
-            <div className="coronary-seg-row">
-              <label>HU min
-                <input type="number" value={huMin} onChange={(e) => setHuMin(Number.parseInt(e.target.value, 10) || 0)} />
-              </label>
-              <label>HU max
-                <input type="number" value={huMax} onChange={(e) => setHuMax(Number.parseInt(e.target.value, 10) || 0)} />
-              </label>
-              <button className="coronary-seg-btn primary" disabled={!seed.ijk || running} onClick={runHeuristic}>
-                {running ? 'Running…' : 'Run'}
-              </button>
-            </div>
-            {error && <p className="coronary-seg-warn">{error}</p>}
-            {result && (
-              <div className="coronary-seg-result">
-                <strong>{result.voxelCount.toLocaleString()}</strong> voxels ·{' '}
-                <strong>{result.volumeMl.toFixed(2)} ml</strong>
-                {result.truncated && <span className="coronary-seg-warn"> (truncated at safety cap)</span>}
-                {result.bbox && (
-                  <div className="coronary-seg-bbox">
-                    bbox ijk: ({result.bbox.min.join(', ')}) → ({result.bbox.max.join(', ')})
-                  </div>
-                )}
-                <div className="coronary-seg-exports">
-                  <button className="coronary-seg-btn" onClick={exportSeg} title="DICOM Segmentation (.dcm)">
-                    Export DICOM-SEG
-                  </button>
-                  <button className="coronary-seg-btn" onClick={exportCsv} title="Volume + HU statistics (.csv)">
-                    Export CSV
-                  </button>
-                  <button className="coronary-seg-btn" onClick={() => void exportPdf(false)} title="Report (.pdf)">
-                    Export PDF
-                  </button>
-                  <button className="coronary-seg-btn" onClick={() => void exportPdf(true)} title="Encapsulated PDF DICOM (.dcm)">
-                    Export PDF-in-DCM
-                  </button>
-                </div>
-                <p className="coronary-seg-note">
-                  Mask not yet rendered to viewport. Next step: bind into cornerstone labelmap
-                  segmentation for overlay + 3D visualization.
-                </p>
-              </div>
-            )}
           </section>
 
           <section className="coronary-seg-section">
-            <h3>Roadmap</h3>
-            <ol className="coronary-seg-roadmap">
-              <li>Bind mask into cornerstone Labelmap segmentation → overlay on MPR + 3D.</li>
-              <li>Centerline extraction (3D thinning / Lee algorithm) from mask.</li>
-              <li>Diameter sampling along centerline → table (diameter, % stenosis vs. proximal ref).</li>
-              <li>ONNX Runtime Web + WebGPU EP for real coronary U-Net (when model published).</li>
-            </ol>
+            <h3>2. HU (Hounsfield Unit) Eşik Değerleri</h3>
+            <p className="coronary-seg-note" style={{ marginBottom: '10px' }}>
+              Kontrastlı kanın yoğunluk aralığını belirleyin. Yalnızca bu aralıktaki pikseller damar olarak kabul edilecektir.
+            </p>
+            <div className="coronary-seg-row" style={{ gap: '20px' }}>
+              <label style={{ fontSize: '14px' }}>Minimum HU
+                <input type="number" value={huMin} onChange={(e) => setHuMin(Number.parseInt(e.target.value, 10) || 0)} style={{ fontSize: '14px' }} />
+              </label>
+              <label style={{ fontSize: '14px' }}>Maksimum HU
+                <input type="number" value={huMax} onChange={(e) => setHuMax(Number.parseInt(e.target.value, 10) || 0)} style={{ fontSize: '14px' }} />
+              </label>
+            </div>
+          </section>
+
+          <section className="coronary-seg-section">
+            <h3>3. Segmentasyonu Başlat</h3>
+            <div className="coronary-seg-row">
+              <button 
+                className="coronary-seg-btn primary" 
+                disabled={!seed.ijk || running} 
+                onClick={runHeuristic}
+                style={{ padding: '10px 24px', fontSize: '15px', fontWeight: 'bold', width: '100%' }}
+              >
+                {running ? 'İşleniyor, Lütfen Bekleyin…' : (!seed.ijk ? 'Önce Seed Noktası Seçin' : 'Segmentasyonu Başlat')}
+              </button>
+            </div>
+            {error && <p className="coronary-seg-warn" style={{ marginTop: '10px' }}>Hata: {error}</p>}
+            
+            {result && (
+              <div className="coronary-seg-result" style={{ marginTop: '15px', border: '1px solid #00e676', backgroundColor: 'rgba(0, 230, 118, 0.1)' }}>
+                <h4 style={{ color: '#00e676', margin: '0 0 10px 0' }}>✓ Segmentasyon Tamamlandı!</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '15px' }}>
+                  <div><strong>Voxel Sayısı:</strong> {result.voxelCount.toLocaleString()}</div>
+                  <div><strong>Hacim:</strong> {result.volumeMl.toFixed(2)} ml</div>
+                </div>
+                {result.truncated && <span className="coronary-seg-warn" style={{ display: 'block', marginBottom: '10px' }}> (Uyarı: Güvenlik sınırına ulaşıldı, işlem kesildi)</span>}
+                
+                <h4 style={{ margin: '15px 0 10px 0', color: '#79c0ff' }}>Dışa Aktar:</h4>
+                <div className="coronary-seg-exports">
+                  <button className="coronary-seg-btn" onClick={exportSeg} title="DICOM Segmentation (.dcm)">
+                    DICOM-SEG Olarak İndir
+                  </button>
+                  <button className="coronary-seg-btn" onClick={exportCsv} title="Volume + HU statistics (.csv)">
+                    CSV İstatistikleri
+                  </button>
+                  <button className="coronary-seg-btn" onClick={() => void exportPdf(false)} title="Report (.pdf)">
+                    PDF Raporu
+                  </button>
+                  <button className="coronary-seg-btn" onClick={() => void exportPdf(true)} title="Encapsulated PDF DICOM (.dcm)">
+                    DICOM PDF Raporu
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         </div>
       </div>
