@@ -61,6 +61,13 @@ export function CoronarySegPanel({ renderingEngineId, volumeId, axialViewportId,
         } | undefined;
         const hu = v?.voxelManager?.getAtIJK?.(ijk[0], ijk[1], ijk[2]);
         setSeed({ ijk, hu });
+        
+        // Auto-adjust thresholds if seed HU is outside current bounds
+        if (hu !== undefined) {
+          setHuMin(currentMin => hu < currentMin ? Math.max(0, Math.floor(hu - 20)) : currentMin);
+          setHuMax(currentMax => hu > currentMax ? Math.floor(hu + 20) : currentMax);
+        }
+        
         setPicking(false);
       } catch (e) {
         console.warn('[CoronarySeg] seed pick failed', e);
@@ -79,6 +86,10 @@ export function CoronarySegPanel({ renderingEngineId, volumeId, axialViewportId,
     setResult(null);
     if (!seed.ijk) {
       setError('Önce damar lümeninden bir seed noktası seçin.');
+      return;
+    }
+    if (seed.hu !== undefined && (seed.hu < huMin || seed.hu > huMax)) {
+      setError(`Seçtiğiniz noktanın HU değeri (${seed.hu.toFixed(0)}) eşik değerleriniz (${huMin} - ${huMax}) dışında! Lütfen HU limitlerini genişletin.`);
       return;
     }
     const volume = cornerstone.cache.getVolume(volumeId) as unknown as {
