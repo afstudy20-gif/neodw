@@ -167,11 +167,13 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // interleave. acqKey-based splitting caused single UIDs to emit 12
     // separate series — too aggressive — so we drop it entirely.
 
-    function instanceNumber(m: Record<string, string>): number {
-      const n = parseFloat(m.instanceNumber || '');
-      return Number.isFinite(n) ? n : 0;
-    }
-
+    // Splitting disabled per Horos-parity request. Every SeriesInstanceUID
+    // returns as a single pass. Z-bucket 4D-interleave splitting +
+    // direction-reversal splitting + acqKey splitting all removed. If a
+    // study has 4 cardiac phases stored under one UID, they ship as one
+    // (long) series — same as Horos/OsiriX default behavior. SC and other
+    // single-frame derived images stay intact because nothing now slices
+    // a UID into smaller groups.
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
       

@@ -242,11 +242,11 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // over-splitting — single UIDs emitted 12 series — so we drop it and
     // let the natural UID grouping carry the load.
 
-    function instanceNumber(m: Record<string, string>): number {
-      const n = Number.parseFloat(m.instanceNumber || '');
-      return Number.isFinite(n) ? n : 0;
-    }
-
+    // Splitting disabled per Horos-parity request. One SeriesInstanceUID =
+    // one emitted series. Z-bucket 4D-interleave + direction-reversal +
+    // acqKey-based splitting all removed; they caused over-splitting (SC
+    // screenshots, motion-corrected reconstructions) more often than they
+    // helped. Real 4D cardiac stays as one (long) UID, same as Horos.
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
 
