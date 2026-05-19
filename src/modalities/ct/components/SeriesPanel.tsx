@@ -23,24 +23,47 @@ async function generateThumbnail(imageId: string): Promise<string | null> {
     const { rows, columns } = image;
     const pixelData = image.getPixelData();
     if (!pixelData || pixelData.length === 0) return null;
-    let min = Infinity, max = -Infinity;
-    for (let i = 0; i < pixelData.length; i++) {
-      if (pixelData[i] < min) min = pixelData[i];
-      if (pixelData[i] > max) max = pixelData[i];
-    }
-    const range = max - min || 1;
+
+    const samples = Math.round(pixelData.length / (columns * rows));
+    const isColor = image.color === true || samples === 3 || samples === 4;
+
     const imgData = ctx.createImageData(size, size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const srcX = Math.floor(x * columns / size);
-        const srcY = Math.floor(y * rows / size);
-        const val = Math.round(((pixelData[srcY * columns + srcX] - min) / range) * 255);
-        const clamped = Math.max(0, Math.min(255, val));
-        const dstIdx = (y * size + x) * 4;
-        imgData.data[dstIdx] = clamped;
-        imgData.data[dstIdx + 1] = clamped;
-        imgData.data[dstIdx + 2] = clamped;
-        imgData.data[dstIdx + 3] = 255;
+
+    if (isColor) {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const srcX = Math.floor(x * columns / size);
+          const srcY = Math.floor(y * rows / size);
+          const srcIdx = (srcY * columns + srcX) * samples;
+          const dstIdx = (y * size + x) * 4;
+          
+          if (srcIdx + 2 < pixelData.length) {
+            imgData.data[dstIdx] = pixelData[srcIdx];
+            imgData.data[dstIdx + 1] = pixelData[srcIdx + 1];
+            imgData.data[dstIdx + 2] = pixelData[srcIdx + 2];
+            imgData.data[dstIdx + 3] = samples === 4 ? pixelData[srcIdx + 3] : 255;
+          }
+        }
+      }
+    } else {
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < pixelData.length; i++) {
+        if (pixelData[i] < min) min = pixelData[i];
+        if (pixelData[i] > max) max = pixelData[i];
+      }
+      const range = max - min || 1;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const srcX = Math.floor(x * columns / size);
+          const srcY = Math.floor(y * rows / size);
+          const val = Math.round(((pixelData[srcY * columns + srcX] - min) / range) * 255);
+          const clamped = Math.max(0, Math.min(255, val));
+          const dstIdx = (y * size + x) * 4;
+          imgData.data[dstIdx] = clamped;
+          imgData.data[dstIdx + 1] = clamped;
+          imgData.data[dstIdx + 2] = clamped;
+          imgData.data[dstIdx + 3] = 255;
+        }
       }
     }
     ctx.putImageData(imgData, 0, 0);

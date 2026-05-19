@@ -24,30 +24,42 @@ function SeriesThumb({ imageId }: { imageId: string }) {
         if (cancelled || !canvas) return;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        const pixelData = image.getPixelData?.() ?? image.imageFrame?.pixelData;
+                const pixelData = image.getPixelData?.() ?? image.imageFrame?.pixelData;
         if (!pixelData) return;
         const { width, height } = image;
-        let minPx = Infinity;
-        let maxPx = -Infinity;
-        for (let i = 0; i < pixelData.length; i++) {
-          const v = pixelData[i];
-          if (v < minPx) minPx = v;
-          if (v > maxPx) maxPx = v;
-        }
-        const range = maxPx - minPx || 1;
+        const samples = Math.round(pixelData.length / (width * height));
+        const isColor = image.color === true || samples === 3 || samples === 4;
+
         const tmp = document.createElement('canvas');
         tmp.width = width;
         tmp.height = height;
         const tctx = tmp.getContext('2d');
         if (!tctx) return;
         const img = tctx.createImageData(width, height);
-        const samples = Math.round(pixelData.length / (width * height));
-        for (let i = 0, j = 0; i < pixelData.length; i += samples, j += 4) {
-          const v = Math.max(0, Math.min(255, Math.round(((pixelData[i] - minPx) / range) * 255)));
-          img.data[j] = v;
-          img.data[j + 1] = v;
-          img.data[j + 2] = v;
-          img.data[j + 3] = 255;
+
+        if (isColor) {
+          for (let i = 0, j = 0; j < img.data.length; i += samples, j += 4) {
+            img.data[j] = pixelData[i];
+            img.data[j + 1] = pixelData[i + 1];
+            img.data[j + 2] = pixelData[i + 2];
+            img.data[j + 3] = samples === 4 ? pixelData[i + 3] : 255;
+          }
+        } else {
+          let minPx = Infinity;
+          let maxPx = -Infinity;
+          for (let i = 0; i < pixelData.length; i++) {
+            const v = pixelData[i];
+            if (v < minPx) minPx = v;
+            if (v > maxPx) maxPx = v;
+          }
+          const range = maxPx - minPx || 1;
+          for (let i = 0, j = 0; i < pixelData.length; i += samples, j += 4) {
+            const v = Math.max(0, Math.min(255, Math.round(((pixelData[i] - minPx) / range) * 255)));
+            img.data[j] = v;
+            img.data[j + 1] = v;
+            img.data[j + 2] = v;
+            img.data[j + 3] = 255;
+          }
         }
         tctx.putImageData(img, 0, 0);
         ctx.imageSmoothingEnabled = true;

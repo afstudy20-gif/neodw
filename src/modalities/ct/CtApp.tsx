@@ -11,7 +11,7 @@ Object.defineProperty(window, '__cornerstone', {
   get: () => cornerstone,
 });
 import { initCornerstone, applyLinearInterpolation } from '../../shared/core/cornerstone';
-import { loadDicomFiles, createVolume, DicomSeriesInfo } from './core/dicomLoader';
+import { loadDicomFiles, createVolume, DicomSeriesInfo, isSecondaryCaptureSopClass } from './core/dicomLoader';
 import { setupToolGroups, destroyToolGroups, resetCrosshairsToCenter, enterDoubleObliqueMode, exitDoubleObliqueMode, setActiveTool } from './core/toolManager';
 import type { ViewportMode } from './components/ViewportGrid';
 import { Toolbar } from './components/Toolbar';
@@ -436,6 +436,11 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const loadSeries = async (series: DicomSeriesInfo) => {
     const engine = renderingEngineRef.current;
     if (!engine) return;
+
+    if (series.numImages <= 1 || isSecondaryCaptureSopClass(series.sopClassUID)) {
+      void open2DViewer(series);
+      return;
+    }
 
     setActiveSeries(series);
     // If in 2D mode, switch back to MPR and disable stack viewport

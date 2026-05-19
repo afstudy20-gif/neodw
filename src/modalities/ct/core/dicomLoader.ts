@@ -72,6 +72,14 @@ export interface DicomSeriesInfo {
   sopClassUID?: string;
 }
 
+export function isSecondaryCaptureSopClass(sopClassUID: string | undefined): boolean {
+  if (!sopClassUID) return false;
+  return (
+    sopClassUID === '1.2.840.10008.5.1.4.1.1.7' ||
+    sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7.')
+  );
+}
+
 interface ParsedFile {
   imageId: string;
   metadata: Record<string, string>;
