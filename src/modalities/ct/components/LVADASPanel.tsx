@@ -474,8 +474,11 @@ const ALL_VIEWPORT_IDS = ['axial', 'sagittal', 'coronal', 'volume3d'];
 // Blood-pool-only range. Trabecular bone starts ~150 HU and cortical bone >500,
 // so a narrow band centered on peak iodinated contrast (≈300–400 HU) limits
 // flood-fill leakage into spine/ribs even when seed is placed near vertebra.
-const DEFAULT_MIN_HU = 280;
-const DEFAULT_MAX_HU = 500;
+// Widened range to cover modern high-iodine contrast protocols (100 kVp +
+// 350-400 mg/mL contrast often pushes LV cavity to 600-700 HU rather than
+// the textbook 350-450). User can still tighten manually via sliders.
+const DEFAULT_MIN_HU = 250;
+const DEFAULT_MAX_HU = 750;
 const LV_VOXEL_CAP = 600_000; // LV cavity typical ≈70–150 mL at 1mm isotropic; leave headroom for dilated LV
 
 interface LAState {
@@ -1095,6 +1098,15 @@ export const LVADASPanel = forwardRef<LVADASPanelHandle, Props>(function LVADASP
             }
           } catch { /* HU sampling best-effort */ }
           setSeedHU(hu);
+          // Auto-adapt HU threshold window to the placed seed when it lands
+          // far from the current band (common with high-iodine protocols).
+          // Centers on seed ±150 HU, clamped to plausible blood-pool extremes.
+          if (hu !== null && (hu < minHU || hu > maxHU)) {
+            const lo = Math.max(150, Math.round(hu - 150));
+            const hi = Math.min(900, Math.round(hu + 200));
+            setMinHU(lo);
+            setMaxHU(hi);
+          }
           setSeedMode(false);
           setError(null);
         } else if (mvMode) {
