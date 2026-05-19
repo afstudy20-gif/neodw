@@ -263,6 +263,30 @@ export function CoronarySegPanel({ renderingEngineId, volumeId, axialViewportId,
 
   const backend = caps ? recommendedBackend(caps) : null;
 
+  if (picking) {
+    return (
+      <div style={{
+        position: 'fixed', top: 40, left: '50%', transform: 'translateX(-50%)',
+        background: '#1f6feb', color: '#fff', padding: '16px 32px', borderRadius: '8px',
+        zIndex: 2000, boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+        display: 'flex', alignItems: 'center', gap: '16px', fontSize: '16px', fontWeight: 'bold',
+        border: '1px solid #79c0ff'
+      }}>
+        Lütfen arkadaki Axial görüntü üzerinden damar lümenine tıklayın...
+        <button 
+          onClick={() => setPicking(false)}
+          style={{ 
+            background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.2)', 
+            color: '#fff', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer',
+            fontSize: '14px', fontWeight: 'bold'
+          }}
+        >
+          İptal
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="coronary-seg-overlay">
       <div className="coronary-seg-modal">
