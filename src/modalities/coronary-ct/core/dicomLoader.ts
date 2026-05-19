@@ -250,6 +250,19 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
 
+      // Check if this is a Secondary Capture or non-CT/MR modality - never split these
+      const firstMeta = group[0]?.metadata || {};
+      const modality = firstMeta.modality?.toUpperCase() || '';
+      const sopClassUID = firstMeta.sopClassUID || '';
+      
+      // Secondary Capture and similar modalities should never be split
+      if (sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7') || // Secondary Capture
+          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.66') || // SR Document
+          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.67') || // Key Object Selection
+          !['CT', 'MR', 'PT'].includes(modality)) {
+        return [group];
+      }
+
       // Strategy A: z-bucket splitting. Only fires for *uniform* 4D interleave
       // where every Z position has exactly N samples (N = phase count). This
       // catches the classic 4×111 = 444 cardiac case cleanly but ignores

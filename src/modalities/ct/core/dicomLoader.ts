@@ -174,6 +174,20 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
     function splitGroup(group: typeof filesList): typeof filesList[] {
       if (group.length < 2) return [group];
+      
+      // Check if this is a Secondary Capture or non-CT/MR modality - never split these
+      const firstMeta = group[0]?.metadata || {};
+      const modality = firstMeta.modality?.toUpperCase() || '';
+      const sopClassUID = firstMeta.sopClassUID || '';
+      
+      // Secondary Capture and similar modalities should never be split
+      if (sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7') || // Secondary Capture
+          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.66') || // SR Document
+          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.67') || // Key Object Selection
+          !['CT', 'MR', 'PT'].includes(modality)) {
+        return [group];
+      }
+      
       // Uniform 4D interleave detection — only split when EVERY Z position
       // has exactly N samples. Catches classic 4×111 cardiac case without
       // over-splitting partial-overlap data.
