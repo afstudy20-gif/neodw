@@ -43,22 +43,30 @@ function cloneFile(name: string, data: Uint8Array, lastModified = Date.now()): F
 async function extractZip(file: File): Promise<File[]> {
   const buf = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(buf);
-  const out: File[] = [];
   const names = Object.keys(zip.files);
-  for (const name of names) {
-    const entry = zip.files[name];
-    if (entry.dir) continue;
-    // Skip metadata files from macOS zips
-    if (name.startsWith('__MACOSX/') || name.endsWith('/.DS_Store') || name.endsWith('Thumbs.db')) continue;
-    try {
-      const data = await entry.async('uint8array');
-      const base = name.split('/').pop() || name;
-      out.push(cloneFile(base, data, entry.date?.getTime()));
-    } catch (e) {
-      console.warn('[intake] zip entry failed', name, e);
-    }
-  }
-  return out;
+
+  // Parallelize entry decompression. JSZip's `entry.async()` is internally
+  // async and concurrency-friendly; the previous sequential `for/await` made
+  // a 2200-file CD export take an order of magnitude longer than necessary.
+  const decoded = await Promise.all(
+    names.map(async (name) => {
+      const entry = zip.files[name];
+      if (entry.dir) return null;
+      if (name.startsWith('__MACOSX/') || name.endsWith('/.DS_Store') || name.endsWith('Thumbs.db')) {
+        return null;
+      }
+      try {
+        const data = await entry.async('uint8array');
+        const base = name.split('/').pop() || name;
+        return cloneFile(base, data, entry.date?.getTime());
+      } catch (e) {
+        console.warn('[intake] zip entry failed', name, e);
+        return null;
+      }
+    })
+  );
+
+  return decoded.filter((f): f is File => f != null);
 }
 
 // Store the init promise (not a bool flag) so two concurrent extractRar

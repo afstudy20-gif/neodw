@@ -1,6 +1,6 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
-import dicomParser from 'dicom-parser';
+import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
 
 export interface DicomSeriesInfo {
   seriesInstanceUID: string;
@@ -30,15 +30,7 @@ interface ParsedFile {
   metadata: Record<string, string>;
 }
 
-function hasPart10Header(byteArray: Uint8Array): boolean {
-  return (
-    byteArray.length >= 132 &&
-    byteArray[128] === 0x44 &&
-    byteArray[129] === 0x49 &&
-    byteArray[130] === 0x43 &&
-    byteArray[131] === 0x4d
-  );
-}
+// hasPart10Header removed — worker now reports it in ParsedHeader.
 
 function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
   const tsUid = '1.2.840.10008.1.2';
@@ -79,67 +71,8 @@ function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
   return result;
 }
 
-function parseMetadata(byteArray: Uint8Array): Record<string, string> {
-  const parserAny = dicomParser as any;
-  let dataSet: any;
-
-  // Primary path: full parse with untilTag so pixel data (largest element) is skipped.
-  try {
-    dataSet = parserAny.parseDicom(byteArray, { untilTag: 'x7fe00010' });
-  } catch {
-    try {
-      const byteStream = new parserAny.ByteStream(parserAny.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, unknown> = {};
-      dataSet = new parserAny.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parserAny.parseDicomDataSetImplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    } catch {
-      const byteStream = new parserAny.ByteStream(parserAny.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, unknown> = {};
-      dataSet = new parserAny.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parserAny.parseDicomDataSetExplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    }
-  }
-
-  const getString = (tag: string): string => {
-    try {
-      return dataSet.string(tag) || '';
-    } catch {
-      return '';
-    }
-  };
-
-  return {
-    patientName: getString('x00100010'),
-    studyDescription: getString('x00081030'),
-    seriesDescription: getString('x0008103e'),
-    seriesInstanceUID: getString('x0020000e'),
-    sopInstanceUID: getString('x00080018'),
-    sopClassUID: getString('x00080016'),
-    modality: getString('x00080060'),
-    instanceNumber: getString('x00200013'),
-    sliceLocation: getString('x00201041'),
-    imagePositionPatient: getString('x00200032'),
-    acquisitionNumber: getString('x00200012'),
-    temporalPositionIdentifier: getString('x00200100'),
-    acquisitionTime: getString('x00080032'),
-    imageOrientationPatient: getString('x00200037'),
-    // Reconstruction discriminators — different values mean different series
-    // even when SeriesInstanceUID is shared (vendor recon variants).
-    convolutionKernel: getString('x00181210'),
-    sliceThickness: getString('x00180050'),
-    pixelSpacing: getString('x00280030'),
-    contrastBolusAgent: getString('x00180010'),
-    imageType: getString('x00080008'),
-    // 4D cardiac phase tags (rare but definitive when present)
-    cardiacRRIntervalSpecified: getString('x0018a005'),
-    nominalPercentageOfCardiacPhase: getString('x00209241'),
-    triggerTime: getString('x00181060'),
-  };
-}
+// parseMetadata replaced by shared worker-pool helper at
+// src/shared/dicom/parseHeaders.ts — see PR notes.
 
 function getSlicePosition(metadata: Record<string, string>): number {
   if (metadata.imagePositionPatient) {
@@ -246,15 +179,16 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
   async function processFile(file: File, index: number) {
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const byteArray = new Uint8Array(arrayBuffer);
-      const needsWrapper = !hasPart10Header(byteArray);
-      const metadata = parseMetadata(byteArray);
+      // Off-main-thread header parse with header-only slice read.
+      const { metadata, hasPart10Header } = await parseFileHeader(file);
 
+      // Most files are Part-10 (DICM preamble at byte 128). Only the
+      // headerless implicit-VR exports need the Part-10 wrapper, which
+      // requires the full byte buffer.
       let fileToLoad = file;
-      if (needsWrapper) {
-        // wrapWithPart10Header already returns a fresh Uint8Array; no extra copy needed.
-        const wrapped = wrapWithPart10Header(byteArray);
+      if (!hasPart10Header) {
+        const fullBytes = new Uint8Array(await file.arrayBuffer());
+        const wrapped = wrapWithPart10Header(fullBytes);
         fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
       }
 

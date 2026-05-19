@@ -1,19 +1,6 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
-import dicomParser from 'dicom-parser';
-
-/**
- * Check if a byte array has a valid DICOM Part 10 header (DICM magic at byte 128).
- */
-function hasPart10Header(byteArray: Uint8Array): boolean {
-  if (byteArray.length < 132) return false;
-  return (
-    byteArray[128] === 0x44 && // D
-    byteArray[129] === 0x49 && // I
-    byteArray[130] === 0x43 && // C
-    byteArray[131] === 0x4d    // M
-  );
-}
+import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
 
 /**
  * Wrap a headerless (raw) DICOM byte array into a valid Part 10 file
@@ -90,69 +77,7 @@ interface ParsedFile {
   metadata: Record<string, string>;
 }
 
-// Parse metadata from a single DICOM file (supports both Part 10 and raw/headerless DICOM)
-function parseMetadata(byteArray: Uint8Array): Record<string, string> {
-  let dataSet: dicomParser.DataSet;
-  try {
-    // Primary path: stop before pixel data (largest element) for ~2-5× faster metadata parse.
-    dataSet = dicomParser.parseDicom(byteArray, { untilTag: 'x7fe00010' });
-  } catch {
-    // Fallback: parse as raw/implicit little-endian DICOM (no Part 10 header).
-    // Many PACS exports and older scanners produce files without the DICM preamble.
-    // We create a ByteStream and parse directly as implicit LE, stopping before pixel data.
-    const parser = dicomParser as any;
-    try {
-      const byteStream = new parser.ByteStream(parser.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, any> = {};
-      dataSet = new parser.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parser.parseDicomDataSetImplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    } catch {
-      // If implicit parsing also fails, try explicit LE without header
-      const byteStream = new parser.ByteStream(parser.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, any> = {};
-      dataSet = new parser.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parser.parseDicomDataSetExplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    }
-  }
-
-  const getString = (tag: string): string => {
-    try {
-      return dataSet.string(tag) || '';
-    } catch {
-      return '';
-    }
-  };
-
-  return {
-    patientName: getString('x00100010'),
-    studyDescription: getString('x00081030'),
-    studyDate: getString('x00080020'),
-    seriesDescription: getString('x0008103e'),
-    seriesInstanceUID: getString('x0020000e'),
-    sopInstanceUID: getString('x00080018'),
-    sopClassUID: getString('x00080016'),
-    modality: getString('x00080060'),
-    instanceNumber: getString('x00200013'),
-    sliceLocation: getString('x00201041'),
-    imagePositionPatient: getString('x00200032'),
-    acquisitionNumber: getString('x00200012'),
-    temporalPositionIdentifier: getString('x00200100'),
-    acquisitionTime: getString('x00080032'),
-    imageOrientationPatient: getString('x00200037'),
-    convolutionKernel: getString('x00181210'),
-    sliceThickness: getString('x00180050'),
-    pixelSpacing: getString('x00280030'),
-    contrastBolusAgent: getString('x00180010'),
-    imageType: getString('x00080008'),
-    cardiacRRIntervalSpecified: getString('x0018a005'),
-    nominalPercentageOfCardiacPhase: getString('x00209241'),
-    triggerTime: getString('x00181060'),
-  };
-}
+// parseMetadata replaced by shared worker-pool helper.
 
 // Non-image SOP class denylist — hidden from series tile list to match
 // Horos/OsiriX behavior. Files are still parseable; just not surfaced
@@ -195,14 +120,12 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
       if (index >= files.length) return;
       const file = files[index];
       try {
-        const arrayBuffer = await file.arrayBuffer();
-        const byteArray = new Uint8Array(arrayBuffer);
-        const needsWrapper = !hasPart10Header(byteArray);
-        const metadata = parseMetadata(byteArray);
+        const { metadata, hasPart10Header } = await parseFileHeader(file);
 
         let fileToLoad: File = file;
-        if (needsWrapper) {
-          const wrapped = wrapWithPart10Header(byteArray);
+        if (!hasPart10Header) {
+          const fullBytes = new Uint8Array(await file.arrayBuffer());
+          const wrapped = wrapWithPart10Header(fullBytes);
           fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
         }
         const imageId = dicomImageLoader.wadouri.fileManager.add(fileToLoad);

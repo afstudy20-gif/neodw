@@ -1,6 +1,6 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
-import dicomParser from 'dicom-parser';
+import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
 
 export interface CArmGeometry {
   primaryAngle: number;    // PositionerPrimaryAngle, degrees (LAO+/RAO-)
@@ -29,15 +29,7 @@ interface ParsedFile {
   metadata: Record<string, string>;
 }
 
-function hasPart10Header(byteArray: Uint8Array): boolean {
-  return (
-    byteArray.length >= 132 &&
-    byteArray[128] === 0x44 &&
-    byteArray[129] === 0x49 &&
-    byteArray[130] === 0x43 &&
-    byteArray[131] === 0x4d
-  );
-}
+// hasPart10Header removed — worker reports it.
 
 function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
   const tsUid = '1.2.840.10008.1.2';
@@ -78,61 +70,7 @@ function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
   return result;
 }
 
-function parseMetadata(byteArray: Uint8Array): Record<string, string> {
-  const parserAny = dicomParser as any;
-  let dataSet: any;
-
-  try {
-    dataSet = parserAny.parseDicom(byteArray, { untilTag: 'x7fe00010' });
-  } catch {
-    try {
-      const byteStream = new parserAny.ByteStream(parserAny.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, unknown> = {};
-      dataSet = new parserAny.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parserAny.parseDicomDataSetImplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    } catch {
-      const byteStream = new parserAny.ByteStream(parserAny.littleEndianByteArrayParser, byteArray, 0);
-      const elements: Record<string, unknown> = {};
-      dataSet = new parserAny.DataSet(byteStream.byteArrayParser, byteArray, elements);
-      parserAny.parseDicomDataSetExplicit(dataSet, byteStream, byteArray.length, {
-        untilTag: 'x7fe00010',
-      });
-    }
-  }
-
-  const getString = (tag: string): string => {
-    try {
-      return dataSet.string(tag) || '';
-    } catch {
-      return '';
-    }
-  };
-
-  return {
-    patientName: getString('x00100010'),
-    studyDescription: getString('x00081030'),
-    seriesDescription: getString('x0008103e'),
-    seriesInstanceUID: getString('x0020000e'),
-    sopInstanceUID: getString('x00080018'),
-    modality: getString('x00080060'),
-    instanceNumber: getString('x00200013'),
-    sliceLocation: getString('x00201041'),
-    imagePositionPatient: getString('x00200032'),
-    numberOfFrames: getString('x00280008'),
-    acquisitionNumber: getString('x00200012'),
-    acquisitionTime: getString('x00080032'),
-    primaryAngle: getString('x00181510'),
-    secondaryAngle: getString('x00181511'),
-    sid: getString('x00181110'),
-    sod: getString('x00181111'),
-    imagerPixelSpacing: getString('x00181164'),
-    pixelSpacing: getString('x00280030'),
-    rows: getString('x00280010'),
-    columns: getString('x00280011'),
-  };
-}
+// parseMetadata replaced by shared worker-pool helper.
 
 function parseGeometry(metadata: Record<string, string>): CArmGeometry | undefined {
   const primaryAngle = Number.parseFloat(metadata.primaryAngle);
@@ -209,14 +147,12 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
 
   async function processFile(file: File, index: number) {
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const byteArray = new Uint8Array(arrayBuffer);
-      const needsWrapper = !hasPart10Header(byteArray);
-      const metadata = parseMetadata(byteArray);
+      const { metadata, hasPart10Header } = await parseFileHeader(file);
 
       let fileToLoad = file;
-      if (needsWrapper) {
-        const wrapped = wrapWithPart10Header(byteArray);
+      if (!hasPart10Header) {
+        const fullBytes = new Uint8Array(await file.arrayBuffer());
+        const wrapped = wrapWithPart10Header(fullBytes);
         fileToLoad = new File([wrapped.buffer as ArrayBuffer], file.name, { type: 'application/dicom' });
       }
 
