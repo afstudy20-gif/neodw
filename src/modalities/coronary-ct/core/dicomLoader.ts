@@ -248,70 +248,7 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // screenshots, motion-corrected reconstructions) more often than they
     // helped. Real 4D cardiac stays as one (long) UID, same as Horos.
     function splitGroup(group: typeof filesList): typeof filesList[] {
-      if (group.length < 2) return [group];
-
-      // Check if this is a Secondary Capture or non-CT/MR modality - never split these
-      const firstMeta = group[0]?.metadata || {};
-      const modality = firstMeta.modality?.toUpperCase() || '';
-      const sopClassUID = firstMeta.sopClassUID || '';
-      
-      // Secondary Capture and similar modalities should never be split
-      if (sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7') || // Secondary Capture
-          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.66') || // SR Document
-          sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.67') || // Key Object Selection
-          !['CT', 'MR', 'PT'].includes(modality)) {
-        return [group];
-      }
-
-      // Strategy A: z-bucket splitting. Only fires for *uniform* 4D interleave
-      // where every Z position has exactly N samples (N = phase count). This
-      // catches the classic 4×111 = 444 cardiac case cleanly but ignores
-      // partial overlaps that would over-split single-volume acquisitions.
-      const zBuckets = new Map<number, typeof filesList>();
-      for (const f of group) {
-        const z = Math.round(getSlicePosition(f.metadata) * 100);
-        if (!zBuckets.has(z)) zBuckets.set(z, []);
-        zBuckets.get(z)!.push(f);
-      }
-      let maxBucket = 0;
-      let minBucket = Number.POSITIVE_INFINITY;
-      for (const bucket of zBuckets.values()) {
-        if (bucket.length > maxBucket) maxBucket = bucket.length;
-        if (bucket.length < minBucket) minBucket = bucket.length;
-      }
-      // Require uniform N at every Z, N >= 2, AND enough unique Z positions
-      // to look like a real volume. Without the uniqueZ floor, a series of
-      // 12 secondary-capture screenshots all at Z=0 would falsely trigger a
-      // 12-way split, producing 12 single-frame phases. A real 4D cardiac
-      // slab has dozens of Z positions; 10 is a safe lower bound that
-      // excludes localizers, 3D screenshots, and topograms.
-      const uniformInterleave =
-        maxBucket > 1 &&
-        maxBucket === minBucket &&
-        zBuckets.size >= 10 &&
-        maxBucket <= 20;
-      if (uniformInterleave) {
-        for (const bucket of zBuckets.values()) {
-          bucket.sort((a, b) =>
-            (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
-            instanceNumber(a.metadata) - instanceNumber(b.metadata)
-          );
-        }
-        const sortedZ = [...zBuckets.keys()].sort((a, b) => a - b);
-        const phases: typeof filesList[] = Array.from({ length: maxBucket }, () => []);
-        for (const z of sortedZ) {
-          const bucket = zBuckets.get(z)!;
-          for (let i = 0; i < bucket.length; i += 1) {
-            phases[i].push(bucket[i]);
-          }
-        }
-        return phases.filter((p) => p.length > 0);
-      }
-
-      // No uniform interleave detected — trust the acqKey grouping and
-      // emit the whole group as one series. Direction-reversal splitting
-      // proved too aggressive on real-world data: minor Z jitter from
-      // motion-correction reconstructions caused dozens of bogus splits.
+      if (!group || group.length === 0) return [];
       return [group];
     }
 
