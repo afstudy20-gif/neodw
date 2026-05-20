@@ -56,19 +56,18 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  assetsInclude: ['**/*.wasm'],
   optimizeDeps: {
-    include: [
+    exclude: [
       '@cornerstonejs/core',
       '@cornerstonejs/tools',
       '@cornerstonejs/dicom-image-loader',
       '@cornerstonejs/codec-libjpeg-turbo-8bit',
-      '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs',
       '@cornerstonejs/codec-charls',
-      '@cornerstonejs/codec-charls/decodewasmjs',
       '@cornerstonejs/codec-openjpeg',
-      '@cornerstonejs/codec-openjpeg/decodewasmjs',
       '@cornerstonejs/codec-openjph',
-      '@cornerstonejs/codec-openjph/wasmjs',
+    ],
+    include: [
       'dicom-parser',
       'comlink',
     ],

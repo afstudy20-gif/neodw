@@ -91,14 +91,17 @@ interface ParsedFile {
 // Horos/OsiriX behavior. Files are still parseable; just not surfaced
 // as user-facing series.
 const NON_IMAGE_SOP_PREFIXES = [
-  '1.2.840.10008.5.1.4.1.1.11',
-  '1.2.840.10008.5.1.4.1.1.66',
-  '1.2.840.10008.5.1.4.1.1.67',
-  '1.2.840.10008.5.1.4.1.1.78',
-  '1.2.840.10008.5.1.4.1.1.88',
-  '1.2.840.10008.5.1.4.1.1.9',
-  '1.2.840.10008.5.1.4.1.1.104',
-  '1.2.840.10008.5.1.4.1.1.481',
+  '1.2.840.10008.1.3.10',        // Media Storage Directory (DICOMDIR)
+  '1.2.840.10008.5.1.4.1.1.8',   // Standalone Overlay Storage
+  '1.2.840.10008.5.1.4.1.1.10',  // Standalone VOI LUT Storage
+  '1.2.840.10008.5.1.4.1.1.11',  // Presentation States
+  '1.2.840.10008.5.1.4.1.1.66',  // Segmentation
+  '1.2.840.10008.5.1.4.1.1.67',  // Realworld Value Map
+  '1.2.840.10008.5.1.4.1.1.78',  // Spectacle / Ophthalmic
+  '1.2.840.10008.5.1.4.1.1.88',  // Structured Reports / KOS
+  '1.2.840.10008.5.1.4.1.1.9',   // Waveform
+  '1.2.840.10008.5.1.4.1.1.104', // Encapsulated PDF / CDA
+  '1.2.840.10008.5.1.4.1.1.481', // RT Plan / Structure Set
 ];
 
 function isNonImageSopClass(sopClassUID: string): boolean {

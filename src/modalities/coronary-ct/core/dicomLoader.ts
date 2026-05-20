@@ -147,14 +147,17 @@ export function getSeriesPreferenceScore(series: Pick<DicomSeriesInfo, 'seriesDe
 // appear as separate user-facing series. Pattern-based match — any
 // prefix in this list deny-lists the series.
 const NON_IMAGE_SOP_PREFIXES = [
-  '1.2.840.10008.5.1.4.1.1.11',   // Presentation State variants
-  '1.2.840.10008.5.1.4.1.1.66',   // Segmentation / Surface Segmentation
-  '1.2.840.10008.5.1.4.1.1.67',   // Realworld Value Map
-  '1.2.840.10008.5.1.4.1.1.78',   // Spectacle Prescription, Macular Grid
-  '1.2.840.10008.5.1.4.1.1.88',   // Structured Report variants
-  '1.2.840.10008.5.1.4.1.1.9',    // Waveform (covers 9.x — guarded by exact prefix below for image overlap)
-  '1.2.840.10008.5.1.4.1.1.104',  // Encapsulated PDF / CDA
-  '1.2.840.10008.5.1.4.1.1.481',  // RT Plan / Structure Set / Dose / Image
+  '1.2.840.10008.1.3.10',        // Media Storage Directory (DICOMDIR)
+  '1.2.840.10008.5.1.4.1.1.8',   // Standalone Overlay Storage
+  '1.2.840.10008.5.1.4.1.1.10',  // Standalone VOI LUT Storage
+  '1.2.840.10008.5.1.4.1.1.11',  // Presentation State variants
+  '1.2.840.10008.5.1.4.1.1.66',  // Segmentation / Surface Segmentation
+  '1.2.840.10008.5.1.4.1.1.67',  // Realworld Value Map
+  '1.2.840.10008.5.1.4.1.1.78',  // Spectacle Prescription, Macular Grid
+  '1.2.840.10008.5.1.4.1.1.88',  // Structured Report variants
+  '1.2.840.10008.5.1.4.1.1.9',   // Waveform
+  '1.2.840.10008.5.1.4.1.1.104', // Encapsulated PDF / CDA
+  '1.2.840.10008.5.1.4.1.1.481', // RT Plan / Structure Set / Dose / Image
 ];
 
 function isNonImageSopClass(sopClassUID: string): boolean {
