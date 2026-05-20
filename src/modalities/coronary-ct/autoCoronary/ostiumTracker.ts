@@ -148,3 +148,77 @@ export function traceCoronariesFromAortaRoot(
 
   return lines;
 }
+
+export function traceCoronariesFromManualLandmarks(
+  sampler: VoxelSampler,
+  rootIJK: [number, number, number],
+  rcaOstiumIJK: [number, number, number],
+  lmcaOstiumIJK: [number, number, number]
+): AutoCoronaryCenterline[] {
+  const [w, h, d] = sampler.dims;
+  const lines: AutoCoronaryCenterline[] = [];
+
+  // RCA
+  const rcaDir: [number, number, number] = [
+    rcaOstiumIJK[0] - rootIJK[0],
+    rcaOstiumIJK[1] - rootIJK[1],
+    rcaOstiumIJK[2] - rootIJK[2]
+  ];
+  const rcaPoints = traceVessel(sampler, rcaOstiumIJK, rcaDir);
+  lines.push({
+    id: 'rca',
+    label: 'RCA',
+    color: '#f8d16c',
+    points: rcaPoints,
+    confidence: rcaPoints.length > 8 ? 0.95 : 0.5,
+  });
+
+  // LM (Left Main)
+  const lmDir: [number, number, number] = [
+    lmcaOstiumIJK[0] - rootIJK[0],
+    lmcaOstiumIJK[1] - rootIJK[1],
+    lmcaOstiumIJK[2] - rootIJK[2]
+  ];
+  const lmPoints = traceVessel(sampler, lmcaOstiumIJK, lmDir);
+  lines.push({
+    id: 'lm',
+    label: 'Left Main',
+    color: '#8dd6a5',
+    points: lmPoints,
+    confidence: lmPoints.length > 8 ? 0.95 : 0.5,
+  });
+
+  // LAD
+  // LAD starts slightly offset from LMCA ostium to trace downstream LAD branch
+  const ladStartIJK: [number, number, number] = [
+    clamp(lmcaOstiumIJK[0] + 4, 0, w - 1),
+    clamp(lmcaOstiumIJK[1] + 5, 0, h - 1),
+    clamp(lmcaOstiumIJK[2] - 1, 0, d - 1)
+  ];
+  const ladPoints = traceVessel(sampler, ladStartIJK, [1, 1, -1]);
+  lines.push({
+    id: 'lad',
+    label: 'LAD',
+    color: '#ff9f68',
+    points: ladPoints,
+    confidence: ladPoints.length > 8 ? 0.95 : 0.5,
+  });
+
+  // LCx
+  // LCx starts slightly offset from LMCA ostium to trace downstream LCx branch
+  const lcxStartIJK: [number, number, number] = [
+    clamp(lmcaOstiumIJK[0] + 2, 0, w - 1),
+    clamp(lmcaOstiumIJK[1] - 5, 0, h - 1),
+    clamp(lmcaOstiumIJK[2] - 1, 0, d - 1)
+  ];
+  const lcxPoints = traceVessel(sampler, lcxStartIJK, [-1, -1, -1]);
+  lines.push({
+    id: 'lcx',
+    label: 'LCx',
+    color: '#79c7ff',
+    points: lcxPoints,
+    confidence: lcxPoints.length > 8 ? 0.95 : 0.5,
+  });
+
+  return lines;
+}

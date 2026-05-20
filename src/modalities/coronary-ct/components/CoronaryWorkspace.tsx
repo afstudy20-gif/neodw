@@ -157,6 +157,22 @@ export function CoronaryWorkspace({ renderingEngineId, volumeId, series, seriesL
     setVersion((value) => value + 1);
   }
 
+  type LandmarkId = 'aortaRoot' | 'rcaOstium' | 'lmcaOstium';
+
+  interface LandmarkPicking {
+    activeLandmark: LandmarkId | null;
+    aortaRoot: WorldPoint3D | null;
+    rcaOstium: WorldPoint3D | null;
+    lmcaOstium: WorldPoint3D | null;
+  }
+
+  const [landmarkPicking, setLandmarkPicking] = useState<LandmarkPicking>({
+    activeLandmark: null,
+    aortaRoot: null,
+    rcaOstium: null,
+    lmcaOstium: null,
+  });
+
   const autoCoronary = useAutoCoronary({
     seriesList,
     activeSeries: series,
@@ -175,10 +191,35 @@ export function CoronaryWorkspace({ renderingEngineId, volumeId, series, seriesL
   });
 
   async function handleAutoCoronary() {
-    setStatus('Auto Coronary: selecting best series…');
-    const result = await autoCoronary.run();
+    setLandmarkPicking({
+      activeLandmark: 'aortaRoot',
+      aortaRoot: null,
+      rcaOstium: null,
+      lmcaOstium: null,
+    });
+    setActiveTool('Probe');
+    setStatus('Auto Coronary: Please click on the center of the Aortic Root in any viewport with the Probe tool, then click "Confirm Aortic Root".');
+  }
+
+  async function handleAutoCoronaryWithLandmarks() {
+    if (!landmarkPicking.aortaRoot || !landmarkPicking.rcaOstium || !landmarkPicking.lmcaOstium) {
+      return;
+    }
+    setStatus('Auto Coronary: running automated segmentation using landmarks…');
+    const result = await autoCoronary.run({
+      aortaRoot: landmarkPicking.aortaRoot,
+      rcaOstium: landmarkPicking.rcaOstium,
+      lmcaOstium: landmarkPicking.lmcaOstium,
+    });
     if (!result && autoCoronary.error) {
       setStatus(`Auto Coronary failed: ${autoCoronary.error}`);
+    } else {
+      setLandmarkPicking({
+        activeLandmark: null,
+        aortaRoot: null,
+        rcaOstium: null,
+        lmcaOstium: null,
+      });
     }
   }
 
@@ -822,20 +863,179 @@ export function CoronaryWorkspace({ renderingEngineId, volumeId, series, seriesL
               </div>
 
               <div className="section-label">Auto Coronary (beta)</div>
-              <div className="action-grid">
-                <button
-                  className="primary-btn small"
-                  onClick={handleAutoCoronary}
-                  disabled={autoCoronary.busy || !series || seriesList.length === 0}
-                  title="Automatically select the best CCTA phase and generate LM/LAD/LCx/RCA centerlines"
-                >
-                  {autoCoronary.busy
-                    ? `Auto Coronary… ${autoCoronary.stage || ''}`
-                    : 'Auto Coronary'}
-                </button>
-              </div>
-              {autoCoronary.error && (
-                <div className="instruction-box error">{autoCoronary.error}</div>
+              {landmarkPicking.activeLandmark !== null || landmarkPicking.aortaRoot || landmarkPicking.rcaOstium || landmarkPicking.lmcaOstium ? (
+                <div className="landmark-picking-card">
+                  <div className="card-title-row">
+                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>Landmark Assistant</span>
+                    <button 
+                      className="ghost-btn compact-btn" 
+                      onClick={() => {
+                        setLandmarkPicking({
+                          activeLandmark: null,
+                          aortaRoot: null,
+                          rcaOstium: null,
+                          lmcaOstium: null,
+                        });
+                        setActiveTool('Crosshairs');
+                        setStatus('Auto Coronary landmark picking cancelled.');
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  
+                  <div className="landmark-steps">
+                    {/* Step 1: Aortic Root */}
+                    <div className={`landmark-step ${landmarkPicking.activeLandmark === 'aortaRoot' ? 'active' : ''} ${landmarkPicking.aortaRoot ? 'completed' : ''}`}>
+                      <div className="step-number">1</div>
+                      <div className="step-info">
+                        <div className="step-title">Aortic Root</div>
+                        <div className="step-desc">Center of ascending aorta at ostia level</div>
+                      </div>
+                      {landmarkPicking.aortaRoot ? (
+                        <span className="badge success">Placed</span>
+                      ) : (
+                        <button 
+                          className={`secondary-btn x-small ${landmarkPicking.activeLandmark === 'aortaRoot' ? 'active-step-btn' : ''}`}
+                          onClick={() => {
+                            setLandmarkPicking(prev => ({ ...prev, activeLandmark: 'aortaRoot' }));
+                            setActiveTool('Probe');
+                            setStatus('Aortic Root: Place a Probe point in the center of the Aortic Root, then click "Confirm Aortic Root".');
+                          }}
+                        >
+                          {landmarkPicking.activeLandmark === 'aortaRoot' ? 'Placing...' : 'Place Point'}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Step 2: RCA Ostium */}
+                    <div className={`landmark-step ${landmarkPicking.activeLandmark === 'rcaOstium' ? 'active' : ''} ${landmarkPicking.rcaOstium ? 'completed' : ''}`}>
+                      <div className="step-number">2</div>
+                      <div className="step-info">
+                        <div className="step-title">RCA Ostium</div>
+                        <div className="step-desc">Origin of Right Coronary Artery</div>
+                      </div>
+                      {landmarkPicking.rcaOstium ? (
+                        <span className="badge success">Placed</span>
+                      ) : (
+                        <button 
+                          className={`secondary-btn x-small ${landmarkPicking.activeLandmark === 'rcaOstium' ? 'active-step-btn' : ''}`}
+                          disabled={!landmarkPicking.aortaRoot}
+                          onClick={() => {
+                            setLandmarkPicking(prev => ({ ...prev, activeLandmark: 'rcaOstium' }));
+                            setActiveTool('Probe');
+                            setStatus('RCA Ostium: Place a Probe point at the origin of the RCA, then click "Confirm RCA Ostium".');
+                          }}
+                        >
+                          {landmarkPicking.activeLandmark === 'rcaOstium' ? 'Placing...' : 'Place Point'}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Step 3: LMCA Ostium */}
+                    <div className={`landmark-step ${landmarkPicking.activeLandmark === 'lmcaOstium' ? 'active' : ''} ${landmarkPicking.lmcaOstium ? 'completed' : ''}`}>
+                      <div className="step-number">3</div>
+                      <div className="step-info">
+                        <div className="step-title">LMCA Ostium</div>
+                        <div className="step-desc">Origin of Left Main Coronary Artery</div>
+                      </div>
+                      {landmarkPicking.lmcaOstium ? (
+                        <span className="badge success">Placed</span>
+                      ) : (
+                        <button 
+                          className={`secondary-btn x-small ${landmarkPicking.activeLandmark === 'lmcaOstium' ? 'active-step-btn' : ''}`}
+                          disabled={!landmarkPicking.rcaOstium}
+                          onClick={() => {
+                            setLandmarkPicking(prev => ({ ...prev, activeLandmark: 'lmcaOstium' }));
+                            setActiveTool('Probe');
+                            setStatus('LMCA Ostium: Place a Probe point at the origin of the Left Main, then click "Confirm LMCA Ostium".');
+                          }}
+                        >
+                          {landmarkPicking.activeLandmark === 'lmcaOstium' ? 'Placing...' : 'Place Point'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Placement Confirm/Action Row */}
+                  {landmarkPicking.activeLandmark && (
+                    <div className="confirm-row">
+                      <button 
+                        className="primary-btn small w-full"
+                        onClick={() => {
+                          const point = takeLatestProbePoint();
+                          if (!point) {
+                            setStatus('No Probe point found. Please click inside a viewport using the Probe tool first.');
+                            return;
+                          }
+                          const active = landmarkPicking.activeLandmark!;
+                          setLandmarkPicking(prev => {
+                            const nextActive = active === 'aortaRoot' ? 'rcaOstium' : active === 'rcaOstium' ? 'lmcaOstium' : null;
+                            if (nextActive) {
+                              setStatus(`${nextActive === 'rcaOstium' ? 'RCA' : 'LMCA'} Ostium: Place a Probe point, then click Confirm.`);
+                            } else {
+                              setStatus('All landmarks placed! Click "Run Segmentation" to begin.');
+                              setActiveTool('Crosshairs');
+                            }
+                            return {
+                              ...prev,
+                              [active]: point,
+                              activeLandmark: nextActive,
+                            };
+                          });
+                        }}
+                      >
+                        Confirm {landmarkPicking.activeLandmark === 'aortaRoot' ? 'Aortic Root' : landmarkPicking.activeLandmark === 'rcaOstium' ? 'RCA Ostium' : 'LMCA Ostium'}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Reset / Run Buttons */}
+                  {landmarkPicking.aortaRoot && landmarkPicking.rcaOstium && landmarkPicking.lmcaOstium && (
+                    <div className="action-row">
+                      <button 
+                        className="secondary-btn small"
+                        onClick={() => {
+                          setLandmarkPicking({
+                            activeLandmark: 'aortaRoot',
+                            aortaRoot: null,
+                            rcaOstium: null,
+                            lmcaOstium: null,
+                          });
+                          setActiveTool('Probe');
+                          setStatus('Landmarks reset. Place a Probe point for the Aortic Root.');
+                        }}
+                      >
+                        Reset All
+                      </button>
+                      <button 
+                        className="primary-btn small"
+                        onClick={handleAutoCoronaryWithLandmarks}
+                        disabled={autoCoronary.busy}
+                      >
+                        {autoCoronary.busy ? `Running… ${autoCoronary.stage || ''}` : 'Run Tracing'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="action-grid">
+                    <button
+                      className="primary-btn small"
+                      onClick={handleAutoCoronary}
+                      disabled={autoCoronary.busy || !series || seriesList.length === 0}
+                      title="Interactively select landmarks and segment coronary arteries automatically"
+                    >
+                      {autoCoronary.busy
+                        ? `Auto Coronary… ${autoCoronary.stage || ''}`
+                        : 'Auto Coronary'}
+                    </button>
+                  </div>
+                  {autoCoronary.error && (
+                    <div className="instruction-box error">{autoCoronary.error}</div>
+                  )}
+                </>
               )}
 
               <div className="section-label">Main Vessels</div>

@@ -398,18 +398,23 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     if (!cam.position || !cam.focalPoint) return;
 
     const imageData = volume.imageData;
-    const vm = volume.voxelManager;
     const dims = imageData.getDimensions();
     const spacing = imageData.getSpacing();
+    const cols = dims[0];
+    const rows = dims[1];
+    const scalarData = volume.voxelManager.getCompleteScalarDataArray();
+    if (!scalarData) return;
 
-    // Camera direction
+    // View direction
     const camDir = [
       cam.focalPoint[0] - cam.position[0],
       cam.focalPoint[1] - cam.position[1],
       cam.focalPoint[2] - cam.position[2],
     ];
     const camLen = Math.sqrt(camDir[0] ** 2 + camDir[1] ** 2 + camDir[2] ** 2);
-    camDir[0] /= camLen; camDir[1] /= camLen; camDir[2] /= camLen;
+    const viewDirNorm = [camDir[0] / camLen, camDir[1] / camLen, camDir[2] / camLen];
+
+    const isParallel = cam.parallelProjection;
 
     // Build bounding box of drawn region
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -448,20 +453,37 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         const worldTarget = (viewport as any).canvasToWorld?.([cx, cy]);
         if (!worldTarget) continue;
 
-        // Ray direction from camera through this point
-        const dir = [
-          worldTarget[0] - cam.position![0],
-          worldTarget[1] - cam.position![1],
-          worldTarget[2] - cam.position![2],
-        ];
-        const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
-        dir[0] /= dLen; dir[1] /= dLen; dir[2] /= dLen;
+        let rayDir: number[];
+        let startPoint: number[];
+        let dMin: number;
+        let dMax: number;
+
+        if (isParallel) {
+          // In parallel/orthographic projection, all rays are parallel to view direction
+          rayDir = [...viewDirNorm];
+          startPoint = [...worldTarget];
+          // March centered around focal plane
+          dMin = -maxDist * 0.5;
+          dMax = maxDist * 0.5;
+        } else {
+          // Perspective: rays diverge from cam.position through worldTarget
+          const dir = [
+            worldTarget[0] - cam.position![0],
+            worldTarget[1] - cam.position![1],
+            worldTarget[2] - cam.position![2],
+          ];
+          const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
+          rayDir = [dir[0] / dLen, dir[1] / dLen, dir[2] / dLen];
+          startPoint = [...cam.position!];
+          dMin = camLen * 0.1;
+          dMax = maxDist;
+        }
 
         // March along ray, erase ALL non-air voxels
-        for (let d = camLen * 0.1; d < maxDist; d += rayStep) {
-          const wx = cam.position![0] + dir[0] * d;
-          const wy = cam.position![1] + dir[1] * d;
-          const wz = cam.position![2] + dir[2] * d;
+        for (let d = dMin; d < dMax; d += rayStep) {
+          const wx = startPoint[0] + rayDir[0] * d;
+          const wy = startPoint[1] + rayDir[1] * d;
+          const wz = startPoint[2] + rayDir[2] * d;
 
           const ijk = imageData.worldToIndex([wx, wy, wz]);
           const i = Math.round(ijk[0]);
@@ -470,9 +492,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
           if (i < 0 || i >= dims[0] || j < 0 || j >= dims[1] || k < 0 || k >= dims[2]) continue;
 
-          const hu = vm.getAtIJK(i, j, k);
-          if (hu > -200) { // non-air
-            vm.setAtIJK(i, j, k, AIR_HU);
+          const idx = k * cols * rows + j * cols + i;
+          const hu = scalarData[idx];
+          if (hu !== AIR_HU) {
+            scalarData[idx] = AIR_HU;
             modifiedSlices.add(k);
             erased++;
           }
@@ -733,13 +756,18 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     setRegionGrowStatus('Growing...');
 
     const imageData = volume.imageData;
-    const vm = volume.voxelManager;
     const dims = imageData.getDimensions();
     const [nx, ny, nz] = dims;
     const totalVoxels = nx * ny * nz;
 
+    const scalarData = volume.voxelManager.getCompleteScalarDataArray();
+    if (!scalarData) return;
+
+    const toIdx = (i: number, j: number, k: number) => k * nx * ny + j * nx + i;
+
     // Verify seed is in range
-    const seedHU = vm.getAtIJK(seedIJK[0], seedIJK[1], seedIJK[2]);
+    const seedIdx = toIdx(seedIJK[0], seedIJK[1], seedIJK[2]);
+    const seedHU = scalarData[seedIdx];
     if (seedHU < minHU || seedHU > maxHU) {
       setRegionGrowStatus(`Seed HU=${seedHU} outside range [${minHU}, ${maxHU}]`);
       return;
@@ -747,10 +775,8 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     // BFS flood fill — use Uint8Array as visited mask
     const mask = new Uint8Array(totalVoxels); // 0 = not in region, 1 = in region
-    const toIdx = (i: number, j: number, k: number) => k * nx * ny + j * nx + i;
 
     const queue: number[] = []; // flat indices
-    const seedIdx = toIdx(seedIJK[0], seedIJK[1], seedIJK[2]);
     queue.push(seedIdx);
     mask[seedIdx] = 1;
     let regionSize = 0;
@@ -775,7 +801,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
         const nIdx = toIdx(ni, nj, nk);
         if (mask[nIdx]) continue;
-        const hu = vm.getAtIJK(ni, nj, nk);
+        const hu = scalarData[nIdx];
         if (hu >= minHU && hu <= maxHU) {
           mask[nIdx] = 1;
           queue.push(nIdx);
@@ -793,8 +819,8 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
           const idx = toIdx(i, j, k);
-          if (!mask[idx] && vm.getAtIJK(i, j, k) > -200) {
-            vm.setAtIJK(i, j, k, AIR_HU);
+          if (!mask[idx] && scalarData[idx] > -200) {
+            scalarData[idx] = AIR_HU;
             modifiedSlices.add(k);
             erased++;
           }

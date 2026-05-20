@@ -6,6 +6,7 @@ export interface VoxelSampler {
   sample(world: [number, number, number]): number;
   sampleIJK(i: number, j: number, k: number): number;
   worldAt(i: number, j: number, k: number): [number, number, number];
+  worldToIndex(world: [number, number, number]): [number, number, number];
   dims: [number, number, number];
 }
 
@@ -56,6 +57,10 @@ export function buildVoxelSampler(volume: cornerstone.Types.IImageVolume): Voxel
     worldAt(i, j, k) {
       const w = imgVol.imageData!.indexToWorld([i, j, k]);
       return [w[0], w[1], w[2]];
+    },
+    worldToIndex(world) {
+      const idx = imgVol.imageData!.worldToIndex(world as unknown as number[]);
+      return [idx[0], idx[1], idx[2]];
     },
     dims,
   };
