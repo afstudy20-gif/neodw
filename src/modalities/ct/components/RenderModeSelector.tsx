@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
+import * as cornerstoneTools from '@cornerstonejs/tools';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
 type RenderMode =
@@ -495,6 +496,57 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   useEffect(() => {
     const viewport = getViewport3d();
 
+    // Find every cornerstone-tools ToolGroup that has the volume3d viewport
+    // attached. We deactivate trackball/pan/zoom on these during scalpel
+    // draw mode so primary-mouse drag reaches the scalpel canvas instead of
+    // rotating the camera. Restored on scalpel-off. Without this, the
+    // Cardiac3DView modal's `cardiac3dToolGroup` (CCTA) and the main
+    // CtApp's `vol3dToolGroup` keep TrackballRotate bound to primary mouse
+    // and either intercept the drag or fight with the document-capture
+    // listener below, leaving the eraser non-functional.
+    function getVolume3dToolGroups(): unknown[] {
+      try {
+        const mgr = (cornerstoneTools.ToolGroupManager as unknown as {
+          getAllToolGroups?: () => unknown[];
+          getToolGroupForViewport?: (viewportId: string, renderingEngineId: string) => unknown;
+        });
+        if (typeof mgr.getAllToolGroups === 'function') {
+          return mgr.getAllToolGroups().filter((tg) => {
+            const info = (tg as { viewportsInfo?: Array<{ viewportId: string }> }).viewportsInfo;
+            return Array.isArray(info) && info.some((v) => v.viewportId === 'volume3d');
+          });
+        }
+      } catch { /* ignore */ }
+      return [];
+    }
+
+    function setVolume3dPrimaryToolsActive(active: boolean) {
+      const names = [
+        cornerstoneTools.TrackballRotateTool.toolName,
+        cornerstoneTools.PanTool.toolName,
+        cornerstoneTools.ZoomTool.toolName,
+      ];
+      for (const tg of getVolume3dToolGroups()) {
+        const group = tg as {
+          setToolPassive?: (n: string) => void;
+          setToolActive?: (n: string, opts: unknown) => void;
+        };
+        for (const n of names) {
+          try {
+            if (active) {
+              const binding =
+                n === cornerstoneTools.ZoomTool.toolName
+                  ? { mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }
+                  : { mouseButton: cornerstoneTools.Enums.MouseBindings.Primary };
+              group.setToolActive?.(n, { bindings: [binding] });
+            } else {
+              group.setToolPassive?.(n);
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+
     if (scalpelMode === 'off') {
       // Remove canvas & re-enable VTK interactor
       if (scalpelCanvasRef.current) {
@@ -507,11 +559,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
         if (interactor) interactor.setEnabled(true);
       } catch { /* ignore */ }
+      // Restore tool group bindings
+      setVolume3dPrimaryToolsActive(true);
       return;
     }
 
     if (!viewport?.element) return;
     const el = viewport.element;
+
+    // Deactivate competing tools BEFORE attaching our canvas + listeners.
+    setVolume3dPrimaryToolsActive(false);
 
     // DISABLE VTK interactor so it doesn't steal mouse events
     try {
