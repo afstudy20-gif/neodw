@@ -271,63 +271,13 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // over-splitting — single UIDs emitted 12 series — so we drop it and
     // let the natural UID grouping carry the load.
 
-    function instanceNumber(m: Record<string, string>): number {
-      const n = Number.parseFloat(m.instanceNumber || '');
-      return Number.isFinite(n) ? n : 0;
-    }
-
+    // Splitting disabled per Horos-parity request. One SeriesInstanceUID =
+    // one emitted series. Z-bucket 4D-interleave + direction-reversal +
+    // acqKey-based splitting all removed; they caused over-splitting (SC
+    // screenshots, motion-corrected reconstructions) more often than they
+    // helped. Real 4D cardiac stays as one (long) UID, same as Horos.
     function splitGroup(group: typeof filesList): typeof filesList[] {
-      if (group.length < 2) return [group];
-
-      // Strategy A: z-bucket splitting. Only fires for *uniform* 4D interleave
-      // where every Z position has exactly N samples (N = phase count). This
-      // catches the classic 4×111 = 444 cardiac case cleanly but ignores
-      // partial overlaps that would over-split single-volume acquisitions.
-      const zBuckets = new Map<number, typeof filesList>();
-      for (const f of group) {
-        const z = Math.round(getSlicePosition(f.metadata) * 100);
-        if (!zBuckets.has(z)) zBuckets.set(z, []);
-        zBuckets.get(z)!.push(f);
-      }
-      let maxBucket = 0;
-      let minBucket = Number.POSITIVE_INFINITY;
-      for (const bucket of zBuckets.values()) {
-        if (bucket.length > maxBucket) maxBucket = bucket.length;
-        if (bucket.length < minBucket) minBucket = bucket.length;
-      }
-      // Require uniform N at every Z, N >= 2, AND enough unique Z positions
-      // to look like a real volume. Without the uniqueZ floor, a series of
-      // 12 secondary-capture screenshots all at Z=0 would falsely trigger a
-      // 12-way split, producing 12 single-frame phases. A real 4D cardiac
-      // slab has dozens of Z positions; 10 is a safe lower bound that
-      // excludes localizers, 3D screenshots, and topograms.
-      const uniformInterleave =
-        maxBucket > 1 &&
-        maxBucket === minBucket &&
-        zBuckets.size >= 10 &&
-        maxBucket <= 20;
-      if (uniformInterleave) {
-        for (const bucket of zBuckets.values()) {
-          bucket.sort((a, b) =>
-            (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
-            instanceNumber(a.metadata) - instanceNumber(b.metadata)
-          );
-        }
-        const sortedZ = [...zBuckets.keys()].sort((a, b) => a - b);
-        const phases: typeof filesList[] = Array.from({ length: maxBucket }, () => []);
-        for (const z of sortedZ) {
-          const bucket = zBuckets.get(z)!;
-          for (let i = 0; i < bucket.length; i += 1) {
-            phases[i].push(bucket[i]);
-          }
-        }
-        return phases.filter((p) => p.length > 0);
-      }
-
-      // No uniform interleave detected — trust the acqKey grouping and
-      // emit the whole group as one series. Direction-reversal splitting
-      // proved too aggressive on real-world data: minor Z jitter from
-      // motion-correction reconstructions caused dozens of bogus splits.
+      if (!group || group.length === 0) return [];
       return [group];
     }
 

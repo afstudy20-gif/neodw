@@ -201,57 +201,15 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
     // interleave. acqKey-based splitting caused single UIDs to emit 12
     // separate series — too aggressive — so we drop it entirely.
 
-    function instanceNumber(m: Record<string, string>): number {
-      const n = parseFloat(m.instanceNumber || '');
-      return Number.isFinite(n) ? n : 0;
-    }
-
+    // Splitting disabled per Horos-parity request. Every SeriesInstanceUID
+    // returns as a single pass. Z-bucket 4D-interleave splitting +
+    // direction-reversal splitting + acqKey splitting all removed. If a
+    // study has 4 cardiac phases stored under one UID, they ship as one
+    // (long) series — same as Horos/OsiriX default behavior. SC and other
+    // single-frame derived images stay intact because nothing now slices
+    // a UID into smaller groups.
     function splitGroup(group: typeof filesList): typeof filesList[] {
-      if (group.length < 2) return [group];
-      // Uniform 4D interleave detection — only split when EVERY Z position
-      // has exactly N samples. Catches classic 4×111 cardiac case without
-      // over-splitting partial-overlap data.
-      const zBuckets = new Map<number, typeof filesList>();
-      for (const f of group) {
-        const z = Math.round(getSlicePosition(f.metadata) * 100);
-        if (!zBuckets.has(z)) zBuckets.set(z, []);
-        zBuckets.get(z)!.push(f);
-      }
-      let maxBucket = 0;
-      let minBucket = Number.POSITIVE_INFINITY;
-      for (const bucket of zBuckets.values()) {
-        if (bucket.length > maxBucket) maxBucket = bucket.length;
-        if (bucket.length < minBucket) minBucket = bucket.length;
-      }
-      // Real 4D cardiac volume needs many unique Z positions. Without this
-      // floor, a series of 12 same-Z screenshots would falsely trigger a
-      // 12-way split into single-frame phases. uniqueZ >= 10 excludes
-      // localizers and SC screenshots; maxBucket <= 20 sanity caps phase
-      // count.
-      const uniformInterleave =
-        maxBucket > 1 &&
-        maxBucket === minBucket &&
-        zBuckets.size >= 10 &&
-        maxBucket <= 20;
-      if (uniformInterleave) {
-        for (const bucket of zBuckets.values()) {
-          bucket.sort((a, b) =>
-            (a.metadata.sopInstanceUID || '').localeCompare(b.metadata.sopInstanceUID || '') ||
-            instanceNumber(a.metadata) - instanceNumber(b.metadata)
-          );
-        }
-        const sortedZ = [...zBuckets.keys()].sort((a, b) => a - b);
-        const phases: typeof filesList[] = Array.from({ length: maxBucket }, () => []);
-        for (const z of sortedZ) {
-          const bucket = zBuckets.get(z)!;
-          for (let i = 0; i < bucket.length; i += 1) {
-            phases[i].push(bucket[i]);
-          }
-        }
-        return phases.filter((p) => p.length > 0);
-      }
-      // No uniform interleave — trust acqKey grouping. Direction-reversal
-      // splitting was over-aggressive on real-world motion-corrected data.
+      if (!group || group.length === 0) return [];
       return [group];
     }
 
