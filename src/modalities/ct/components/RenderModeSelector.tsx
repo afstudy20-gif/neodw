@@ -308,27 +308,34 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   const volumeBackupRef = useRef<{ data: Float32Array | Int16Array | null; saved: boolean }>({ data: null, saved: false });
   const isDrawingRef = useRef(false);
 
-  // Save volume data backup for undo
+  // Save volume data backup for undo.
+  // IMPORTANT: We use imageData.getPointData().getScalars().getData() — the ACTUAL
+  // VTK scalar buffer that the GPU texture reads from. voxelManager.getCompleteScalarDataArray()
+  // returns a COPY and mutating it has no effect on the rendered output.
   const saveVolumeBackup = useCallback(() => {
     if (volumeBackupRef.current.saved) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
-    if (!volume?.voxelManager) return;
-    const data = volume.voxelManager.getCompleteScalarDataArray();
+    if (!volume?.imageData) return;
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const data = vtkScalars?.getData?.();
     if (!data) return;
     volumeBackupRef.current = { data: data.slice(), saved: true };
     console.log('[Scalpel] Volume backup saved, length:', data.length);
   }, [volumeId]);
 
-  // Sync volume voxelManager data back to per-image cache.
-  // The VTK streaming 3D texture reads from cache.getImage(imageId).voxelManager.getScalarData(),
-  // NOT from the volume's voxelManager. So after modifying voxels in the volume,
-  // we must also update the corresponding cached image data for changes to be visible in 3D.
+  // Sync ACTUAL VTK scalar buffer to per-image cache so 2D slice views also refresh.
+  // Reads from imageData.getPointData().getScalars().getData() — the same buffer we mutate.
   const syncVolumeToCachedImages = useCallback((volume: any, modifiedSlices?: Set<number>) => {
     const imageIds = volume.imageIds as string[];
-    const vm = volume.voxelManager;
+    if (!imageIds?.length) return;
     const dims = volume.imageData.getDimensions();
     const cols = dims[0];
     const rows = dims[1];
+
+    // Read from the VTK scalar buffer — NOT from voxelManager which may lag
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const scalarData = vtkScalars?.getData?.();
+    if (!scalarData) return;
 
     const slicesToSync = modifiedSlices || new Set(Array.from({ length: dims[2] }, (_, i) => i));
     let synced = 0;
@@ -338,14 +345,13 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       try {
         const cachedImage = cornerstone.cache.getImage(imageIds[k]);
         if (!cachedImage) continue;
-        // Get the cached image's scalar data array
         const sliceData = (cachedImage as any).voxelManager?.getScalarData?.()
                        || (cachedImage as any).getPixelData?.();
         if (!sliceData) continue;
-        // Copy modified voxels from volume voxelManager to cached image
+        const sliceOffset = k * cols * rows;
         for (let j = 0; j < rows; j++) {
           for (let i = 0; i < cols; i++) {
-            sliceData[j * cols + i] = vm.getAtIJK(i, j, k);
+            sliceData[j * cols + i] = scalarData[sliceOffset + j * cols + i];
           }
         }
         synced++;
@@ -354,26 +360,28 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     console.log(`[Scalpel] Synced ${synced} slices to image cache`);
   }, []);
 
-  // Undo scalpel: restore original volume data + sync to cached images
+  // Undo scalpel: restore original volume data by writing back into the SAME VTK buffer
   const undoScalpel = useCallback(() => {
     const backup = volumeBackupRef.current;
     if (!backup.saved || !backup.data) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
-    if (!volume?.voxelManager) return;
-    volume.voxelManager.setCompleteScalarDataArray(backup.data);
+    if (!volume?.imageData) return;
 
-    // Sync ALL slices back to per-image cache so 3D texture picks up restored data
+    // Write backup into the actual VTK scalar buffer in-place (same object reference)
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const liveData = vtkScalars?.getData?.();
+    if (!liveData || liveData.length !== backup.data.length) return;
+    liveData.set(backup.data);
+
+    // Notify VTK pipeline
+    vtkScalars.modified();
+    volume.imageData.modified();
+
+    // Sync back to per-image cache
     syncVolumeToCachedImages(volume);
 
-    // Force 3D texture update
     const viewport = getViewport3d();
     if (viewport) {
-      if (volume.imageData) {
-        volume.imageData.modified();
-        if (volume.imageData.getPointData) {
-          volume.imageData.getPointData().getScalars()?.modified?.();
-        }
-      }
       const actor = viewport.getDefaultActor()?.actor;
       const mapper = actor?.getMapper?.();
       if (mapper) (mapper as any).modified?.();
@@ -383,14 +391,17 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     console.log('[Scalpel] Volume restored from backup');
   }, [volumeId, syncVolumeToCachedImages]);
 
-  // Apply scalpel: erase voxels under the drawn region via ray-march
+  // Apply scalpel: erase voxels under the drawn region via ray-march.
+  // CRITICAL: mutate imageData.getPointData().getScalars().getData() in-place —
+  // this IS the VTK texture buffer. voxelManager.getCompleteScalarDataArray() returns
+  // a DETACHED COPY and mutating it has zero effect on the rendered 3D image.
   const applyScalpel = useCallback((canvasPoints: [number, number][]) => {
     if (canvasPoints.length < 3) return;
 
     const viewport = getViewport3d();
     if (!viewport) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
-    if (!volume?.voxelManager || !volume?.imageData) return;
+    if (!volume?.imageData) return;
 
     saveVolumeBackup();
 
@@ -402,8 +413,14 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const spacing = imageData.getSpacing();
     const cols = dims[0];
     const rows = dims[1];
-    const scalarData = volume.voxelManager.getCompleteScalarDataArray();
-    if (!scalarData) return;
+
+    // Get the ACTUAL VTK scalar buffer — same array the GPU reads from
+    const vtkScalars = imageData.getPointData?.()?.getScalars?.();
+    const scalarData = vtkScalars?.getData?.();
+    if (!scalarData) {
+      console.error('[Scalpel] Cannot get VTK scalar data buffer');
+      return;
+    }
 
     // View direction
     const camDir = [
@@ -503,20 +520,26 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
     }
 
-    if (erased > 0) {
-      syncVolumeToCachedImages(volume, modifiedSlices);
+    console.log(`[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}`);
 
+    if (erased > 0) {
+      // 1. Notify VTK pipeline that scalar data changed → forces GPU texture rebuild
+      vtkScalars!.modified();
       imageData.modified();
-      if (imageData.getPointData) {
-        imageData.getPointData().getScalars()?.modified?.();
-      }
-      
-      // Force mapper to detect data change and rebuild scalar texture
+
+      // 2. Force mapper to invalidate its cached scalar texture
       const actor = viewport.getDefaultActor()?.actor;
       const mapper = actor?.getMapper?.();
       if (mapper) (mapper as any).modified?.();
+
+      // 3. Sync to per-image cache so 2D slice views also refresh
+      syncVolumeToCachedImages(volume, modifiedSlices);
+
+      // 4. Render
       viewport.render();
-      console.log(`[Scalpel] Erased ${erased} voxels across ${modifiedSlices.size} slices`);
+      console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices.size} slices`);
+    } else {
+      console.warn('[Scalpel] No voxels erased — check ray march range and canvas-to-world mapping');
     }
   }, [volumeId, saveVolumeBackup, syncVolumeToCachedImages]);
 
