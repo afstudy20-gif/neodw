@@ -311,8 +311,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
   // Save volume data backup for undo.
   // Cornerstone3D streaming volumes store each slice in a separate image cache entry.
-  // getCompleteScalarDataArray() builds a NEW array each time (it's a copy).
-  // For backup we read via getAtIJK from the live per-slice data.
+  // For blazing fast copy and low memory usage, we clone the live VTK scalar typed array if available.
   const saveVolumeBackup = useCallback(() => {
     if (volumeBackupRef.current.saved) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
@@ -320,17 +319,27 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const dims = volume.imageData.getDimensions();
     const [nx, ny, nz] = dims;
     const total = nx * ny * nz;
-    const vm = volume.voxelManager;
-    // Use Int16Array to save memory — HU values fit in Int16
-    const backup = new Int16Array(total);
-    let idx = 0;
-    for (let k = 0; k < nz; k++) {
-      for (let j = 0; j < ny; j++) {
-        for (let i = 0; i < nx; i++) {
-          backup[idx++] = vm.getAtIJK(i, j, k) ?? -1024;
+    
+    // Fast path: direct copy of the live VTK scalar array
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const vtkScalarData = vtkScalars?.getData?.();
+    
+    let backup: Int16Array;
+    if (vtkScalarData) {
+      backup = new Int16Array(vtkScalarData);
+    } else {
+      const vm = volume.voxelManager;
+      backup = new Int16Array(total);
+      let idx = 0;
+      for (let k = 0; k < nz; k++) {
+        for (let j = 0; j < ny; j++) {
+          for (let i = 0; i < nx; i++) {
+            backup[idx++] = vm.getAtIJK(i, j, k) ?? -1024;
+          }
         }
       }
     }
+    
     volumeBackupRef.current = { data: backup, saved: true };
     console.log('[Scalpel] Backup saved, voxels:', total);
   }, [volumeId]);
@@ -343,7 +352,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     console.log('[Scalpel] syncVolumeToCachedImages: skipped (setAtIJK keeps slices in sync)');
   }, []);
 
-  // Undo scalpel: restore all voxels via setAtIJK (mirrors how erasing works)
+  // Undo scalpel: restore all voxels via setAtIJK and direct VTK array writing (dual-write)
   const undoScalpel = useCallback(() => {
     const backup = volumeBackupRef.current;
     if (!backup.saved || !backup.data) return;
@@ -352,11 +361,20 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const dims = volume.imageData.getDimensions();
     const [nx, ny, nz] = dims;
     const vm = volume.voxelManager;
+    
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const vtkScalarData = vtkScalars?.getData?.();
+
     let idx = 0;
     for (let k = 0; k < nz; k++) {
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
-          vm.setAtIJK(i, j, k, backup.data[idx++]);
+          const val = backup.data[idx++];
+          vm.setAtIJK(i, j, k, val);
+          if (vtkScalarData) {
+            const voxelKey = k * nx * ny + j * nx + i;
+            vtkScalarData[voxelKey] = val;
+          }
         }
       }
     }
@@ -399,6 +417,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const dims = imageData.getDimensions();
     const spacing = imageData.getSpacing();
     const vm = volume.voxelManager;
+    const bounds = imageData.getBounds(); // [xmin, xmax, ymin, ymax, zmin, zmax]
+
+    // Fast path: direct copy of the live VTK scalar array
+    const vtkScalars = imageData.getPointData?.()?.getScalars?.();
+    const vtkScalarData = vtkScalars?.getData?.();
 
     // View direction
     const camDir = [
@@ -434,7 +457,6 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     const step = 2;
     const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.7;
-    const maxDist = camLen * 2.5;
     let erased = 0;
     const AIR_HU = -1024;
     const modifiedSlices = new Set<number>();
@@ -450,16 +472,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
         let rayDir: number[];
         let startPoint: number[];
-        let dMin: number;
-        let dMax: number;
 
         if (isParallel) {
-          // In parallel/orthographic projection, all rays are parallel to view direction
+          // Parallel: ray goes along view direction, passing through worldTarget (which is on the focal plane)
           rayDir = [...viewDirNorm];
           startPoint = [...worldTarget];
-          // March centered around focal plane
-          dMin = -maxDist * 0.5;
-          dMax = maxDist * 0.5;
         } else {
           // Perspective: rays diverge from cam.position through worldTarget
           const dir = [
@@ -470,13 +487,48 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
           rayDir = [dir[0] / dLen, dir[1] / dLen, dir[2] / dLen];
           startPoint = [...cam.position!];
-          dMin = camLen * 0.1;
-          dMax = maxDist;
         }
 
-        // March along ray, erase ALL non-air voxels using setAtIJK
-        // (setAtIJK writes directly to the per-image slice cache — the authoritative data store)
-        for (let d = dMin; d < dMax; d += rayStep) {
+        // Ray-AABB intersection to find exact entry and exit parameters tMin and tMax
+        let tMin = -Infinity;
+        let tMax = Infinity;
+        let hitsAabb = true;
+
+        for (let i = 0; i < 3; i++) {
+          const bMin = bounds[i * 2];
+          const bMax = bounds[i * 2 + 1];
+          const o = startPoint[i];
+          const d = rayDir[i];
+
+          if (Math.abs(d) < 1e-6) {
+            if (o < bMin || o > bMax) {
+              hitsAabb = false;
+              break;
+            }
+          } else {
+            let t1 = (bMin - o) / d;
+            let t2 = (bMax - o) / d;
+
+            if (t1 > t2) {
+              const temp = t1;
+              t1 = t2;
+              t2 = temp;
+            }
+
+            tMin = Math.max(tMin, t1);
+            tMax = Math.min(tMax, t2);
+
+            if (tMin > tMax) {
+              hitsAabb = false;
+              break;
+            }
+          }
+        }
+
+        if (!hitsAabb) continue;
+
+        // March along ray strictly inside the AABB [tMin, tMax]
+        for (let d = tMin; d <= tMax; d += rayStep) {
           const wx = startPoint[0] + rayDir[0] * d;
           const wy = startPoint[1] + rayDir[1] * d;
           const wz = startPoint[2] + rayDir[2] * d;
@@ -495,6 +547,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           const hu = vm.getAtIJK(ii, jj, kk);
           if (hu !== AIR_HU && hu !== null && hu !== undefined) {
             vm.setAtIJK(ii, jj, kk, AIR_HU);
+            if (vtkScalarData) {
+              vtkScalarData[voxelKey] = AIR_HU;
+            }
             erasedSet.add(voxelKey);
             modifiedSlices.add(kk);
             erased++;
@@ -507,8 +562,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     if (erased > 0) {
       // After setAtIJK writes to per-image cache, we need to force VTK
-      // to rebuild its GPU volume texture. VTK checks MTime of the imageData
-      // and its scalar array to decide if it needs to re-upload to the GPU.
+      // to rebuild its GPU volume texture.
       try {
         imageData.getPointData?.()?.getScalars?.()?.modified?.();
         imageData.modified?.();
@@ -521,11 +575,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
 
       viewport.render();
+      try {
+        const engine = cornerstone.getRenderingEngine(renderingEngineId);
+        engine?.renderViewport(viewport.id);
+      } catch { /* ignore */ }
+
       console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices.size} slices`);
     } else {
       console.warn('[Scalpel] No voxels erased — check that canvasToWorld and ray march are hitting the volume bounds');
     }
-  }, [volumeId, saveVolumeBackup, syncVolumeToCachedImages]);
+  }, [volumeId, saveVolumeBackup, syncVolumeToCachedImages, renderingEngineId]);
 
   // Setup/teardown scalpel canvas overlay on 3D viewport
   useEffect(() => {
@@ -823,7 +882,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const [nx, ny, nz] = dims;
     const totalVoxels = nx * ny * nz;
 
-    const scalarData = volume.voxelManager.getCompleteScalarDataArray();
+    // Fast path: direct copy of the live VTK scalar array
+    const vtkScalars = imageData.getPointData?.()?.getScalars?.();
+    const vtkScalarData = vtkScalars?.getData?.();
+    const scalarData = vtkScalarData || volume.voxelManager.getCompleteScalarDataArray();
     if (!scalarData) return;
 
     const toIdx = (i: number, j: number, k: number) => k * nx * ny + j * nx + i;
@@ -878,12 +940,14 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const AIR_HU = -1024;
     let erased = 0;
     const modifiedSlices = new Set<number>();
+    const vm = volume.voxelManager;
     for (let k = 0; k < nz; k++) {
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
           const idx = toIdx(i, j, k);
           if (!mask[idx] && scalarData[idx] > -200) {
             scalarData[idx] = AIR_HU;
+            vm.setAtIJK(i, j, k, AIR_HU); // Dual-write!
             modifiedSlices.add(k);
             erased++;
           }
