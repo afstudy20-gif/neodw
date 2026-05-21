@@ -63,21 +63,26 @@ function buildSamplerFromBuffers(input: WorkerInput): VoxelSampler {
     (m[0] * m[4] - m[1] * m[3]) * invDet,
   ];
 
-  function sample(world: [number, number, number]): number {
+  function worldToIndex(world: [number, number, number]): [number, number, number] {
     const wx = world[0] - origin[0];
     const wy = world[1] - origin[1];
     const wz = world[2] - origin[2];
-    const si = inv[0] * wx + inv[1] * wy + inv[2] * wz;
-    const sj = inv[3] * wx + inv[4] * wy + inv[5] * wz;
-    const sk = inv[6] * wx + inv[7] * wy + inv[8] * wz;
+    const si = (inv[0] * wx + inv[1] * wy + inv[2] * wz) / spacing[0];
+    const sj = (inv[3] * wx + inv[4] * wy + inv[5] * wz) / spacing[1];
+    const sk = (inv[6] * wx + inv[7] * wy + inv[8] * wz) / spacing[2];
+    return [si, sj, sk];
+  }
+
+  function sample(world: [number, number, number]): number {
+    const [i, j, k] = worldToIndex(world);
     return sampleIJK(
-      Math.round(si / spacing[0]),
-      Math.round(sj / spacing[1]),
-      Math.round(sk / spacing[2])
+      Math.round(i),
+      Math.round(j),
+      Math.round(k)
     );
   }
 
-  return { dims, sample, sampleIJK, worldAt };
+  return { dims, sample, sampleIJK, worldAt, worldToIndex };
 }
 
 self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {

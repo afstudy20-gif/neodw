@@ -364,6 +364,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     
     const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
+    const scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
 
     let idx = 0;
     for (let k = 0; k < nz; k++) {
@@ -371,18 +372,28 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         for (let i = 0; i < nx; i++) {
           const val = backup.data[idx++];
           vm.setAtIJK(i, j, k, val);
+          const voxelKey = k * nx * ny + j * nx + i;
           if (vtkScalarData) {
-            const voxelKey = k * nx * ny + j * nx + i;
             vtkScalarData[voxelKey] = val;
+          }
+          if (scalarData) {
+            scalarData[voxelKey] = val;
           }
         }
       }
     }
+    
+    // Notify Cornerstone of modifications to trigger GPU texture rebuild
+    try {
+      volume.triggerModified?.();
+    } catch { /* ignore */ }
+
     // Force VTK pipeline to rebuild GPU texture
     try {
       volume.imageData.getPointData?.()?.getScalars?.()?.modified?.();
       volume.imageData.modified?.();
     } catch { /* ignore */ }
+    
     const viewport = getViewport3d();
     if (viewport) {
       try {
@@ -392,9 +403,15 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       } catch { /* ignore */ }
       viewport.render();
     }
+    
+    try {
+      const engine = cornerstone.getRenderingEngine(renderingEngineId);
+      engine?.render();
+    } catch { /* ignore */ }
+
     volumeBackupRef.current = { data: null, saved: false };
     console.log('[Scalpel] Volume restored from backup');
-  }, [volumeId]);
+  }, [volumeId, renderingEngineId]);
 
   // Apply scalpel: erase voxels under the drawn region via ray-march.
   // Architecture: Cornerstone3D streaming volumes store per-slice data in image cache.
@@ -422,6 +439,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // Fast path: direct copy of the live VTK scalar array
     const vtkScalars = imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
+    const scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
 
     // View direction
     const camDir = [
@@ -550,6 +568,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
             if (vtkScalarData) {
               vtkScalarData[voxelKey] = AIR_HU;
             }
+            if (scalarData) {
+              scalarData[voxelKey] = AIR_HU;
+            }
             erasedSet.add(voxelKey);
             modifiedSlices.add(kk);
             erased++;
@@ -561,6 +582,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     console.log(`[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}`);
 
     if (erased > 0) {
+      // Trigger Cornerstone volume modified to rebuild GPU texture
+      try {
+        volume.triggerModified?.();
+      } catch { /* ignore */ }
+
       // After setAtIJK writes to per-image cache, we need to force VTK
       // to rebuild its GPU volume texture.
       try {
@@ -578,6 +604,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       try {
         const engine = cornerstone.getRenderingEngine(renderingEngineId);
         engine?.renderViewport(viewport.id);
+        engine?.render(); // refresh all viewports (MPRs) in the engine
       } catch { /* ignore */ }
 
       console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices.size} slices`);
