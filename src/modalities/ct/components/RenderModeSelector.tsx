@@ -91,6 +91,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   const [shadingPreset, setShadingPreset] = useState<ShadingPreset>('cinematic');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  useEffect(() => {
+    (window as any).cornerstone = cornerstone;
+    (window as any).cornerstoneTools = cornerstoneTools;
+  }, []);
+
   // Tissue visibility toggles
   const [tissueVisibility, setTissueVisibility] = useState<Record<string, boolean>>({
     air: false,
