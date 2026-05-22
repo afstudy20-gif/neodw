@@ -369,36 +369,87 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     if (!volume?.voxelManager || !volume?.imageData) return;
     const vm = volume.voxelManager;
     
+    const dims = volume.imageData.getDimensions();
+    const [nx, ny, nz] = dims;
+    const sliceSize = nx * ny;
+
+    // Cache slice arrays
+    const sliceDataCache: { [kk: number]: any } = {};
+    const getSliceData = (kk: number) => {
+      if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
+      if (!volume.imageIds || !volume.imageIds[kk]) {
+        sliceDataCache[kk] = null;
+        return null;
+      }
+      try {
+        const imageId = volume.imageIds[kk];
+        const image = cornerstone.cache.getImage(imageId);
+        if (image) {
+          let sliceData = null;
+          if (image.voxelManager && typeof image.voxelManager.getScalarData === 'function') {
+            sliceData = image.voxelManager.getScalarData();
+          }
+          if (!sliceData && typeof image.getPixelData === 'function') {
+            sliceData = image.getPixelData();
+          }
+          if (!sliceData && image.pixelData) {
+            sliceData = image.pixelData;
+          }
+          sliceDataCache[kk] = sliceData;
+          return sliceData;
+        }
+      } catch (e) {
+        console.error('[Scalpel] Error fetching slice image for undo:', e);
+      }
+      sliceDataCache[kk] = null;
+      return null;
+    };
+
+    // Restore volume 3D arrays
     const completeArray = vm.getCompleteScalarDataArray?.();
     if (completeArray) {
       completeArray.set(backup.data);
-    } else {
-      const dims = volume.imageData.getDimensions();
-      const [nx, ny, nz] = dims;
-      const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
-      const vtkScalarData = vtkScalars?.getData?.();
-      
-      let scalarData = null;
-      try {
-        scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
-      } catch { /* ignore */ }
+    }
+    
+    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+    const vtkScalarData = vtkScalars?.getData?.();
+    if (vtkScalarData && vtkScalarData !== completeArray) {
+      vtkScalarData.set(backup.data);
+    }
 
-      let idx = 0;
-      for (let k = 0; k < nz; k++) {
+    let scalarData = null;
+    try {
+      scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
+    } catch { /* ignore */ }
+    if (scalarData && scalarData !== completeArray && scalarData !== vtkScalarData) {
+      scalarData.set(backup.data);
+    }
+
+    // Restore individual slice cache buffers and notify OpenGL texture of all slices updated
+    for (let k = 0; k < nz; k++) {
+      const sliceData = getSliceData(k);
+      if (sliceData) {
+        const offset = k * sliceSize;
+        sliceData.set(backup.data.subarray(offset, offset + sliceSize));
+      }
+      
+      // If no completeArray, voxelManager relies on separate arrays or slice caches.
+      // So call setAtIJK to be absolutely sure.
+      if (!completeArray) {
+        const offset = k * sliceSize;
         for (let j = 0; j < ny; j++) {
           for (let i = 0; i < nx; i++) {
-            const val = backup.data[idx++];
-            vm.setAtIJK(i, j, k, val);
-            const voxelKey = k * nx * ny + j * nx + i;
-            if (vtkScalarData) {
-              vtkScalarData[voxelKey] = val;
-            }
-            if (scalarData) {
-              scalarData[voxelKey] = val;
-            }
+            vm.setAtIJK(i, j, k, backup.data[offset + j * nx + i]);
           }
         }
       }
+      
+      // Flag slice as updated in VTK OpenGL texture
+      try {
+        if (volume.vtkOpenGLTexture?.setUpdatedFrame) {
+          volume.vtkOpenGLTexture.setUpdatedFrame(k);
+        }
+      } catch { /* ignore */ }
     }
     
     // Notify Cornerstone of modifications to trigger GPU texture rebuild
@@ -477,6 +528,38 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
       } catch { /* ignore */ }
     }
+
+    // Cache slice arrays for fast writes during ray-marching
+    const sliceDataCache: { [kk: number]: any } = {};
+    const getSliceData = (kk: number) => {
+      if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
+      if (!volume.imageIds || !volume.imageIds[kk]) {
+        sliceDataCache[kk] = null;
+        return null;
+      }
+      try {
+        const imageId = volume.imageIds[kk];
+        const image = cornerstone.cache.getImage(imageId);
+        if (image) {
+          let sliceData = null;
+          if (image.voxelManager && typeof image.voxelManager.getScalarData === 'function') {
+            sliceData = image.voxelManager.getScalarData();
+          }
+          if (!sliceData && typeof image.getPixelData === 'function') {
+            sliceData = image.getPixelData();
+          }
+          if (!sliceData && image.pixelData) {
+            sliceData = image.pixelData;
+          }
+          sliceDataCache[kk] = sliceData;
+          return sliceData;
+        }
+      } catch (e) {
+        console.error('[Scalpel] Error fetching slice image for scalpel:', e);
+      }
+      sliceDataCache[kk] = null;
+      return null;
+    };
 
     // View direction
     const camDir = [
@@ -608,6 +691,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
             if (scalarData) {
               scalarData[voxelKey] = AIR_HU;
             }
+            const sliceData = getSliceData(kk);
+            if (sliceData) {
+              sliceData[jj * dims[0] + ii] = AIR_HU;
+            }
             erasedSet.add(voxelKey);
             modifiedSlices.add(kk);
             erased++;
@@ -664,7 +751,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     } else {
       console.warn('[Scalpel] No voxels erased — check that canvasToWorld and ray march are hitting the volume bounds');
     }
-  }, [volumeId, saveVolumeBackup, syncVolumeToCachedImages, renderingEngineId]);
+  }, [volumeId, saveVolumeBackup, renderingEngineId]);
 
   // Setup/teardown scalpel canvas overlay on 3D viewport
   useEffect(() => {
@@ -1016,6 +1103,38 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     console.log(`[RegionGrow] Found ${regionSize} voxels in region`);
 
+    // Cache slice arrays for fast writes
+    const sliceDataCache: { [kk: number]: any } = {};
+    const getSliceData = (kk: number) => {
+      if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
+      if (!volume.imageIds || !volume.imageIds[kk]) {
+        sliceDataCache[kk] = null;
+        return null;
+      }
+      try {
+        const imageId = volume.imageIds[kk];
+        const image = cornerstone.cache.getImage(imageId);
+        if (image) {
+          let sliceData = null;
+          if (image.voxelManager && typeof image.voxelManager.getScalarData === 'function') {
+            sliceData = image.voxelManager.getScalarData();
+          }
+          if (!sliceData && typeof image.getPixelData === 'function') {
+            sliceData = image.getPixelData();
+          }
+          if (!sliceData && image.pixelData) {
+            sliceData = image.pixelData;
+          }
+          sliceDataCache[kk] = sliceData;
+          return sliceData;
+        }
+      } catch (e) {
+        console.error('[Scalpel] Error fetching slice image for regiongrow:', e);
+      }
+      sliceDataCache[kk] = null;
+      return null;
+    };
+
     // Erase everything OUTSIDE the region
     const AIR_HU = -1024;
     let erased = 0;
@@ -1028,6 +1147,12 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           if (!mask[idx] && scalarData[idx] > -200) {
             scalarData[idx] = AIR_HU;
             vm.setAtIJK(i, j, k, AIR_HU); // Dual-write!
+            
+            const sliceData = getSliceData(k);
+            if (sliceData) {
+              sliceData[j * nx + i] = AIR_HU;
+            }
+            
             modifiedSlices.add(k);
             erased++;
           }
@@ -1037,8 +1162,21 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     console.log(`[RegionGrow] Erased ${erased} voxels outside region`);
 
-    // Sync to cached images
-    syncVolumeToCachedImages(volume, modifiedSlices);
+    // Mark each modified slice as updated in the volume's OpenGL texture
+    if (volume.vtkOpenGLTexture?.setUpdatedFrame) {
+      for (const kk of modifiedSlices) {
+        try {
+          volume.vtkOpenGLTexture.setUpdatedFrame(kk);
+        } catch { /* ignore */ }
+      }
+    } else {
+      try { volume.invalidate?.(); } catch { /* ignore */ }
+    }
+
+    // Call volume.modified to increment the Modified Times
+    try {
+      volume.modified?.();
+    } catch { /* ignore */ }
 
     imageData.modified();
     if (imageData.getPointData) {
@@ -1049,8 +1187,14 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     if (mapper) (mapper as any).modified?.();
     viewport.render();
 
+    try {
+      const engine = cornerstone.getRenderingEngine(renderingEngineId);
+      engine?.renderViewport(viewport.id);
+      engine?.render(); // refresh all viewports (MPRs) in the engine
+    } catch { /* ignore */ }
+
     setRegionGrowStatus(`Isolated ${regionSize.toLocaleString()} voxels (${modifiedSlices.size} slices)`);
-  }, [volumeId, saveVolumeBackup, syncVolumeToCachedImages]);
+  }, [volumeId, saveVolumeBackup, renderingEngineId]);
 
   // Handle seed picking from 3D viewport click
   useEffect(() => {
