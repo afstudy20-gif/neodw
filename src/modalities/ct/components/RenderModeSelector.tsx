@@ -325,21 +325,25 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const [nx, ny, nz] = dims;
     const total = nx * ny * nz;
     
-    // Fast path: direct copy of the live VTK scalar array
-    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
-    const vtkScalarData = vtkScalars?.getData?.();
-    
+    const vm = volume.voxelManager;
     let backup: Int16Array;
-    if (vtkScalarData) {
-      backup = new Int16Array(vtkScalarData);
+    const completeArray = vm.getCompleteScalarDataArray?.();
+    
+    if (completeArray) {
+      backup = new Int16Array(completeArray);
     } else {
-      const vm = volume.voxelManager;
-      backup = new Int16Array(total);
-      let idx = 0;
-      for (let k = 0; k < nz; k++) {
-        for (let j = 0; j < ny; j++) {
-          for (let i = 0; i < nx; i++) {
-            backup[idx++] = vm.getAtIJK(i, j, k) ?? -1024;
+      const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+      const vtkScalarData = vtkScalars?.getData?.();
+      if (vtkScalarData) {
+        backup = new Int16Array(vtkScalarData);
+      } else {
+        backup = new Int16Array(total);
+        let idx = 0;
+        for (let k = 0; k < nz; k++) {
+          for (let j = 0; j < ny; j++) {
+            for (let i = 0; i < nx; i++) {
+              backup[idx++] = vm.getAtIJK(i, j, k) ?? -1024;
+            }
           }
         }
       }
@@ -363,26 +367,35 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     if (!backup.saved || !backup.data) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
     if (!volume?.voxelManager || !volume?.imageData) return;
-    const dims = volume.imageData.getDimensions();
-    const [nx, ny, nz] = dims;
     const vm = volume.voxelManager;
     
-    const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
-    const vtkScalarData = vtkScalars?.getData?.();
-    const scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
+    const completeArray = vm.getCompleteScalarDataArray?.();
+    if (completeArray) {
+      completeArray.set(backup.data);
+    } else {
+      const dims = volume.imageData.getDimensions();
+      const [nx, ny, nz] = dims;
+      const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
+      const vtkScalarData = vtkScalars?.getData?.();
+      
+      let scalarData = null;
+      try {
+        scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
+      } catch { /* ignore */ }
 
-    let idx = 0;
-    for (let k = 0; k < nz; k++) {
-      for (let j = 0; j < ny; j++) {
-        for (let i = 0; i < nx; i++) {
-          const val = backup.data[idx++];
-          vm.setAtIJK(i, j, k, val);
-          const voxelKey = k * nx * ny + j * nx + i;
-          if (vtkScalarData) {
-            vtkScalarData[voxelKey] = val;
-          }
-          if (scalarData) {
-            scalarData[voxelKey] = val;
+      let idx = 0;
+      for (let k = 0; k < nz; k++) {
+        for (let j = 0; j < ny; j++) {
+          for (let i = 0; i < nx; i++) {
+            const val = backup.data[idx++];
+            vm.setAtIJK(i, j, k, val);
+            const voxelKey = k * nx * ny + j * nx + i;
+            if (vtkScalarData) {
+              vtkScalarData[voxelKey] = val;
+            }
+            if (scalarData) {
+              scalarData[voxelKey] = val;
+            }
           }
         }
       }
@@ -454,7 +467,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // Fast path: direct copy of the live VTK scalar array
     const vtkScalars = imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
-    const scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
+    
+    let scalarData = null;
+    try {
+      scalarData = vm.getCompleteScalarDataArray?.();
+    } catch { /* ignore */ }
+    if (!scalarData) {
+      try {
+        scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
+      } catch { /* ignore */ }
+    }
 
     // View direction
     const camDir = [
