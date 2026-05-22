@@ -393,6 +393,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       volume.triggerModified?.();
     } catch { /* ignore */ }
 
+    // Invalidate the volume so all frames are marked as updated in the OpenGL texture
+    try {
+      volume.invalidate?.();
+    } catch { /* ignore */ }
+
+    // Call volume.modified to increment the Modified Times
+    try {
+      volume.modified?.();
+    } catch { /* ignore */ }
+
     // Force VTK pipeline to rebuild GPU texture
     try {
       volume.imageData.getPointData?.()?.getScalars?.()?.modified?.();
@@ -590,6 +600,22 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       // Trigger Cornerstone volume modified to rebuild GPU texture
       try {
         volume.triggerModified?.();
+      } catch { /* ignore */ }
+
+      // Mark each modified slice as updated in the volume's OpenGL texture
+      if (volume.vtkOpenGLTexture?.setUpdatedFrame) {
+        for (const kk of modifiedSlices) {
+          try {
+            volume.vtkOpenGLTexture.setUpdatedFrame(kk);
+          } catch { /* ignore */ }
+        }
+      } else {
+        try { volume.invalidate?.(); } catch { /* ignore */ }
+      }
+
+      // Call volume.modified to increment the Modified Times
+      try {
+        volume.modified?.();
       } catch { /* ignore */ }
 
       // After setAtIJK writes to per-image cache, we need to force VTK
