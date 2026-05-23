@@ -13,6 +13,17 @@ type RenderMode =
   | 'coronary'
   | 'coronary3';
 
+type ScalpelBackupArray =
+  | Float64Array
+  | Float32Array
+  | Int32Array
+  | Int16Array
+  | Int8Array
+  | Uint32Array
+  | Uint16Array
+  | Uint8Array
+  | Uint8ClampedArray;
+
 const PRESETS: { key: RenderMode; label: string; preset: string; description: string }[] = [
   { key: 'volume', label: 'Volume', preset: 'CT-Chest-Contrast-Enhanced', description: 'Standard contrast-enhanced volume rendering' },
   { key: 'cardiac3', label: 'Cardiac VRT', preset: 'CT-Cardiac3', description: 'Cinematic heart VRT — multi-color myocardium + calcium' },
@@ -297,6 +308,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   const [huCropEnabled, setHuCropEnabled] = useState(false);
   const [huCropMin, setHuCropMin] = useState(100);
   const [huCropMax, setHuCropMax] = useState(500);
+  const [scalpelHasBackup, setScalpelHasBackup] = useState(false);
 
   // Clipping Box — 6 planes to clip the volume
   const [clipEnabled, setClipEnabled] = useState(false);
@@ -311,14 +323,108 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
   const scalpelCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const scalpelPointsRef = useRef<[number, number][]>([]);
-  const volumeBackupRef = useRef<{ data: Float32Array | Int16Array | null; saved: boolean }>({ data: null, saved: false });
+  const volumeBackupRef = useRef<{ data: ScalpelBackupArray | null; saved: boolean }>({ data: null, saved: false });
   const isDrawingRef = useRef(false);
+
+  const getSliceScalarData = useCallback((volume: any, kk: number) => {
+    const imageId = volume?.imageIds?.[kk];
+    if (!imageId) return null;
+    try {
+      const image = cornerstone.cache.getImage(imageId) as any;
+      return image?.voxelManager?.getScalarData?.()
+        ?? image?.getPixelData?.()
+        ?? image?.pixelData
+        ?? null;
+    } catch (e) {
+      console.error('[Scalpel] Error fetching slice image:', e);
+      return null;
+    }
+  }, []);
+
+  const getTransparentVoxelValue = useCallback((volume: any): number => {
+    const vtkScalarData = volume?.imageData?.getPointData?.()?.getScalars?.()?.getData?.();
+    const firstSliceData = getSliceScalarData(volume, 0);
+    const dataType = [
+      vtkScalarData?.constructor?.name,
+      firstSliceData?.constructor?.name,
+      volume?.dataType,
+    ].find(Boolean);
+
+    // Unsigned DICOM volume data commonly stores air/background at raw value 0
+    // after modality rescale, while signed/float HU data can safely use -3024.
+    return String(dataType ?? '').startsWith('Uint') ? 0 : -3024;
+  }, [getSliceScalarData]);
+
+  const markVolumeFramesModified = useCallback((volume: any, viewport: cornerstone.Types.IVolumeViewport, modifiedSlices?: Set<number>) => {
+    const texture = volume?.vtkOpenGLTexture;
+    if (texture?.setUpdatedFrame && modifiedSlices?.size) {
+      for (const kk of modifiedSlices) {
+        try { texture.setUpdatedFrame(kk); } catch { /* ignore */ }
+      }
+    } else if (volume?.invalidateVolume) {
+      try { volume.invalidateVolume(false); } catch { /* ignore */ }
+    } else if (volume?.invalidate) {
+      try { volume.invalidate(); } catch { /* ignore */ }
+    }
+
+    try { volume?.modified?.(); } catch { /* ignore */ }
+    try { volume?.imageData?.modified?.(); } catch { /* ignore */ }
+    try { volume?.imageData?.getPointData?.()?.getScalars?.()?.modified?.(); } catch { /* ignore */ }
+
+    try {
+      const actor = viewport.getDefaultActor()?.actor;
+      actor?.getMapper?.()?.modified?.();
+    } catch { /* ignore */ }
+
+    // Fast-path render
+    viewport.render();
+    try {
+      const engine = cornerstone.getRenderingEngine(renderingEngineId);
+      engine?.renderViewport(viewport.id);
+      engine?.render();
+    } catch { /* ignore */ }
+
+    // Fallback: Re-bind the volume to force the WebGL texture to completely rebuild from cached image arrays.
+    try {
+      const engine = cornerstone.getRenderingEngine(renderingEngineId);
+      if (engine && viewport) {
+        cornerstone.setVolumesForViewports(engine, [{ volumeId }], [viewport.id]).then(() => {
+          // Restore active preset
+          const activePreset = (viewport as any).getProperties?.()?.preset || 'CT-Cardiac3';
+          viewport.setProperties({ preset: activePreset });
+          
+          // Restore shading settings
+          try {
+            const actor = viewport.getDefaultActor()?.actor;
+            if (actor) {
+              const property = (actor as any).getProperty?.();
+              if (property) {
+                property.setShade(true);
+                property.setAmbient(ambient);
+                property.setDiffuse(diffuse);
+                property.setSpecular(specular);
+                property.setSpecularPower(specularPower);
+              }
+            }
+          } catch { /* ignore */ }
+
+          viewport.render();
+          engine.render();
+        });
+      }
+    } catch (e) {
+      console.warn('[Scalpel] Re-binding volume failed:', e);
+    }
+  }, [renderingEngineId, volumeId, ambient, diffuse, specular, specularPower]);
 
   // Save volume data backup for undo.
   // Cornerstone3D streaming volumes store each slice in a separate image cache entry.
   // For blazing fast copy and low memory usage, we clone the live VTK scalar typed array if available.
   const saveVolumeBackup = useCallback(() => {
-    if (volumeBackupRef.current.saved) return;
+    if (volumeBackupRef.current.saved) {
+      setScalpelHasBackup(true);
+      return;
+    }
     const volume = cornerstone.cache.getVolume(volumeId) as any;
     if (!volume?.voxelManager || !volume?.imageData) return;
     const dims = volume.imageData.getDimensions();
@@ -326,16 +432,18 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const total = nx * ny * nz;
     
     const vm = volume.voxelManager;
-    let backup: Int16Array;
+    let backup: ScalpelBackupArray;
     const completeArray = vm.getCompleteScalarDataArray?.();
     
     if (completeArray) {
-      backup = new Int16Array(completeArray);
+      const BackupArray = completeArray.constructor as { new (data: ArrayLike<number>): ScalpelBackupArray };
+      backup = new BackupArray(completeArray);
     } else {
       const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
       const vtkScalarData = vtkScalars?.getData?.();
       if (vtkScalarData) {
-        backup = new Int16Array(vtkScalarData);
+        const BackupArray = vtkScalarData.constructor as { new (data: ArrayLike<number>): ScalpelBackupArray };
+        backup = new BackupArray(vtkScalarData);
       } else {
         backup = new Int16Array(total);
         let idx = 0;
@@ -350,21 +458,17 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
     
     volumeBackupRef.current = { data: backup, saved: true };
+    setScalpelHasBackup(true);
     console.log('[Scalpel] Backup saved, voxels:', total);
   }, [volumeId]);
-
-  // Not needed with the new approach (setAtIJK keeps per-image cache in sync)
-  // but kept for the undo path which reads the VTK imageData scalars directly.
-  const syncVolumeToCachedImages = useCallback((volume: any, modifiedSlices?: Set<number>) => {
-    // With setAtIJK-based erasing this is a no-op — setAtIJK already writes to the per-image cache.
-    // This function is only called from undoScalpel which uses its own inline restore logic.
-    console.log('[Scalpel] syncVolumeToCachedImages: skipped (setAtIJK keeps slices in sync)');
-  }, []);
 
   // Undo scalpel: restore all voxels via setAtIJK and direct VTK array writing (dual-write)
   const undoScalpel = useCallback(() => {
     const backup = volumeBackupRef.current;
-    if (!backup.saved || !backup.data) return;
+    if (!backup.saved || !backup.data) {
+      setScalpelHasBackup(false);
+      return;
+    }
     const volume = cornerstone.cache.getVolume(volumeId) as any;
     if (!volume?.voxelManager || !volume?.imageData) return;
     const vm = volume.voxelManager;
@@ -373,47 +477,27 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const [nx, ny, nz] = dims;
     const sliceSize = nx * ny;
 
-    // Cache slice arrays
-    const sliceDataCache: { [kk: number]: any } = {};
-    const getSliceData = (kk: number) => {
-      if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
-      if (!volume.imageIds || !volume.imageIds[kk]) {
-        sliceDataCache[kk] = null;
-        return null;
-      }
-      try {
-        const imageId = volume.imageIds[kk];
-        const image = cornerstone.cache.getImage(imageId);
-        if (image) {
-          let sliceData = null;
-          if (image.voxelManager && typeof image.voxelManager.getScalarData === 'function') {
-            sliceData = image.voxelManager.getScalarData();
+    if (typeof vm.setCompleteScalarDataArray === 'function') {
+      vm.setCompleteScalarDataArray(backup.data);
+    } else {
+      for (let k = 0; k < nz; k++) {
+        const offset = k * sliceSize;
+        const sliceData = getSliceScalarData(volume, k);
+        if (sliceData) {
+          sliceData.set(backup.data.subarray(offset, offset + sliceSize));
+        } else {
+          for (let j = 0; j < ny; j++) {
+            for (let i = 0; i < nx; i++) {
+              vm.setAtIJK(i, j, k, backup.data[offset + j * nx + i]);
+            }
           }
-          if (!sliceData && typeof image.getPixelData === 'function') {
-            sliceData = image.getPixelData();
-          }
-          if (!sliceData && image.pixelData) {
-            sliceData = image.pixelData;
-          }
-          sliceDataCache[kk] = sliceData;
-          return sliceData;
         }
-      } catch (e) {
-        console.error('[Scalpel] Error fetching slice image for undo:', e);
       }
-      sliceDataCache[kk] = null;
-      return null;
-    };
-
-    // Restore volume 3D arrays
-    const completeArray = vm.getCompleteScalarDataArray?.();
-    if (completeArray) {
-      completeArray.set(backup.data);
     }
     
     const vtkScalars = volume.imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
-    if (vtkScalarData && vtkScalarData !== completeArray) {
+    if (vtkScalarData) {
       vtkScalarData.set(backup.data);
     }
 
@@ -421,76 +505,21 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     try {
       scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
     } catch { /* ignore */ }
-    if (scalarData && scalarData !== completeArray && scalarData !== vtkScalarData) {
+    if (scalarData && scalarData !== vtkScalarData) {
       scalarData.set(backup.data);
     }
-
-    // Restore individual slice cache buffers and notify OpenGL texture of all slices updated
-    for (let k = 0; k < nz; k++) {
-      const sliceData = getSliceData(k);
-      if (sliceData) {
-        const offset = k * sliceSize;
-        sliceData.set(backup.data.subarray(offset, offset + sliceSize));
-      }
-      
-      // If no completeArray, voxelManager relies on separate arrays or slice caches.
-      // So call setAtIJK to be absolutely sure.
-      if (!completeArray) {
-        const offset = k * sliceSize;
-        for (let j = 0; j < ny; j++) {
-          for (let i = 0; i < nx; i++) {
-            vm.setAtIJK(i, j, k, backup.data[offset + j * nx + i]);
-          }
-        }
-      }
-      
-      // Flag slice as updated in VTK OpenGL texture
-      try {
-        if (volume.vtkOpenGLTexture?.setUpdatedFrame) {
-          volume.vtkOpenGLTexture.setUpdatedFrame(k);
-        }
-      } catch { /* ignore */ }
-    }
-    
-    // Notify Cornerstone of modifications to trigger GPU texture rebuild
-    try {
-      volume.triggerModified?.();
-    } catch { /* ignore */ }
-
-    // Invalidate the volume so all frames are marked as updated in the OpenGL texture
-    try {
-      volume.invalidate?.();
-    } catch { /* ignore */ }
-
-    // Call volume.modified to increment the Modified Times
-    try {
-      volume.modified?.();
-    } catch { /* ignore */ }
-
-    // Force VTK pipeline to rebuild GPU texture
-    try {
-      volume.imageData.getPointData?.()?.getScalars?.()?.modified?.();
-      volume.imageData.modified?.();
-    } catch { /* ignore */ }
     
     const viewport = getViewport3d();
     if (viewport) {
-      try {
-        const actor = viewport.getDefaultActor()?.actor;
-        const mapper = actor?.getMapper?.();
-        if (mapper) (mapper as any).modified?.();
-      } catch { /* ignore */ }
-      viewport.render();
+      const allSlices = new Set<number>();
+      for (let k = 0; k < nz; k++) allSlices.add(k);
+      markVolumeFramesModified(volume, viewport, allSlices);
     }
-    
-    try {
-      const engine = cornerstone.getRenderingEngine(renderingEngineId);
-      engine?.render();
-    } catch { /* ignore */ }
 
     volumeBackupRef.current = { data: null, saved: false };
+    setScalpelHasBackup(false);
     console.log('[Scalpel] Volume restored from backup');
-  }, [volumeId, renderingEngineId]);
+  }, [volumeId, getSliceScalarData, markVolumeFramesModified]);
 
   // Apply scalpel: erase voxels under the drawn region via ray-march.
   // Architecture: Cornerstone3D streaming volumes store per-slice data in image cache.
@@ -515,6 +544,8 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const vm = volume.voxelManager;
     const bounds = imageData.getBounds(); // [xmin, xmax, ymin, ymax, zmin, zmax]
 
+    const ERASE_VALUE = getTransparentVoxelValue(volume);
+
     // Fast path: direct copy of the live VTK scalar array
     const vtkScalars = imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
@@ -533,33 +564,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     const sliceDataCache: { [kk: number]: any } = {};
     const getSliceData = (kk: number) => {
       if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
-      if (!volume.imageIds || !volume.imageIds[kk]) {
-        sliceDataCache[kk] = null;
-        return null;
-      }
-      try {
-        const imageId = volume.imageIds[kk];
-        const image = cornerstone.cache.getImage(imageId);
-        if (image) {
-          let sliceData = null;
-          if (image.voxelManager && typeof image.voxelManager.getScalarData === 'function') {
-            sliceData = image.voxelManager.getScalarData();
-          }
-          if (!sliceData && typeof image.getPixelData === 'function') {
-            sliceData = image.getPixelData();
-          }
-          if (!sliceData && image.pixelData) {
-            sliceData = image.pixelData;
-          }
-          sliceDataCache[kk] = sliceData;
-          return sliceData;
-        }
-      } catch (e) {
-        console.error('[Scalpel] Error fetching slice image for scalpel:', e);
-      }
-      sliceDataCache[kk] = null;
-      return null;
+      sliceDataCache[kk] = getSliceScalarData(volume, kk);
+      return sliceDataCache[kk];
     };
+
+    const canCommitCompleteArray = !!scalarData && typeof vm.setCompleteScalarDataArray === 'function';
 
     // View direction
     const camDir = [
@@ -594,82 +603,103 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     };
 
     const step = 2;
-    const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.7;
+    const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.45;
     let erased = 0;
-    const AIR_HU = -1024;
     const modifiedSlices = new Set<number>();
     const erasedSet = new Set<number>(); // deduplicate voxel writes
+    const dpr = window.devicePixelRatio || 1;
+    let rays = 0;
+    let rayHits = 0;
+    let dprFallbackHits = 0;
+
+    const makeRay = (worldTarget: number[]) => {
+      if (isParallel) {
+        return {
+          rayDir: [...viewDirNorm],
+          startPoint: [...worldTarget],
+        };
+      }
+
+      const dir = [
+        worldTarget[0] - cam.position![0],
+        worldTarget[1] - cam.position![1],
+        worldTarget[2] - cam.position![2],
+      ];
+      const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
+      return {
+        rayDir: [dir[0] / dLen, dir[1] / dLen, dir[2] / dLen],
+        startPoint: [...cam.position!],
+      };
+    };
+
+    const intersectAabb = (startPoint: number[], rayDir: number[]) => {
+      let tMin = -Infinity;
+      let tMax = Infinity;
+
+      for (let i = 0; i < 3; i++) {
+        const bMin = bounds[i * 2];
+        const bMax = bounds[i * 2 + 1];
+        const o = startPoint[i];
+        const d = rayDir[i];
+
+        if (Math.abs(d) < 1e-6) {
+          if (o < bMin || o > bMax) return null;
+        } else {
+          let t1 = (bMin - o) / d;
+          let t2 = (bMax - o) / d;
+
+          if (t1 > t2) {
+            const temp = t1;
+            t1 = t2;
+            t2 = temp;
+          }
+
+          tMin = Math.max(tMin, t1);
+          tMax = Math.min(tMax, t2);
+
+          if (tMin > tMax) return null;
+        }
+      }
+
+      return { tMin, tMax };
+    };
+
+    const getCanvasRay = (cx: number, cy: number) => {
+      const candidates: Array<{ point: [number, number]; dprFallback: boolean }> = [
+        { point: [cx, cy], dprFallback: false },
+      ];
+      if (dpr !== 1) {
+        candidates.push({ point: [cx * dpr, cy * dpr], dprFallback: true });
+      }
+
+      for (const candidate of candidates) {
+        const worldTarget = (viewport as any).canvasToWorld?.(candidate.point);
+        if (!worldTarget) continue;
+        const ray = makeRay(worldTarget);
+        const hit = intersectAabb(ray.startPoint, ray.rayDir);
+        if (hit) {
+          if (candidate.dprFallback) dprFallbackHits++;
+          return { ...ray, ...hit };
+        }
+      }
+
+      return null;
+    };
 
     for (let cx = Math.floor(minX); cx <= Math.ceil(maxX); cx += step) {
       for (let cy = Math.floor(minY); cy <= Math.ceil(maxY); cy += step) {
         if (!pointInPoly(cx, cy)) continue;
+        rays++;
 
-        // Get world point at this canvas position
-        const worldTarget = (viewport as any).canvasToWorld?.([cx, cy]);
-        if (!worldTarget) continue;
-
-        let rayDir: number[];
-        let startPoint: number[];
-
-        if (isParallel) {
-          // Parallel: ray goes along view direction, passing through worldTarget (which is on the focal plane)
-          rayDir = [...viewDirNorm];
-          startPoint = [...worldTarget];
-        } else {
-          // Perspective: rays diverge from cam.position through worldTarget
-          const dir = [
-            worldTarget[0] - cam.position![0],
-            worldTarget[1] - cam.position![1],
-            worldTarget[2] - cam.position![2],
-          ];
-          const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
-          rayDir = [dir[0] / dLen, dir[1] / dLen, dir[2] / dLen];
-          startPoint = [...cam.position!];
-        }
-
-        // Ray-AABB intersection to find exact entry and exit parameters tMin and tMax
-        let tMin = -Infinity;
-        let tMax = Infinity;
-        let hitsAabb = true;
-
-        for (let i = 0; i < 3; i++) {
-          const bMin = bounds[i * 2];
-          const bMax = bounds[i * 2 + 1];
-          const o = startPoint[i];
-          const d = rayDir[i];
-
-          if (Math.abs(d) < 1e-6) {
-            if (o < bMin || o > bMax) {
-              hitsAabb = false;
-              break;
-            }
-          } else {
-            let t1 = (bMin - o) / d;
-            let t2 = (bMax - o) / d;
-
-            if (t1 > t2) {
-              const temp = t1;
-              t1 = t2;
-              t2 = temp;
-            }
-
-            tMin = Math.max(tMin, t1);
-            tMax = Math.min(tMax, t2);
-
-            if (tMin > tMax) {
-              hitsAabb = false;
-              break;
-            }
-          }
-        }
-
-        if (!hitsAabb) continue;
+        const rayHit = getCanvasRay(cx, cy);
+        if (!rayHit) continue;
+        rayHits++;
 
         // March along ray strictly inside the AABB [tMin, tMax]
-        for (let d = tMin; d <= tMax; d += rayStep) {
-          const wx = startPoint[0] + rayDir[0] * d;
-          const wy = startPoint[1] + rayDir[1] * d;
-          const wz = startPoint[2] + rayDir[2] * d;
+        for (let d = rayHit.tMin; d <= rayHit.tMax; d += rayStep) {
+          const wx = rayHit.startPoint[0] + rayHit.rayDir[0] * d;
+          const wy = rayHit.startPoint[1] + rayHit.rayDir[1] * d;
+          const wz = rayHit.startPoint[2] + rayHit.rayDir[2] * d;
 
           const ijk = imageData.worldToIndex([wx, wy, wz]);
           const ii = Math.round(ijk[0]);
@@ -683,17 +713,17 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           if (erasedSet.has(voxelKey)) continue;
 
           const hu = vm.getAtIJK(ii, jj, kk);
-          if (hu !== AIR_HU && hu !== null && hu !== undefined) {
-            vm.setAtIJK(ii, jj, kk, AIR_HU);
+          if (hu !== ERASE_VALUE && hu !== null && hu !== undefined) {
+            vm.setAtIJK(ii, jj, kk, ERASE_VALUE);
             if (vtkScalarData) {
-              vtkScalarData[voxelKey] = AIR_HU;
+              vtkScalarData[voxelKey] = ERASE_VALUE;
             }
             if (scalarData) {
-              scalarData[voxelKey] = AIR_HU;
+              scalarData[voxelKey] = ERASE_VALUE;
             }
             const sliceData = getSliceData(kk);
             if (sliceData) {
-              sliceData[jj * dims[0] + ii] = AIR_HU;
+              sliceData[jj * dims[0] + ii] = ERASE_VALUE;
             }
             erasedSet.add(voxelKey);
             modifiedSlices.add(kk);
@@ -703,55 +733,42 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
     }
 
-    console.log(`[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}`);
+    (window as any).__lastScalpelStats = {
+      erased,
+      modifiedSlices: modifiedSlices.size,
+      rays,
+      rayHits,
+      dprFallbackHits,
+      eraseValue: ERASE_VALUE,
+      dims,
+      bounds,
+    };
+
+    console.log(
+      `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}, ` +
+      `rays=${rays}, hits=${rayHits}, dprFallback=${dprFallbackHits}, eraseValue=${ERASE_VALUE}`
+    );
 
     if (erased > 0) {
-      // Trigger Cornerstone volume modified to rebuild GPU texture
-      try {
-        volume.triggerModified?.();
-      } catch { /* ignore */ }
-
-      // Mark each modified slice as updated in the volume's OpenGL texture
-      if (volume.vtkOpenGLTexture?.setUpdatedFrame) {
-        for (const kk of modifiedSlices) {
-          try {
-            volume.vtkOpenGLTexture.setUpdatedFrame(kk);
-          } catch { /* ignore */ }
+      if (canCommitCompleteArray) {
+        try {
+          vm.setCompleteScalarDataArray(scalarData);
+        } catch (e) {
+          console.warn('[Scalpel] Could not commit complete scalar array:', e);
         }
-      } else {
-        try { volume.invalidate?.(); } catch { /* ignore */ }
       }
-
-      // Call volume.modified to increment the Modified Times
-      try {
-        volume.modified?.();
-      } catch { /* ignore */ }
-
-      // After setAtIJK writes to per-image cache, we need to force VTK
-      // to rebuild its GPU volume texture.
-      try {
-        imageData.getPointData?.()?.getScalars?.()?.modified?.();
-        imageData.modified?.();
-      } catch { /* ignore */ }
-
-      const actor = viewport.getDefaultActor()?.actor;
-      const mapper = actor?.getMapper?.();
-      if (mapper) {
-        try { (mapper as any).modified?.(); } catch { /* ignore */ }
+      if (vtkScalarData && scalarData && vtkScalarData.length === scalarData.length) {
+        try {
+          vtkScalarData.set(scalarData);
+        } catch { /* ignore */ }
       }
-
-      viewport.render();
-      try {
-        const engine = cornerstone.getRenderingEngine(renderingEngineId);
-        engine?.renderViewport(viewport.id);
-        engine?.render(); // refresh all viewports (MPRs) in the engine
-      } catch { /* ignore */ }
+      markVolumeFramesModified(volume, viewport, modifiedSlices);
 
       console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices.size} slices`);
     } else {
       console.warn('[Scalpel] No voxels erased — check that canvasToWorld and ray march are hitting the volume bounds');
     }
-  }, [volumeId, saveVolumeBackup, renderingEngineId]);
+  }, [volumeId, saveVolumeBackup, getSliceScalarData, getTransparentVoxelValue, markVolumeFramesModified]);
 
   // Setup/teardown scalpel canvas overlay on 3D viewport
   useEffect(() => {
@@ -795,11 +812,25 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         for (const n of names) {
           try {
             if (active) {
-              const binding =
-                n === cornerstoneTools.ZoomTool.toolName
-                  ? { mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }
-                  : { mouseButton: cornerstoneTools.Enums.MouseBindings.Primary };
-              group.setToolActive?.(n, { bindings: [binding] });
+              if (n === cornerstoneTools.TrackballRotateTool.toolName) {
+                group.setToolActive?.(n, {
+                  bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+                });
+              } else if (n === cornerstoneTools.PanTool.toolName) {
+                group.setToolActive?.(n, {
+                  bindings: [
+                    { mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary },
+                    {
+                      mouseButton: cornerstoneTools.Enums.MouseBindings.Primary,
+                      modifierKey: cornerstoneTools.Enums.KeyboardBindings.Shift,
+                    },
+                  ],
+                });
+              } else if (n === cornerstoneTools.ZoomTool.toolName) {
+                group.setToolActive?.(n, {
+                  bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
+                });
+              }
             } else {
               group.setToolPassive?.(n);
             }
@@ -1584,7 +1615,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         </button>
         <button className="render-mode-btn" onClick={undoScalpel}
           title="Undo all scalpel edits" style={{ fontSize: '10px', padding: '2px 8px' }}
-          disabled={!volumeBackupRef.current.saved}>Undo</button>
+          disabled={!scalpelHasBackup}>Undo</button>
       </div>
 
       {/* Region Growing — seed-based 3D flood fill to isolate cardiac chambers */}
@@ -1611,7 +1642,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
             title="Bone only (500-2000 HU)" style={{ fontSize: '10px', padding: '2px 6px' }}>Bone</button>
           <button className="render-mode-btn" onClick={undoScalpel}
             title="Undo — restore original volume" style={{ fontSize: '10px', padding: '2px 6px' }}
-            disabled={!volumeBackupRef.current.saved}>Undo</button>
+            disabled={!scalpelHasBackup}>Undo</button>
         </div>
         {/* HU range sliders */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3 }}>
@@ -1704,4 +1735,3 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     </div>
   );
 }
-
