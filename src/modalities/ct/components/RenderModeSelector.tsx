@@ -373,7 +373,8 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     try {
       const actor = viewport.getDefaultActor()?.actor;
-      actor?.getMapper?.()?.modified?.();
+      const mapper = actor?.getMapper?.() as { modified?: () => void } | undefined;
+      mapper?.modified?.();
     } catch { /* ignore */ }
 
     // Fast-path render
@@ -1153,8 +1154,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           if (!sliceData && typeof image.getPixelData === 'function') {
             sliceData = image.getPixelData();
           }
-          if (!sliceData && image.pixelData) {
-            sliceData = image.pixelData;
+          const legacyPixelData = (image as { pixelData?: ReturnType<cornerstone.Types.IImage['getPixelData']> }).pixelData;
+          if (!sliceData && legacyPixelData) {
+            sliceData = legacyPixelData;
           }
           sliceDataCache[kk] = sliceData;
           return sliceData;

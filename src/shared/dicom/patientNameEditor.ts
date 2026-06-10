@@ -1,4 +1,5 @@
 import dicomParser from 'dicom-parser';
+import JSZip from 'jszip';
 
 /**
  * In-place PatientName (0010,0010) byte patcher.
@@ -116,7 +117,6 @@ export async function patchAndDownloadZip(
   zipName: string,
   onProgress?: (current: number, total: number) => void
 ): Promise<{ patched: number; failed: number; firstOriginal: string | null }> {
-  const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
   let patched = 0;
   let failed = 0;

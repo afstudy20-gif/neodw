@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
   plugins: [
@@ -45,6 +46,9 @@ export default defineConfig({
       },
     }),
   ],
+  // Dev enables cross-origin isolation so SharedArrayBuffer matches the
+  // fast multi-threaded WASM path. Production (nginx/netlify/vercel) omits
+  // COEP/COOP on purpose — see README "Cross-origin isolation".
   server: {
     host: '127.0.0.1',
     port: 5180,
@@ -52,6 +56,37 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cross-Origin-Opener-Policy': 'same-origin',
     },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/jspdf') || id.includes('node_modules/html2canvas')) {
+            return 'pdf-export';
+          }
+          if (id.includes('node_modules/@cornerstonejs/')) {
+            return 'cornerstone-vendor';
+          }
+          if (id.includes('node_modules/jszip')) {
+            return 'jszip';
+          }
+        },
+      },
+    },
+  },
+  resolve: {
+    alias: [
+      { find: /^globalthis$/, replacement: fileURLToPath(new URL('./src/shared/core/globalthisShim.ts', import.meta.url)) },
+      { find: /^fast-deep-equal$/, replacement: fileURLToPath(new URL('./src/shared/core/fastDeepEqualShim.ts', import.meta.url)) },
+      { find: /^seedrandom$/, replacement: fileURLToPath(new URL('./src/shared/core/seedrandomShim.ts', import.meta.url)) },
+      { find: /^spark-md5$/, replacement: fileURLToPath(new URL('./src/shared/core/sparkMd5Shim.ts', import.meta.url)) },
+      { find: /^loglevel$/, replacement: fileURLToPath(new URL('./src/shared/core/loglevelShim.ts', import.meta.url)) },
+      { find: /^lodash\.get$/, replacement: fileURLToPath(new URL('./src/shared/core/lodashGetShim.ts', import.meta.url)) },
+      { find: /^xmlbuilder2$/, replacement: fileURLToPath(new URL('./src/shared/core/xmlbuilder2Shim.ts', import.meta.url)) },
+      { find: /^webworker-promise$/, replacement: fileURLToPath(new URL('./src/shared/core/webworkerPromiseShim.ts', import.meta.url)) },
+      { find: /^webworker-promise\/lib\/register$/, replacement: fileURLToPath(new URL('./src/shared/core/webworkerPromiseRegisterShim.ts', import.meta.url)) },
+      { find: /^utif$/, replacement: fileURLToPath(new URL('./src/shared/core/utifShim.ts', import.meta.url)) },
+    ],
   },
   worker: {
     format: 'es',
@@ -62,14 +97,24 @@ export default defineConfig({
       '@cornerstonejs/core',
       '@cornerstonejs/tools',
       '@cornerstonejs/dicom-image-loader',
-      '@cornerstonejs/codec-libjpeg-turbo-8bit',
-      '@cornerstonejs/codec-charls',
-      '@cornerstonejs/codec-openjpeg',
-      '@cornerstonejs/codec-openjph',
     ],
     include: [
       'dicom-parser',
       'comlink',
+      '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs',
+      '@cornerstonejs/codec-charls/decodewasmjs',
+      '@cornerstonejs/codec-openjpeg/decodewasmjs',
+      '@cornerstonejs/codec-openjph/wasmjs',
+      'globalthis',
+      'fast-deep-equal',
+      'seedrandom',
+      'spark-md5',
+      'loglevel',
+      'lodash.get',
+      'xmlbuilder2',
+      'webworker-promise',
+      'webworker-promise/lib/register',
+      'utif',
     ],
   },
 });

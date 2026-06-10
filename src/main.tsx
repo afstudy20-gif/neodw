@@ -2,11 +2,6 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles/shell.css';
-import * as cornerstone from '@cornerstonejs/core';
-import * as cornerstoneTools from '@cornerstonejs/tools';
-
-(window as any).cornerstone = cornerstone;
-(window as any).cornerstoneTools = cornerstoneTools;
 
 // ── PWA auto-update via vite-plugin-pwa / Workbox ────────────────────────
 // Static import keeps the registerSW shim in the main bundle so an old
@@ -16,7 +11,19 @@ import * as cornerstoneTools from '@cornerstonejs/tools';
 // vite.config.ts) promote it immediately. Activation reloads the page
 // silently so the user sees fresh code without manual cache-clearing.
 import { registerSW } from 'virtual:pwa-register';
-if ('serviceWorker' in navigator) {
+
+const isLocalDevHost =
+  import.meta.env.DEV &&
+  ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
+
+if (isLocalDevHost && 'serviceWorker' in navigator) {
+  void navigator.serviceWorker.getRegistrations()
+    .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+    .then(() => (window.caches ? caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))) : null))
+    .catch((err) => console.warn('[pwa] localhost cleanup skipped:', err));
+}
+
+if (!isLocalDevHost && 'serviceWorker' in navigator) {
   try {
     const updateSW = registerSW({
       immediate: true,
@@ -99,3 +106,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>
 );
+
+// Convenience globals for console debugging. Keep these off the critical
+// startup path so the shell can render even if Cornerstone's large module
+// graph is still loading or a dev-only dependency hiccups.
+void Promise.all([
+  import('@cornerstonejs/core'),
+  import('@cornerstonejs/tools'),
+])
+  .then(([cornerstone, cornerstoneTools]) => {
+    (window as any).cornerstone = cornerstone;
+    (window as any).cornerstoneTools = cornerstoneTools;
+  })
+  .catch((err) => {
+    console.warn('[cornerstone globals] skipped:', err);
+  });
