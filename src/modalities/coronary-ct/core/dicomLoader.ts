@@ -1,6 +1,11 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
+import { wrapWithPart10Header, isNonImageSopClass } from '../../../shared/dicom/loaderCore';
+
+// isSecondaryCaptureSopClass re-exported for the CCTAApp facade —
+// keeps the modality's public surface stable.
+export { isSecondaryCaptureSopClass } from '../../../shared/dicom/loaderCore';
 
 export interface DicomSeriesInfo {
   seriesInstanceUID: string;
@@ -13,63 +18,14 @@ export interface DicomSeriesInfo {
   sopClassUID?: string;
 }
 
-// Secondary Capture variants (incl. multi-frame true/grayscale/color).
-// Cornerstone OrthographicViewport expects a multi-slice MONOCHROME2
-// volume; SC is typically 1-frame RGB and must render via stack
-// viewport instead.
-export function isSecondaryCaptureSopClass(sopClassUID: string | undefined): boolean {
-  if (!sopClassUID) return false;
-  return (
-    sopClassUID === '1.2.840.10008.5.1.4.1.1.7' ||
-    sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7.')
-  );
-}
-
 interface ParsedFile {
   imageId: string;
   metadata: Record<string, string>;
 }
 
 // hasPart10Header removed — worker now reports it in ParsedHeader.
-
-function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
-  const tsUid = '1.2.840.10008.1.2';
-  const tsBytes = new TextEncoder().encode(tsUid);
-  const tsPadded = tsBytes.length % 2 === 0 ? tsBytes : new Uint8Array([...tsBytes, 0x00]);
-  const tsElementLength = 8 + tsPadded.length;
-  const groupLengthValue = tsElementLength;
-
-  const metaElements: number[] = [];
-
-  metaElements.push(0x02, 0x00, 0x00, 0x00);
-  metaElements.push(0x55, 0x4c);
-  metaElements.push(0x04, 0x00);
-  metaElements.push(
-    groupLengthValue & 0xff,
-    (groupLengthValue >> 8) & 0xff,
-    (groupLengthValue >> 16) & 0xff,
-    (groupLengthValue >> 24) & 0xff
-  );
-
-  metaElements.push(0x02, 0x00, 0x10, 0x00);
-  metaElements.push(0x55, 0x49);
-  metaElements.push(tsPadded.length & 0xff, (tsPadded.length >> 8) & 0xff);
-  for (let i = 0; i < tsPadded.length; i += 1) {
-    metaElements.push(tsPadded[i]);
-  }
-
-  const preamble = new Uint8Array(128);
-  const dicm = new Uint8Array([0x44, 0x49, 0x43, 0x4d]);
-  const metaHeader = new Uint8Array(metaElements);
-  const result = new Uint8Array(128 + 4 + metaHeader.length + rawBytes.length);
-
-  result.set(preamble, 0);
-  result.set(dicm, 128);
-  result.set(metaHeader, 132);
-  result.set(rawBytes, 132 + metaHeader.length);
-
-  return result;
-}
+// wrapWithPart10Header + isSecondaryCaptureSopClass moved to
+// shared/dicom/loaderCore.ts.
 
 // parseMetadata replaced by shared worker-pool helper at
 // src/shared/dicom/parseHeaders.ts — see PR notes.
@@ -141,34 +97,7 @@ export function getSeriesPreferenceScore(series: Pick<DicomSeriesInfo, 'seriesDe
   return score;
 }
 
-// SOP Classes that are not image objects and should be hidden from the
-// series tile list (radiologist-facing). Horos / OsiriX hide these by
-// default. The underlying files are still readable; they just don't
-// appear as separate user-facing series. Pattern-based match — any
-// prefix in this list deny-lists the series.
-const NON_IMAGE_SOP_PREFIXES = [
-  '1.2.840.10008.1.3.10',        // Media Storage Directory (DICOMDIR)
-  '1.2.840.10008.5.1.4.1.1.8',   // Standalone Overlay Storage
-  '1.2.840.10008.5.1.4.1.1.10',  // Standalone VOI LUT Storage
-  '1.2.840.10008.5.1.4.1.1.11',  // Presentation State variants
-  '1.2.840.10008.5.1.4.1.1.66',  // Segmentation / Surface Segmentation
-  '1.2.840.10008.5.1.4.1.1.67',  // Realworld Value Map
-  '1.2.840.10008.5.1.4.1.1.78',  // Spectacle Prescription, Macular Grid
-  '1.2.840.10008.5.1.4.1.1.88',  // Structured Report variants
-  '1.2.840.10008.5.1.4.1.1.9',   // Waveform
-  '1.2.840.10008.5.1.4.1.1.104', // Encapsulated PDF / CDA
-  '1.2.840.10008.5.1.4.1.1.481', // RT Plan / Structure Set / Dose / Image
-];
-
-function isNonImageSopClass(sopClassUID: string): boolean {
-  if (!sopClassUID) return false;
-  for (const prefix of NON_IMAGE_SOP_PREFIXES) {
-    if (sopClassUID === prefix || sopClassUID.startsWith(`${prefix}.`)) {
-      return true;
-    }
-  }
-  return false;
-}
+// isNonImageSopClass + the SOP denylist moved to shared/dicom/loaderCore.ts.
 
 export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> {
   const seriesMap = new Map<string, ParsedFile[]>();

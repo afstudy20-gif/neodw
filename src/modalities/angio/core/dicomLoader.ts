@@ -1,6 +1,7 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
+import { wrapWithPart10Header } from '../../../shared/dicom/loaderCore';
 
 export interface CArmGeometry {
   primaryAngle: number;    // PositionerPrimaryAngle, degrees (LAO+/RAO-)
@@ -30,46 +31,7 @@ interface ParsedFile {
 }
 
 // hasPart10Header removed — worker reports it.
-
-function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
-  const tsUid = '1.2.840.10008.1.2';
-  const tsBytes = new TextEncoder().encode(tsUid);
-  const tsPadded = tsBytes.length % 2 === 0 ? tsBytes : new Uint8Array([...tsBytes, 0x00]);
-  const tsElementLength = 8 + tsPadded.length;
-  const groupLengthValue = tsElementLength;
-
-  const metaElements: number[] = [];
-
-  metaElements.push(0x02, 0x00, 0x00, 0x00);
-  metaElements.push(0x55, 0x4c);
-  metaElements.push(0x04, 0x00);
-  metaElements.push(
-    groupLengthValue & 0xff,
-    (groupLengthValue >> 8) & 0xff,
-    (groupLengthValue >> 16) & 0xff,
-    (groupLengthValue >> 24) & 0xff
-  );
-
-  metaElements.push(0x02, 0x00, 0x10, 0x00);
-  metaElements.push(0x55, 0x49);
-  metaElements.push(tsPadded.length & 0xff, (tsPadded.length >> 8) & 0xff);
-  for (let i = 0; i < tsPadded.length; i += 1) {
-    metaElements.push(tsPadded[i]);
-  }
-
-  const preamble = new Uint8Array(128);
-  const dicm = new Uint8Array([0x44, 0x49, 0x43, 0x4d]);
-  const metaHeader = new Uint8Array(metaElements);
-  const result = new Uint8Array(128 + 4 + metaHeader.length + rawBytes.length);
-
-  result.set(preamble, 0);
-  result.set(dicm, 128);
-  result.set(metaHeader, 132);
-  result.set(rawBytes, 132 + metaHeader.length);
-
-  return result;
-}
-
+// wrapWithPart10Header moved to shared/dicom/loaderCore.ts.
 // parseMetadata replaced by shared worker-pool helper.
 
 function parseGeometry(metadata: Record<string, string>): CArmGeometry | undefined {

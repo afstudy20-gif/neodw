@@ -1,64 +1,11 @@
 import * as cornerstone from '@cornerstonejs/core';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
 import { parseFileHeader } from '../../../shared/dicom/parseHeaders';
+import { wrapWithPart10Header, isNonImageSopClass } from '../../../shared/dicom/loaderCore';
 
-/**
- * Wrap a headerless (raw) DICOM byte array into a valid Part 10 file
- * by prepending 128-byte preamble + "DICM" + minimal meta header.
- * The meta header declares Implicit VR Little Endian transfer syntax.
- */
-function wrapWithPart10Header(rawBytes: Uint8Array): Uint8Array {
-  // Transfer syntax UID for Implicit VR Little Endian
-  const tsUID = '1.2.840.10008.1.2';
-  const tsBytes = new TextEncoder().encode(tsUID);
-  // Pad to even length
-  const tsPadded = tsBytes.length % 2 === 0 ? tsBytes : new Uint8Array([...tsBytes, 0x00]);
-
-  // Build meta header elements:
-  // (0002,0000) UL FileMetaInformationGroupLength
-  // (0002,0010) UI TransferSyntaxUID
-  const tsElementLength = 8 + tsPadded.length; // tag(4) + length(4) + value
-  const groupLengthValue = tsElementLength;
-
-  // Group length element: tag(4) + VR(0 since implicit) + length(4) + value(4) = but meta header is always explicit LE
-  // Actually, the File Meta Header (group 0002) is ALWAYS Explicit VR Little Endian per DICOM standard
-  // So we need to write it as explicit VR
-
-  const metaElements: number[] = [];
-
-  // (0002,0000) UL - File Meta Information Group Length
-  // Tag: 02 00 00 00, VR: UL, Length: 4, Value: groupLengthValue
-  metaElements.push(0x02, 0x00, 0x00, 0x00); // tag
-  metaElements.push(0x55, 0x4C); // VR = "UL"
-  metaElements.push(0x04, 0x00); // length = 4
-  metaElements.push(
-    groupLengthValue & 0xFF,
-    (groupLengthValue >> 8) & 0xFF,
-    (groupLengthValue >> 16) & 0xFF,
-    (groupLengthValue >> 24) & 0xFF
-  ); // value
-
-  // (0002,0010) UI - Transfer Syntax UID
-  metaElements.push(0x02, 0x00, 0x10, 0x00); // tag
-  metaElements.push(0x55, 0x49); // VR = "UI"
-  metaElements.push(tsPadded.length & 0xFF, (tsPadded.length >> 8) & 0xFF); // length
-  for (let i = 0; i < tsPadded.length; i++) {
-    metaElements.push(tsPadded[i]);
-  }
-
-  // Build full file: 128-byte preamble + "DICM" + meta header + original data
-  const preamble = new Uint8Array(128); // zeros
-  const dicm = new Uint8Array([0x44, 0x49, 0x43, 0x4D]); // "DICM"
-  const metaHeader = new Uint8Array(metaElements);
-
-  const result = new Uint8Array(128 + 4 + metaHeader.length + rawBytes.length);
-  result.set(preamble, 0);
-  result.set(dicm, 128);
-  result.set(metaHeader, 132);
-  result.set(rawBytes, 132 + metaHeader.length);
-
-  return result;
-}
+// wrapWithPart10Header moved to shared/dicom/loaderCore.ts.
+// Re-exported for the CtApp facade — keeps the modality's public surface stable.
+export { isSecondaryCaptureSopClass } from '../../../shared/dicom/loaderCore';
 
 export interface DicomSeriesInfo {
   seriesInstanceUID: string;
@@ -72,47 +19,13 @@ export interface DicomSeriesInfo {
   sopClassUID?: string;
 }
 
-export function isSecondaryCaptureSopClass(sopClassUID: string | undefined): boolean {
-  if (!sopClassUID) return false;
-  return (
-    sopClassUID === '1.2.840.10008.5.1.4.1.1.7' ||
-    sopClassUID.startsWith('1.2.840.10008.5.1.4.1.1.7.')
-  );
-}
-
 interface ParsedFile {
   imageId: string;
   metadata: Record<string, string>;
 }
 
 // parseMetadata replaced by shared worker-pool helper.
-
-// Non-image SOP class denylist — hidden from series tile list to match
-// Horos/OsiriX behavior. Files are still parseable; just not surfaced
-// as user-facing series.
-const NON_IMAGE_SOP_PREFIXES = [
-  '1.2.840.10008.1.3.10',        // Media Storage Directory (DICOMDIR)
-  '1.2.840.10008.5.1.4.1.1.8',   // Standalone Overlay Storage
-  '1.2.840.10008.5.1.4.1.1.10',  // Standalone VOI LUT Storage
-  '1.2.840.10008.5.1.4.1.1.11',  // Presentation States
-  '1.2.840.10008.5.1.4.1.1.66',  // Segmentation
-  '1.2.840.10008.5.1.4.1.1.67',  // Realworld Value Map
-  '1.2.840.10008.5.1.4.1.1.78',  // Spectacle / Ophthalmic
-  '1.2.840.10008.5.1.4.1.1.88',  // Structured Reports / KOS
-  '1.2.840.10008.5.1.4.1.1.9',   // Waveform
-  '1.2.840.10008.5.1.4.1.1.104', // Encapsulated PDF / CDA
-  '1.2.840.10008.5.1.4.1.1.481', // RT Plan / Structure Set
-];
-
-function isNonImageSopClass(sopClassUID: string): boolean {
-  if (!sopClassUID) return false;
-  for (const prefix of NON_IMAGE_SOP_PREFIXES) {
-    if (sopClassUID === prefix || sopClassUID.startsWith(`${prefix}.`)) {
-      return true;
-    }
-  }
-  return false;
-}
+// isNonImageSopClass + the SOP denylist moved to shared/dicom/loaderCore.ts.
 
 // Load files and group by series, sorted by most images first
 export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> {
