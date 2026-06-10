@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const DICOM_MAGIC = [0x44, 0x49, 0x43, 0x4d]; // "DICM" at byte offset 128
 
 // Check DICOM Part-10 magic "DICM" at offset 128.
-async function isDicomByMagic(file: File | Blob): Promise<boolean> {
+export async function isDicomByMagic(file: File | Blob): Promise<boolean> {
   if (file.size < 132) return false;
   try {
     const buf = new Uint8Array(await file.slice(0, 132).arrayBuffer());
@@ -21,7 +21,7 @@ async function isDicomByMagic(file: File | Blob): Promise<boolean> {
 
 // Heuristic for Part-10-less DICOM (implicit VR, little endian, no preamble).
 // Scan first 1024 bytes for a plausible tag pattern (group 0x0002, 0x0008, or 0x7fe0).
-async function looksLikeImplicitDicom(file: File | Blob): Promise<boolean> {
+export async function looksLikeImplicitDicom(file: File | Blob): Promise<boolean> {
   if (file.size < 128) return false;
   try {
     const buf = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
@@ -112,7 +112,7 @@ async function extractRar(file: File): Promise<File[]> {
   }
 }
 
-function isArchiveName(name: string): 'zip' | 'rar' | 'tar' | null {
+export function isArchiveName(name: string): 'zip' | 'rar' | 'tar' | null {
   const lower = name.toLowerCase();
   if (lower.endsWith('.zip')) return 'zip';
   if (lower.endsWith('.rar')) return 'rar';
@@ -121,7 +121,7 @@ function isArchiveName(name: string): 'zip' | 'rar' | 'tar' | null {
 }
 
 // Sniff first 4 bytes to detect archive regardless of extension.
-async function sniffArchive(file: File): Promise<'zip' | 'rar' | null> {
+export async function sniffArchive(file: File): Promise<'zip' | 'rar' | null> {
   if (file.size < 8) return null;
   try {
     const buf = new Uint8Array(await file.slice(0, 8).arrayBuffer());
