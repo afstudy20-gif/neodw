@@ -34,12 +34,23 @@ Browser-based DICOM workstation. Runs entirely client-side. No server upload, no
 
 ```bash
 npm install
-npm run dev        # http://localhost:5180
-npm run build      # production bundle
+npm run dev        # http://127.0.0.1:5180
+npm run typecheck  # TypeScript only
+npm run test       # unit tests (vitest)
+npm run build      # typecheck + production bundle
 npm run preview    # serve build locally
 ```
 
-Cross-Origin-Embedder-Policy and Cross-Origin-Opener-Policy headers are required for `SharedArrayBuffer` (volume rendering). See `nginx.conf`, `netlify.toml`, `vercel.json` for deployment configs.
+### Cross-origin isolation
+
+`SharedArrayBuffer` (faster multi-threaded WASM in Cornerstone) needs a cross-origin isolated page (`Cross-Origin-Opener-Policy: same-origin` plus a `Cross-Origin-Embedder-Policy`).
+
+| Environment | COOP / COEP | Effect |
+|---|---|---|
+| **Vite dev** (`vite.config.ts`) | `same-origin` + `require-corp` | Full `SharedArrayBuffer`; best for local volume debugging |
+| **Production** (`nginx.conf`, Netlify, Vercel) | **Not set** | Single-threaded WASM fallback; avoids breaking third-party embeds on the welcome page |
+
+Production configs intentionally omit COOP/COEP — see the comment in `nginx.conf`. Volume rendering still works via the fallback path. If you later need SAB in production, prefer `Cross-Origin-Embedder-Policy: credentialless` and self-host fonts instead of `require-corp`.
 
 ### Debugging DICOM files
 

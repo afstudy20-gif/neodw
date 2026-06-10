@@ -11,6 +11,26 @@
     <link rel="mask-icon" href="/favicon.svg" color="#1B3A6B" />
     <link rel="apple-touch-icon" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <script>
+      (function () {
+        var local = location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '[::1]';
+        if (!local) return;
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations()
+            .then(function (registrations) {
+              return Promise.all(registrations.map(function (registration) { return registration.unregister(); }));
+            })
+            .catch(function () {});
+        }
+        if (window.caches) {
+          caches.keys()
+            .then(function (keys) {
+              return Promise.all(keys.map(function (key) { return caches.delete(key); }));
+            })
+            .catch(function () {});
+        }
+      })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="NeoDW" />
     <meta name="application-name" content="NeoDW" />
