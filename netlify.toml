@@ -13,6 +13,11 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Cache-Control = "no-cache, no-store, must-revalidate"
+    # Cross-origin isolation: required for SharedArrayBuffer + multi-threaded
+    # WASM in Cornerstone3D. credentialless (not require-corp) lets
+    # no-credentials subresources load without CORP headers.
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "credentialless"
 
 [[headers]]
   for = "/assets/*"

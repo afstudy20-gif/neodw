@@ -524,8 +524,6 @@ export default function Welcome({ onLaunch }: Props) {
             Dr. Yusuf Hoşoğlu &copy; 2026 · All rights reserved
           </div>
         </div>
-
-        <MapMyVisitors />
       </div>
 
       {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
@@ -711,74 +709,6 @@ function GlobalActivityPanel({ stats }: { stats: any }) {
           <IcoUpload s={14}/> {t('panel.drop')}
         </button>
       </div>
-    </div>
-  );
-}
-
-/* ── mapmyvisitors embed ────────────────────────── */
-function MapMyVisitors() {
-  useEffect(() => {
-    const slot = document.getElementById('mapmyvisitors-slot');
-    if (!slot) return;
-    if (document.getElementById('mapmyvisitors')) return;
-
-    // MapMyVisitors map.js renders via document.write(), which is
-    // silently dropped for async-inserted scripts. Proxy document.write
-    // so any output lands inside our slot div, then restore after the
-    // script finishes executing. This is the standard workaround for
-    // embedding document.write-based third-party widgets in SPAs.
-    const origWrite = document.write.bind(document);
-    const origWriteln = document.writeln.bind(document);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (document as any).write = (...args: any[]) => {
-      slot.insertAdjacentHTML('beforeend', args.join(''));
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (document as any).writeln = (...args: any[]) => {
-      slot.insertAdjacentHTML('beforeend', args.join('') + '\n');
-    };
-
-    const restore = () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (document as any).write = origWrite;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (document as any).writeln = origWriteln;
-    };
-
-    const s = document.createElement('script');
-    s.type = 'text/javascript';
-    s.id = 'mapmyvisitors';
-    s.src = 'https://mapmyvisitors.com/map.js?d=mKLyIjWT577bDc9kAESkC_hHaxcXtAD5mKvhZGFApHQ&cl=ffffff&w=a';
-    s.onload = restore;
-    s.onerror = () => {
-      restore();
-      console.warn('[MapMyVisitors] script failed to load. Check network reach / ad-blocker.');
-    };
-    slot.appendChild(s);
-  }, []);
-  return (
-    <div
-      id="mapmyvisitors-slot"
-      style={{
-        marginTop: 24,
-        opacity: 0.85,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        maxWidth: 320,
-        marginLeft: 'auto',
-        marginRight: 'auto',
-      }}
-    >
-      <style>{`
-        #mapmyvisitors-slot img,
-        #mapmyvisitors-slot canvas,
-        #mapmyvisitors-slot iframe {
-          max-width: 100%;
-          height: auto;
-        }
-        #mapmyvisitors-slot a { display: inline-block; }
-      `}</style>
     </div>
   );
 }
