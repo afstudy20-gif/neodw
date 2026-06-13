@@ -170,3 +170,153 @@ export function collectPolygonRaySamples(
   }
   return samples;
 }
+
+export type ScalpelEraseStats = {
+  erased: number;
+  modifiedSlices: number;
+  rays: number;
+  rayHits: number;
+  mapFailures: number;
+  eraseValue: number;
+};
+
+export type ScalpelEraseOptions = {
+  eraseValue?: number;
+  sampleStep?: number;
+  /** Called after each voxel is erased — use for per-slice image-cache dual-write. */
+  onVoxelErased?: (ii: number, jj: number, kk: number) => void;
+};
+
+export type ScalpelEraseResult = ScalpelEraseStats & {
+  modifiedSliceIndices: Set<number>;
+};
+
+export type ScalpelViewportLike = {
+  getCamera: () => CameraLike;
+  canvasToWorld?: (canvasPos: Point2) => Point3 | undefined;
+};
+
+export type ScalpelVolumeLike = {
+  voxelManager: {
+    getAtIJK: (i: number, j: number, k: number) => number | null | undefined;
+    setAtIJK: (i: number, j: number, k: number, value: number) => void;
+    getCompleteScalarDataArray?: () => Int16Array | Float32Array | null;
+    setCompleteScalarDataArray?: (data: Int16Array | Float32Array) => void;
+  };
+  imageData: {
+    getDimensions: () => Point3;
+    getSpacing: () => Point3;
+    getBounds: () => number[];
+    worldToIndex: (world: Point3) => Point3;
+    getPointData?: () => { getScalars?: () => { getData?: () => Int16Array | Float32Array } };
+  };
+  getScalarData?: () => Int16Array | Float32Array;
+  scalarData?: Int16Array | Float32Array;
+};
+
+/**
+ * Core scalpel erase pipeline (ray-march + dual-write). Used by RenderModeSelector
+ * and integration tests with mocked viewports/volumes.
+ */
+export function runScalpelErase(
+  viewport: ScalpelViewportLike,
+  volume: ScalpelVolumeLike,
+  canvasPoints: Point2[],
+  options: ScalpelEraseOptions = {},
+): ScalpelEraseResult | null {
+  if (canvasPoints.length < 3) return null;
+
+  const eraseValue = options.eraseValue ?? SCALPEL_AIR_HU;
+  const sampleStep = options.sampleStep ?? 2;
+  const onVoxelErased = options.onVoxelErased;
+
+  const cam = viewport.getCamera();
+  if (!cam.position || !cam.focalPoint) return null;
+
+  const imageData = volume.imageData;
+  const dims = imageData.getDimensions();
+  const spacing = imageData.getSpacing();
+  const vm = volume.voxelManager;
+  const bounds = imageData.getBounds();
+
+  const vtkScalarData = imageData.getPointData?.()?.getScalars?.()?.getData?.();
+  let scalarData = vm.getCompleteScalarDataArray?.() ?? null;
+  if (!scalarData) {
+    scalarData = volume.getScalarData?.() ?? volume.scalarData ?? null;
+  }
+
+  const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.5;
+  let erased = 0;
+  const modifiedSliceIndices = new Set<number>();
+  const erasedSet = new Set<number>();
+  let rays = 0;
+  let rayHits = 0;
+  let mapFailures = 0;
+
+  const writeErasedVoxel = (ii: number, jj: number, kk: number) => {
+    const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
+    if (erasedSet.has(voxelKey)) return;
+
+    const hu = vm.getAtIJK(ii, jj, kk);
+    if (!shouldEraseVoxel(hu, eraseValue)) return;
+
+    vm.setAtIJK(ii, jj, kk, eraseValue);
+    if (vtkScalarData) vtkScalarData[voxelKey] = eraseValue;
+    if (scalarData) scalarData[voxelKey] = eraseValue;
+    onVoxelErased?.(ii, jj, kk);
+
+    erasedSet.add(voxelKey);
+    modifiedSliceIndices.add(kk);
+    erased++;
+  };
+
+  for (const [cx, cy] of collectPolygonRaySamples(canvasPoints, sampleStep)) {
+    rays++;
+    const worldTarget = viewport.canvasToWorld?.([cx, cy]);
+    if (!worldTarget) {
+      mapFailures++;
+      continue;
+    }
+
+    const viewRay = buildViewRay(cam, worldTarget);
+    if (!viewRay) continue;
+
+    const march = marchRangeAlongRay(viewRay.origin, viewRay.dir, bounds, cam, worldTarget);
+    if (!march) continue;
+    rayHits++;
+
+    for (let d = march.tMin; d <= march.tMax; d += rayStep) {
+      const worldPos = addScaled(viewRay.origin, viewRay.dir, d);
+      const ijk = imageData.worldToIndex(worldPos);
+      const ii = Math.round(ijk[0]);
+      const jj = Math.round(ijk[1]);
+      const kk = Math.round(ijk[2]);
+
+      if (ii < 0 || ii >= dims[0] || jj < 0 || jj >= dims[1] || kk < 0 || kk >= dims[2]) continue;
+      writeErasedVoxel(ii, jj, kk);
+    }
+  }
+
+  if (erased > 0) {
+    if (scalarData && typeof vm.setCompleteScalarDataArray === 'function') {
+      try {
+        vm.setCompleteScalarDataArray(scalarData);
+      } catch { /* ignore */ }
+    }
+    if (vtkScalarData && scalarData && vtkScalarData.length === scalarData.length) {
+      try {
+        vtkScalarData.set(scalarData);
+      } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    erased,
+    modifiedSlices: modifiedSliceIndices.size,
+    modifiedSliceIndices,
+    rays,
+    rayHits,
+    mapFailures,
+    eraseValue,
+  };
+}

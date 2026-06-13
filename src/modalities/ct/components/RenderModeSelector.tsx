@@ -1,14 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
-import {
-  SCALPEL_AIR_HU,
-  addScaled,
-  buildViewRay,
-  collectPolygonRaySamples,
-  marchRangeAlongRay,
-  shouldEraseVoxel,
-} from './scalpelRayMarch';
+import { SCALPEL_AIR_HU, runScalpelErase } from './scalpelRayMarch';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
 type RenderMode =
@@ -527,8 +520,6 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
   // voxelManager.setAtIJK() is the correct way to write — it updates the right per-image
   // cache entry. Afterwards we must notify VTK to rebuild its GPU texture.
   const applyScalpel = useCallback((canvasPoints: [number, number][]) => {
-    if (canvasPoints.length < 3) return;
-
     const viewport = getViewport3d();
     if (!viewport) return;
     const volume = cornerstone.cache.getVolume(volumeId) as any;
@@ -536,29 +527,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     saveVolumeBackup();
 
-    const cam = viewport.getCamera();
-    if (!cam.position || !cam.focalPoint) return;
-
-    const imageData = volume.imageData;
-    const dims = imageData.getDimensions();
-    const spacing = imageData.getSpacing();
-    const vm = volume.voxelManager;
-    const bounds = imageData.getBounds(); // [xmin, xmax, ymin, ymax, zmin, zmax]
-
     const ERASE_VALUE = getTransparentVoxelValue(volume);
-
-    const vtkScalars = imageData.getPointData?.()?.getScalars?.();
-    const vtkScalarData = vtkScalars?.getData?.();
-
-    let scalarData: ScalpelBackupArray | null = null;
-    try {
-      scalarData = vm.getCompleteScalarDataArray?.() ?? null;
-    } catch { /* ignore */ }
-    if (!scalarData) {
-      try {
-        scalarData = volume.getScalarData ? volume.getScalarData() : volume.scalarData;
-      } catch { /* ignore */ }
-    }
+    const dims = volume.imageData.getDimensions();
+    const bounds = volume.imageData.getBounds();
 
     const sliceDataCache: { [kk: number]: ScalpelBackupArray | null | undefined } = {};
     const getSliceData = (kk: number) => {
@@ -567,66 +538,29 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       return sliceDataCache[kk];
     };
 
-    const canCommitCompleteArray = !!scalarData && typeof vm.setCompleteScalarDataArray === 'function';
+    const result = runScalpelErase(
+      {
+        getCamera: () => viewport.getCamera(),
+        canvasToWorld: (pos) => viewport.canvasToWorld?.(pos),
+      },
+      volume,
+      canvasPoints,
+      {
+        eraseValue: ERASE_VALUE,
+        onVoxelErased: (ii, jj, kk) => {
+          const sliceData = getSliceData(kk);
+          if (sliceData) sliceData[jj * dims[0] + ii] = ERASE_VALUE;
+        },
+      },
+    );
 
-    const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.5;
-    let erased = 0;
-    const modifiedSlices = new Set<number>();
-    const erasedSet = new Set<number>();
-    let rays = 0;
-    let rayHits = 0;
-    let mapFailures = 0;
+    if (!result) return;
 
-    const writeErasedVoxel = (ii: number, jj: number, kk: number) => {
-      const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
-      if (erasedSet.has(voxelKey)) return;
-
-      const hu = vm.getAtIJK(ii, jj, kk);
-      if (!shouldEraseVoxel(hu, ERASE_VALUE)) return;
-
-      vm.setAtIJK(ii, jj, kk, ERASE_VALUE);
-      if (vtkScalarData) vtkScalarData[voxelKey] = ERASE_VALUE;
-      if (scalarData) scalarData[voxelKey] = ERASE_VALUE;
-
-      const sliceData = getSliceData(kk);
-      if (sliceData) sliceData[jj * dims[0] + ii] = ERASE_VALUE;
-
-      erasedSet.add(voxelKey);
-      modifiedSlices.add(kk);
-      erased++;
-    };
-
-    for (const [cx, cy] of collectPolygonRaySamples(canvasPoints, 2)) {
-      rays++;
-
-      const worldTarget = viewport.canvasToWorld?.([cx, cy]);
-      if (!worldTarget) {
-        mapFailures++;
-        continue;
-      }
-
-      const viewRay = buildViewRay(cam, worldTarget);
-      if (!viewRay) continue;
-
-      const march = marchRangeAlongRay(viewRay.origin, viewRay.dir, bounds, cam, worldTarget);
-      if (!march) continue;
-      rayHits++;
-
-      for (let d = march.tMin; d <= march.tMax; d += rayStep) {
-        const worldPos = addScaled(viewRay.origin, viewRay.dir, d);
-        const ijk = imageData.worldToIndex(worldPos);
-        const ii = Math.round(ijk[0]);
-        const jj = Math.round(ijk[1]);
-        const kk = Math.round(ijk[2]);
-
-        if (ii < 0 || ii >= dims[0] || jj < 0 || jj >= dims[1] || kk < 0 || kk >= dims[2]) continue;
-        writeErasedVoxel(ii, jj, kk);
-      }
-    }
+    const { erased, modifiedSlices, rays, rayHits, mapFailures, modifiedSliceIndices } = result;
 
     (window as any).__lastScalpelStats = {
       erased,
-      modifiedSlices: modifiedSlices.size,
+      modifiedSlices,
       rays,
       rayHits,
       mapFailures,
@@ -636,26 +570,13 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     };
 
     console.log(
-      `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}, ` +
+      `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices}, ` +
       `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}`
     );
 
     if (erased > 0) {
-      if (canCommitCompleteArray) {
-        try {
-          vm.setCompleteScalarDataArray(scalarData);
-        } catch (e) {
-          console.warn('[Scalpel] Could not commit complete scalar array:', e);
-        }
-      }
-      if (vtkScalarData && scalarData && vtkScalarData.length === scalarData.length) {
-        try {
-          vtkScalarData.set(scalarData);
-        } catch { /* ignore */ }
-      }
-      markVolumeFramesModified(volume, viewport, modifiedSlices);
-
-      console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices.size} slices`);
+      markVolumeFramesModified(volume, viewport, modifiedSliceIndices);
+      console.log(`[Scalpel] ✓ Rendered: erased ${erased} voxels across ${modifiedSlices} slices`);
     } else {
       console.warn('[Scalpel] No voxels erased — check that canvasToWorld and ray march are hitting the volume bounds');
     }

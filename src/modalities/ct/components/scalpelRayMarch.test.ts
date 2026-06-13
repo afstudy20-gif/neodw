@@ -6,7 +6,10 @@ import {
   intersectAabb,
   marchRangeAlongRay,
   pointInPolygon,
+  runScalpelErase,
   shouldEraseVoxel,
+  type ScalpelVolumeLike,
+  type ScalpelViewportLike,
 } from './scalpelRayMarch';
 
 describe('scalpelRayMarch', () => {
@@ -61,5 +64,97 @@ describe('scalpelRayMarch', () => {
     for (const [x, y] of samples) {
       expect(pointInPolygon(x, y, triangle)).toBe(true);
     }
+  });
+
+  it('runScalpelErase erases tissue voxels through a mocked volume', () => {
+    const dims: [number, number, number] = [10, 10, 10];
+    const spacing: [number, number, number] = [1, 1, 1];
+    const bounds = [0, 9, 0, 9, 0, 9];
+    const scalarData = new Int16Array(dims[0] * dims[1] * dims[2]).fill(-1024);
+
+    const tissueHu = 400;
+    for (let k = 3; k <= 6; k++) {
+      for (let j = 3; j <= 6; j++) {
+        for (let i = 3; i <= 6; i++) {
+          scalarData[k * dims[0] * dims[1] + j * dims[0] + i] = tissueHu;
+        }
+      }
+    }
+
+    const volume: ScalpelVolumeLike = {
+      voxelManager: {
+        getAtIJK: (i, j, k) => scalarData[k * dims[0] * dims[1] + j * dims[0] + i],
+        setAtIJK: (i, j, k, value) => {
+          scalarData[k * dims[0] * dims[1] + j * dims[0] + i] = value;
+        },
+        getCompleteScalarDataArray: () => scalarData,
+        setCompleteScalarDataArray: (data) => {
+          scalarData.set(data);
+        },
+      },
+      imageData: {
+        getDimensions: () => dims,
+        getSpacing: () => spacing,
+        getBounds: () => bounds,
+        worldToIndex: (world) => [world[0], world[1], world[2]],
+        getPointData: () => ({
+          getScalars: () => ({ getData: () => scalarData }),
+        }),
+      },
+      scalarData,
+    };
+
+    const viewport: ScalpelViewportLike = {
+      getCamera: () => ({
+        position: [5, 5, -20],
+        focalPoint: [5, 5, 5],
+        parallelProjection: false,
+      }),
+      canvasToWorld: ([cx, cy]) => [cx, cy, 5],
+    };
+
+    const polygon: Array<[number, number]> = [[3, 3], [7, 3], [7, 7], [3, 7]];
+    const erasedVoxels: Array<[number, number, number]> = [];
+    const stats = runScalpelErase(viewport, volume, polygon, {
+      onVoxelErased: (ii, jj, kk) => erasedVoxels.push([ii, jj, kk]),
+    });
+
+    expect(stats).not.toBeNull();
+    expect(stats!.erased).toBeGreaterThan(0);
+    expect(stats!.rayHits).toBeGreaterThan(0);
+    expect(stats!.mapFailures).toBe(0);
+    expect(stats!.eraseValue).toBe(SCALPEL_AIR_HU);
+    expect(stats!.modifiedSliceIndices.size).toBeGreaterThan(0);
+    expect(erasedVoxels.length).toBe(stats!.erased);
+
+    const center = scalarData[5 * dims[0] * dims[1] + 5 * dims[0] + 5];
+    expect(center).toBe(SCALPEL_AIR_HU);
+  });
+
+  it('runScalpelErase reports mapFailures when canvasToWorld is missing', () => {
+    const dims: [number, number, number] = [4, 4, 4];
+    const volume: ScalpelVolumeLike = {
+      voxelManager: {
+        getAtIJK: () => 100,
+        setAtIJK: () => {},
+      },
+      imageData: {
+        getDimensions: () => dims,
+        getSpacing: () => [1, 1, 1],
+        getBounds: () => [0, 3, 0, 3, 0, 3],
+        worldToIndex: (world) => world,
+      },
+    };
+
+    const viewport: ScalpelViewportLike = {
+      getCamera: () => ({
+        position: [2, 2, -10],
+        focalPoint: [2, 2, 2],
+      }),
+    };
+
+    const stats = runScalpelErase(viewport, volume, [[0, 0], [3, 0], [3, 3]]);
+    expect(stats?.erased).toBe(0);
+    expect(stats?.mapFailures).toBeGreaterThan(0);
   });
 });
