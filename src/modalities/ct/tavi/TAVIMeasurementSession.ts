@@ -71,7 +71,7 @@ export class TAVIMeasurementSession {
   public sinusPointSnapshots: TAVIPointSnapshot[] = [];
   public membranousSeptumPointSnapshots: TAVIPointSnapshot[] = [];
 
-  /** Three-point cusp definition (ProSizeAV-style) */
+  /** Three-point cusp definition (structured) */
   public cuspLCC?: TAVIVector3D;
   public cuspNCC?: TAVIVector3D;
   public cuspRCC?: TAVIVector3D;
@@ -112,7 +112,7 @@ export class TAVIMeasurementSession {
   public cuspPixelSampleRCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
   public cuspPixelSampleNCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
 
-  /** Multi-level cross-section thumbnails (ProSizeAV page 2 style) */
+  /** Multi-level cross-section thumbnails (multi-level) */
   public multiLevelThumbnails: Map<number, string> = new Map();
   /** Multi-level geometry results keyed by distance from annulus plane */
   public multiLevelGeometries: Map<number, TAVIGeometryResult> = new Map();
@@ -337,7 +337,7 @@ export class TAVIMeasurementSession {
   }
 
   /**
-   * Capture the annulus plane from 3 cusp nadir points (ProSizeAV-style).
+   * Capture the annulus plane from 3 cusp nadir points (structured).
    * Computes the plane normal via cross product and orients it along the aortic axis if available.
    */
   public captureThreePointAnnulusPlane(
@@ -369,7 +369,7 @@ export class TAVIMeasurementSession {
   }
 
   /**
-   * Capture a constrained annulus contour (ProSizeAV-style: clicked points on the annulus plane).
+   * Capture a constrained annulus contour (structured: clicked points on the annulus plane).
    * Optionally smooths the contour via spline interpolation before storing.
    */
   /** Raw (unsmoothed) contour points for editing */
@@ -595,7 +595,7 @@ export class TAVIMeasurementSession {
     return 'Core workflow complete. Review the assisted annulus, preview angle, calcium assist, and export the report.';
   }
 
-  /** Generate a structured text report (ProSizeAV export format) */
+  /** Generate a structured text report (structured export format) */
   public textReport(): string {
     const lines: string[] = [];
     const r = (v: number | null | undefined, decimals = 1) =>

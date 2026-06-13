@@ -8,7 +8,7 @@ import { TAVIGeometry } from './TAVIGeometry';
  * LEFT viewport = reference plane (longitudinal cut through aortic axis)
  * RIGHT viewport = working plane (cross-section perpendicular to axis)
  *
- * Mouse interaction (ProSizeAV-style):
+ * Mouse interaction (structured):
  * - Mouse move in RIGHT → rotates LEFT viewport
  * - Scroll in RIGHT → tilts the plane (changes tilt angle)
  * - Mouse move in LEFT → rotates RIGHT viewport
@@ -562,7 +562,7 @@ export class DoubleObliqueController {
 
   // ── Event Listeners ──
   //
-  // ProSizeAV interaction model (absolute position from viewport center):
+  // absolute-position interaction model (absolute position from viewport center):
   //
   // RIGHT viewport (working / cross-section):
   //   mousemove Y offset from center → translate along axis (reconstructs LEFT)

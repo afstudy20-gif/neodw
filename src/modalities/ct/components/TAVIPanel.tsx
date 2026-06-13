@@ -120,7 +120,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [livePerp, setLivePerp] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
 
-  // ProSizeAV-style workflow state — default to axis-validation (ProSize-Style)
+  // structured workflow state — default to axis-validation (guided)
   const [workflowPhase, setWorkflowPhase] = useState<TAVIWorkflowPhase>('axis-validation');
   const [axisResult, setAxisResult] = useState<AorticAxisResult | null>(null);
   const [axisDetecting, setAxisDetecting] = useState(false);
@@ -335,7 +335,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, viewportMode, refresh]);
 
-  // ── ProSizeAV-style Axis Detection ──
+  // ── structured Axis Detection ──
 
   const startAutoAxisDetection = useCallback(() => {
     setAxisDetecting(true);
@@ -383,7 +383,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           controller.initialize(result.centerPoint, result.axisDirection);
           controllerRef.current = controller;
 
-          // Skip centerline-review: go directly to cusp definition (like ProSizeAV/3mensio)
+          // Skip centerline-review: go directly to cusp definition (like dedicated TAVI planners)
           // Save controller state for cusp reset
           const state = controller.getState();
           preCuspStateRef.current = {
@@ -430,7 +430,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       TAVIStructureAorticAxis
     );
 
-    // Go directly to cusp definition (like ProSizeAV)
+    // Go directly to cusp definition (guided workflow)
     preCuspStateRef.current = {
       axisPoint: { ...state.axisPoint },
       axisDirection: { ...state.axisDirection },
@@ -1454,7 +1454,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       controller.initialize(center!, axisDir!);
       controllerRef.current = controller;
 
-      // Go directly to cusp definition (like ProSizeAV)
+      // Go directly to cusp definition (guided workflow)
       const state = controller.getState();
       preCuspStateRef.current = {
         axisPoint: { ...state.axisPoint },
@@ -2019,7 +2019,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                   }}
                   style={{ flex: 1, fontSize: '0.75rem' }}
                 >
-                  ProSize-Style
+                  Guided (double-oblique)
                 </button>
               </div>
 
