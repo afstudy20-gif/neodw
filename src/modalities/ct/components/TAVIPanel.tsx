@@ -20,7 +20,7 @@ import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRi
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
-import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, samplePixelValuesInWorldContour } from '../tavi/AorticAxisDetection';
+import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, samplePixelValuesInWorldContour, snapPointToLumenCentroid, snapPointToAxialMinimum } from '../tavi/AorticAxisDetection';
 import { DoubleObliqueController } from '../tavi/DoubleObliqueController';
 import { ConstrainedContourTool } from '../tavi/ConstrainedContourTool';
 import { CenterlineOverlay } from '../tavi/CenterlineOverlay';
@@ -117,6 +117,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [multiPoints, setMultiPoints] = useState<TAVIPointSnapshot[]>([]);
   const [activeTab, setActiveTab] = useState<'capture' | 'report'>('capture');
   const [deploymentRatio, setDeploymentRatio] = useState<'80/20' | '90/10'>('80/20');
+  const [livePerp, setLivePerp] = useState<number | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
 
   // ProSizeAV-style workflow state — default to axis-validation (ProSize-Style)
   const [workflowPhase, setWorkflowPhase] = useState<TAVIWorkflowPhase>('axis-validation');
@@ -253,6 +255,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         lines.push({ from: session.rightOstiumSnapshot.worldPoint, to: projected, label: h != null ? `${h.toFixed(1)}mm` : '', color: '#ff6b6b' });
       }
       controllerRef.current.setMeasurementLines(lines);
+
+      // Live perpendicularity reference + annulus disc glyph radius.
+      controllerRef.current.setPerpendicularityReference(
+        annulus ? annulus.planeNormal : null,
+        (dev) => setLivePerp(dev)
+      );
+      controllerRef.current.setAnnulusDiscRadiusMm(annulus ? annulus.equivalentDiameterMm / 2 : 0);
       return;
     }
 
@@ -473,6 +482,15 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
   // ── Cusp Definition (Phase 2) ──
 
+  /** Snap a cusp nadir toward the local HU minimum along the aortic axis. */
+  const snapCuspNadir = (raw: TAVIVector3D): TAVIVector3D => {
+    if (!snapEnabled) return raw;
+    const volume = cornerstone.cache.getVolume(volumeId);
+    const axisDir = session.aorticAxisDirection ?? controllerRef.current?.getAxisDirection();
+    if (!volume || !axisDir) return raw;
+    return snapPointToAxialMinimum(volume, raw, axisDir, { searchMm: 4 }) ?? raw;
+  };
+
   /** Capture a cusp point from the latest Probe annotation in EITHER viewport.
    *  Cusp hinge points can be identified in the reference (longitudinal) view
    *  where the cusp nadir is visible in profile, or in the working (cross-section) view. */
@@ -495,7 +513,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const rawCusp: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const worldPoint: TAVIVector3D = snapCuspNadir(rawCusp);
 
     // Remove the annotation after capturing
     cornerstoneTools.annotation.state.removeAnnotation(ann.annotationUID);
@@ -541,7 +560,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
 
     forceUpdate();
-  }, [cuspStep, cuspPoints, session]);
+  }, [cuspStep, cuspPoints, session, snapEnabled, volumeId]);
 
   /** Go back to annulus tracing with existing points loaded for editing */
   const editAnnulus = useCallback(() => {
@@ -777,8 +796,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
-    console.log(`[TAVI] captureCoronaryPoint(${side}): world=(${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)})`);
+    const rawPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    // Snap onto the contrast-filled lumen centroid for reproducible heights.
+    const snapVolume = snapEnabled ? cornerstone.cache.getVolume(volumeId) : null;
+    const snapped = snapVolume ? snapPointToLumenCentroid(snapVolume, rawPoint) : null;
+    const worldPoint: TAVIVector3D = snapped ?? rawPoint;
 
     // Remove ALL probe annotations from ALL viewports (clean up duplicates)
     for (const vpId of ['coronal', 'sagittal', 'axial']) {
@@ -806,7 +828,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     } else if (side === 'right') {
       setCoronaryStep('multi-level');
     }
-  }, [session, renderingEngineId]);
+  }, [session, renderingEngineId, snapEnabled, volumeId]);
 
   // Capture a single sinus width from the two most-recent Probe annotations.
   const captureSinusWidth = useCallback((label: SinusLabel) => {
@@ -937,7 +959,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const worldPoint: TAVIVector3D = snapCuspNadir({ x: p[0], y: p[1], z: p[2] });
 
     // Remove ALL probe annotations
     for (const vpId of ['coronal', 'sagittal', 'axial']) {
@@ -958,8 +980,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     session.recompute();
     forceUpdate();
-    console.log(`[TAVI] captureCuspFromMPR(${cusp}): world=(${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)})`);
-  }, [session]);
+  }, [session, snapEnabled, volumeId]);
 
   /** Auto-capture NC guide points: poll for Probe annotations when NC guide is active */
   const ncGuidePointsRef = useRef<TAVIVector3D[]>([]);
@@ -2249,6 +2270,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
                         {/* ── 5. Coronary Ostia ── */}
                         <Section num="5" title="Coronary Ostia">
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
+                            <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
+                            Snap to anatomy (lumen centroid / cusp nadir)
+                          </label>
                           <PlaceRow label="RCO" captured={!!session.rightOstiumSnapshot}
                             onPlace={() => enableProbeTool()}
                             onConfirm={() => captureCoronaryPoint('right')}
@@ -2257,6 +2282,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             onPlace={() => enableProbeTool()}
                             onConfirm={() => captureCoronaryPoint('left')}
                             onUndo={() => { session.leftOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
+                          {livePerp != null && (
+                            <Row label="View ⟂ to annulus" value={`${livePerp.toFixed(1)}° off`} warn={livePerp > 15} highlight={livePerp <= 5} />
+                          )}
                         </Section>
 
                         {/* ── 6. Cusp Hinge Points ── */}

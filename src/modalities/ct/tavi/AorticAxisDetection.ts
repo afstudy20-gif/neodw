@@ -400,6 +400,94 @@ export function samplePixelValuesInWorldContour(
   };
 }
 
+/**
+ * Snap a clicked coronary-ostium seed onto the contrast-filled lumen centroid
+ * within a small sphere, improving reproducibility of coronary-height picks.
+ * Returns null on any failure so the caller keeps the raw click.
+ */
+export function snapPointToLumenCentroid(
+  volume: any,
+  seed: TAVIVector3D,
+  opts?: { radiusMm?: number; huMin?: number; huMax?: number }
+): TAVIVector3D | null {
+  const info = extractVolumeInfo(volume);
+  if (!info) return null;
+  const radiusMm = opts?.radiusMm ?? 3;
+  const huMin = opts?.huMin ?? 200;
+  const huMax = opts?.huMax ?? 600;
+  const [sx, sy, sz] = info.spacing;
+  const ri = Math.max(1, Math.round(radiusMm / sx));
+  const rj = Math.max(1, Math.round(radiusMm / sy));
+  const rk = Math.max(1, Math.round(radiusMm / sz));
+  const [ci, cj, ck] = worldToIJK(seed.x, seed.y, seed.z, info).map(Math.round) as [number, number, number];
+
+  let sumX = 0, sumY = 0, sumZ = 0, count = 0;
+  for (let k = ck - rk; k <= ck + rk; k++) {
+    for (let j = cj - rj; j <= cj + rj; j++) {
+      for (let i = ci - ri; i <= ci + ri; i++) {
+        const wx = info.origin[0] + info.direction[0] * sx * i + info.direction[1] * sy * j + info.direction[2] * sz * k;
+        const wy = info.origin[1] + info.direction[3] * sx * i + info.direction[4] * sy * j + info.direction[5] * sz * k;
+        const wz = info.origin[2] + info.direction[6] * sx * i + info.direction[7] * sy * j + info.direction[8] * sz * k;
+        // Spherical crop in world space.
+        if ((wx - seed.x) ** 2 + (wy - seed.y) ** 2 + (wz - seed.z) ** 2 > radiusMm * radiusMm) continue;
+        const hu = sampleVolumeNearest(wx, wy, wz, info);
+        if (Number.isNaN(hu) || hu < huMin || hu > huMax) continue;
+        sumX += wx; sumY += wy; sumZ += wz; count++;
+      }
+    }
+  }
+  if (count < 8) return null;
+  return { x: sumX / count, y: sumY / count, z: sumZ / count };
+}
+
+/**
+ * Snap a cusp/sinus nadir seed toward the local minimum-HU point along the
+ * aortic axis within a small window (the leaflet hinge sits at the bright-blood
+ * → wall transition). Heuristic assist; the marker stays draggable afterward.
+ * Returns null on failure so the caller keeps the raw click.
+ */
+export function snapPointToAxialMinimum(
+  volume: any,
+  seed: TAVIVector3D,
+  axisDirection: TAVIVector3D,
+  opts?: { searchMm?: number; stepMm?: number; radiusMm?: number }
+): TAVIVector3D | null {
+  const info = extractVolumeInfo(volume);
+  if (!info) return null;
+  const dir = TAVIGeometry.vectorNormalize(axisDirection);
+  if (TAVIGeometry.vectorIsZero(dir)) return null;
+  const searchMm = opts?.searchMm ?? 4;
+  const stepMm = opts?.stepMm ?? 0.5;
+  const radiusMm = opts?.radiusMm ?? 1.5;
+
+  // Neighbourhood offsets — explicit list so a zero radius means a single
+  // sample rather than a zero-step infinite loop.
+  const offsets = radiusMm > 0 ? [-radiusMm, 0, radiusMm] : [0];
+  const step = stepMm > 0 ? stepMm : 0.5;
+
+  let bestT = 0;
+  let bestMean = Infinity;
+  let anyValid = false;
+  for (let t = -searchMm; t <= searchMm; t += step) {
+    const c = TAVIGeometry.vectorAdd(seed, TAVIGeometry.vectorScale(dir, t));
+    let sum = 0, n = 0;
+    for (const dz of offsets) {
+      for (const dy of offsets) {
+        for (const dx of offsets) {
+          const hu = sampleVolumeNearest(c.x + dx, c.y + dy, c.z + dz, info);
+          if (!Number.isNaN(hu)) { sum += hu; n++; }
+        }
+      }
+    }
+    if (n === 0) continue;
+    anyValid = true;
+    const mean = sum / n;
+    if (mean < bestMean) { bestMean = mean; bestT = t; }
+  }
+  if (!anyValid) return null;
+  return TAVIGeometry.vectorAdd(seed, TAVIGeometry.vectorScale(dir, bestT));
+}
+
 /** Internal: attempt segmentation with a specific HU threshold pair */
 function _segmentWithThreshold(
   grid: Float32Array,

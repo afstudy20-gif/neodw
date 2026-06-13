@@ -1,5 +1,5 @@
 import * as cornerstone from '@cornerstonejs/core';
-import { TAVIVector3D } from './TAVITypes';
+import { TAVIVector3D, TAVIFluoroAngleResult } from './TAVITypes';
 import { TAVIGeometry } from './TAVIGeometry';
 
 /**
@@ -125,6 +125,41 @@ export class DoubleObliqueController {
 
   getAxisDirection(): TAVIVector3D {
     return { ...this.state.axisDirection };
+  }
+
+  /** Effective working-plane (RIGHT viewport slice) normal, including tilt. */
+  getWorkingPlaneNormal(): TAVIVector3D {
+    const vpn = this.computeCameraParams().right.viewPlaneNormal;
+    // Slice normal = -rightVPN (we view from above, looking down the axis).
+    return TAVIGeometry.vectorNormalize({ x: -vpn[0], y: -vpn[1], z: -vpn[2] });
+  }
+
+  // ── Live perpendicularity (deviation of the working view from the annulus plane) ──
+  private annulusReferenceNormal: TAVIVector3D | null = null;
+  private annulusDiscRadiusMm = 0;
+  private onPerpendicularityChanged?: (deviationDeg: number, fluoro: TAVIFluoroAngleResult) => void;
+
+  /** Set the captured annulus plane normal + an optional live callback. */
+  setPerpendicularityReference(
+    annulusNormal: TAVIVector3D | null,
+    cb?: (deviationDeg: number, fluoro: TAVIFluoroAngleResult) => void
+  ): void {
+    this.annulusReferenceNormal = annulusNormal ? TAVIGeometry.vectorNormalize(annulusNormal) : null;
+    this.onPerpendicularityChanged = cb;
+    this.emitPerpendicularity();
+  }
+
+  /** Annulus disc radius (mm) for the read-only orientation glyph. */
+  setAnnulusDiscRadiusMm(r: number): void {
+    this.annulusDiscRadiusMm = Number.isFinite(r) && r > 0 ? r : 0;
+  }
+
+  private emitPerpendicularity(): void {
+    if (!this.annulusReferenceNormal || !this.onPerpendicularityChanged) return;
+    const n = this.getWorkingPlaneNormal();
+    const dev = TAVIGeometry.perpendicularityDeviationDegrees(n, this.annulusReferenceNormal);
+    const fluoro = TAVIGeometry.fluoroAngleForPlaneNormal(n);
+    this.onPerpendicularityChanged(dev, fluoro);
   }
 
   /** Restore a previously saved state (for reset/back operations) */
@@ -361,6 +396,7 @@ export class DoubleObliqueController {
       this.updateMarkerOverlay();
       this.updateLeftMarkerOverlay();
       this.updateSagittalOverlay();
+      this.emitPerpendicularity();
     });
   }
 
@@ -810,6 +846,18 @@ export class DoubleObliqueController {
       if (la1 && la2) {
         svg += `<line x1="${la1[0]}" y1="${la1[1]}" x2="${la2[0]}" y2="${la2[1]}" stroke="#d29922" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>`;
       }
+      // Read-only annulus disc glyph (edge-on on the longitudinal view) — shows
+      // the captured annulus plane the user is tilting toward.
+      if (this.annulusReferenceNormal && this.annulusDiscRadiusMm > 0) {
+        const ring = TAVIGeometry.discRingPoints(fp, this.annulusReferenceNormal, this.annulusDiscRadiusMm, 32);
+        const pts = ring
+          .map((p) => leftVp.worldToCanvas([p.x, p.y, p.z]))
+          .filter((c): c is cornerstone.Types.Point2 => !!c)
+          .map((c) => `${c[0]},${c[1]}`);
+        if (pts.length >= 2) {
+          svg += `<polygon points="${pts.join(' ')}" fill="none" stroke="#3fb950" stroke-width="1.5" opacity="0.7"/>`;
+        }
+      }
       svg += '</svg>';
       this.targetIndicator.innerHTML = svg;
     }
@@ -1071,12 +1119,24 @@ export class DoubleObliqueController {
       const labelStyle = `color:${color};font-size:13px;font-weight:bold;font-family:-apple-system,sans-serif;text-shadow:0 0 4px rgba(0,0,0,0.8);`;
       const angleStyle = `color:${color};font-size:10px;font-family:-apple-system,sans-serif;text-shadow:0 0 4px rgba(0,0,0,0.8);opacity:0.8;`;
 
+      // Live perpendicularity badge (working viewport only) — how far the
+      // current cross-section deviates from the captured annulus plane.
+      let perpBadge = '';
+      if (isRight && this.annulusReferenceNormal) {
+        const sliceNormal = { x: -vpn[0], y: -vpn[1], z: -vpn[2] };
+        const dev = TAVIGeometry.perpendicularityDeviationDegrees(sliceNormal, this.annulusReferenceNormal);
+        const perpColor = dev <= 5 ? '#3fb950' : dev <= 15 ? '#d29922' : '#f85149';
+        const perpStyle = `color:${perpColor};font-size:11px;font-weight:bold;font-family:-apple-system,sans-serif;text-shadow:0 0 4px rgba(0,0,0,0.85);`;
+        perpBadge = `<span style="position:absolute;top:8px;right:8px;${perpStyle}">⟂ ${dev.toFixed(1)}°</span>`;
+      }
+
       container.innerHTML = `
         <span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);${labelStyle}">${labels.right}</span>
         <span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);${labelStyle}">${labels.left}</span>
         <span style="position:absolute;top:8px;left:50%;transform:translateX(-50%);${labelStyle}">${labels.top}</span>
         <span style="position:absolute;bottom:8px;left:50%;transform:translateX(-50%);${labelStyle}">${labels.bottom}</span>
         <span style="position:absolute;bottom:4px;right:4px;${angleStyle}">${lrText} ${ccText}</span>
+        ${perpBadge}
       `;
     }
   }

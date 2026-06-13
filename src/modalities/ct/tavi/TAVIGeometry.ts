@@ -492,6 +492,44 @@ export class TAVIGeometry {
     return (Math.acos(clampedDot) * 180.0) / Math.PI;
   }
 
+  /**
+   * Deviation (0–90°) of a viewing direction from an annulus plane normal.
+   * Antiparallel normals fold to 0 — looking down the annulus axis from either
+   * side is equally "en-face". 0° = a true perpendicular cross-section.
+   */
+  static perpendicularityDeviationDegrees(
+    currentViewNormal: TAVIVector3D,
+    annulusPlaneNormal: TAVIVector3D
+  ): number {
+    const nView = this.vectorNormalize(currentViewNormal);
+    const nAnn = this.vectorNormalize(annulusPlaneNormal);
+    if (this.vectorIsZero(nView) || this.vectorIsZero(nAnn)) return 0;
+    const theta = this.angleBetweenVectors(nView, nAnn);
+    return theta > 90 ? 180 - theta : theta;
+  }
+
+  /**
+   * N world points around a circle of the given radius lying on the plane
+   * through `centroid` with `planeNormal`. Used for read-only annulus disc
+   * glyphs and per-cusp sampling rings.
+   */
+  static discRingPoints(
+    centroid: TAVIVector3D,
+    planeNormal: TAVIVector3D,
+    radiusMm: number,
+    segments = 24
+  ): TAVIVector3D[] {
+    const basis = this.planeBasisMake(planeNormal);
+    const ring: TAVIVector3D[] = [];
+    for (let k = 0; k < segments; k++) {
+      const theta = (2 * Math.PI * k) / segments;
+      const u = this.vectorScale(basis.basisU, radiusMm * Math.cos(theta));
+      const v = this.vectorScale(basis.basisV, radiusMm * Math.sin(theta));
+      ring.push(this.vectorAdd(centroid, this.vectorAdd(u, v)));
+    }
+    return ring;
+  }
+
   static projectionConfirmationForReferenceNormal(
     referenceNormal: TAVIVector3D,
     confirmationNormal: TAVIVector3D
