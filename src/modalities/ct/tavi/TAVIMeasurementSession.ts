@@ -8,6 +8,8 @@ import {
   TAVIProjectionConfirmationResult,
   TAVISinusDiameterResult,
   SinusLabel,
+  AccessVesselId,
+  AccessVesselResult,
   AccessRoute,
   PigtailAccessRoute,
 } from './TAVITypes';
@@ -24,6 +26,10 @@ export const TAVIStructureSinusPoints = 'sinus-points';
 export const TAVIStructureSinusDiameters = 'sinus-diameters';
 export const TAVIStructureLVOT = 'lvot';
 export const TAVIStructureMembranousSeptum = 'membranous-septum';
+export const TAVIStructureThoracicAorta = 'thoracic-aorta';
+export const TAVIStructureAbdominalAorta = 'abdominal-aorta';
+export const TAVIStructureIliacLeft = 'iliac-left';
+export const TAVIStructureIliacRight = 'iliac-right';
 
 function TAVIRoundToHalfMillimeter(value: number): number {
   return Math.round(value * 2.0) / 2.0;
@@ -83,6 +89,11 @@ export class TAVIMeasurementSession {
   public sinusFloorPoints: Partial<Record<SinusLabel, TAVIVector3D>> = {};
   /** Computed per-sinus diameter + height results (derived in recompute). */
   public sinusDiameters: Partial<Record<SinusLabel, TAVISinusDiameterResult>> = {};
+
+  /** Ilio-femoral access vessel measurements keyed by vessel id. */
+  public accessVessels: Map<AccessVesselId, AccessVesselResult> = new Map();
+  /** Sheath OD (mm) selected for the access sheath-fit check. */
+  public selectedSheathOuterDiameterMm?: number | null;
   public stjGeometry?: TAVIGeometryResult | null;
   public ascendingAortaGeometry?: TAVIGeometryResult | null;
 
@@ -144,6 +155,8 @@ export class TAVIMeasurementSession {
     this.sinusDiameterPoints = {};
     this.sinusFloorPoints = {};
     this.sinusDiameters = {};
+    this.accessVessels = new Map();
+    this.selectedSheathOuterDiameterMm = null;
     this.stjGeometry = null;
     this.ascendingAortaGeometry = null;
     this.annulusCalcium = null;
@@ -261,6 +274,31 @@ export class TAVIMeasurementSession {
     const dp = { ...this.sinusDiameterPoints }; delete dp[label]; this.sinusDiameterPoints = dp;
     const fp = { ...this.sinusFloorPoints }; delete fp[label]; this.sinusFloorPoints = fp;
     this.recompute();
+  }
+
+  /**
+   * Store a computed access-vessel result. The heavy per-section auto-seg loop
+   * runs in the panel (where the Cornerstone volume is available); the session
+   * only stores the finished result, staying volume-agnostic.
+   */
+  public captureAccessVessel(result: AccessVesselResult): void {
+    this.accessVessels = new Map(this.accessVessels);
+    this.accessVessels.set(result.vesselId, { ...result });
+  }
+
+  /** Remove one access-vessel measurement. */
+  public clearAccessVessel(vesselId: AccessVesselId): void {
+    const next = new Map(this.accessVessels);
+    next.delete(vesselId);
+    this.accessVessels = next;
+  }
+
+  /** Minimum lumen diameter across all measured access vessels (access-limiting). */
+  public iliofemoralMinLumenMm(): number | null {
+    const mins = Array.from(this.accessVessels.values())
+      .map((v) => v.minLumenDiameterMm)
+      .filter((v): v is number => v != null && Number.isFinite(v));
+    return mins.length ? Math.min(...mins) : null;
   }
 
   public capturePointSnapshot(snapshot: TAVIPointSnapshot, identifier: string) {
@@ -673,6 +711,25 @@ export class TAVIMeasurementSession {
     lines.push(`Planned Pigtail Access: ${this.plannedPigtailAccess}`);
     lines.push('');
 
+    // Access vessels (ilio-femoral runoff)
+    if (this.accessVessels.size > 0) {
+      lines.push('ACCESS VESSELS');
+      lines.push('───────────────────────────────────────────');
+      const vesselNames: Record<AccessVesselId, string> = {
+        'thoracic-aorta': 'Thoracic Aorta',
+        'abdominal-aorta': 'Abdominal Aorta',
+        'iliac-left': 'Iliac (L)',
+        'iliac-right': 'Iliac (R)',
+      };
+      for (const [id, v] of this.accessVessels) {
+        lines.push(
+          `${vesselNames[id]}: min ø ${r(v.minLumenDiameterMm)} mm @ ${r(v.minLumenAtArcLengthMm, 0)}mm, ` +
+          `tortuosity ${r(v.tortuosityIndex, 2)} (${r(v.cumulativeAngulationDeg, 0)}° total)`
+        );
+      }
+      lines.push('');
+    }
+
     // Notes
     if (this.notes) {
       lines.push('NOTES');
@@ -762,6 +819,21 @@ export class TAVIMeasurementSession {
 
     rows.push(['Planned Access', this.plannedAccess, '']);
     rows.push(['Planned Pigtail Access', this.plannedPigtailAccess, '']);
+
+    const vesselCsvNames: Record<AccessVesselId, string> = {
+      'thoracic-aorta': 'Thoracic Aorta',
+      'abdominal-aorta': 'Abdominal Aorta',
+      'iliac-left': 'Iliac L',
+      'iliac-right': 'Iliac R',
+    };
+    for (const [id, v] of this.accessVessels) {
+      const n = vesselCsvNames[id];
+      rows.push([`${n} Min Lumen`, v.minLumenDiameterMm.toFixed(1), 'mm']);
+      rows.push([`${n} Tortuosity Index`, v.tortuosityIndex.toFixed(2), '']);
+      rows.push([`${n} Cumulative Angulation`, v.cumulativeAngulationDeg.toFixed(0), 'deg']);
+      rows.push([`${n} Path Length`, v.pathLengthMm.toFixed(1), 'mm']);
+      rows.push([`${n} Chord Length`, v.chordLengthMm.toFixed(1), 'mm']);
+    }
 
     return rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
   }

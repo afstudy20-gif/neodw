@@ -15,8 +15,8 @@ import {
   TAVIStructureSinusPoints,
   TAVIStructureMembranousSeptum,
 } from '../tavi/TAVIMeasurementSession';
-import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, SinusLabel, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
-import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
+import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, SinusLabel, AccessVesselId, AccessVesselResult, AccessVesselCrossSection, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
+import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, assessSheathFit, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
@@ -841,6 +841,83 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     forceUpdate();
   }, [session, renderingEngineId]);
 
+  // ── Ilio-femoral access vessel measurement ──
+  // Snapshots the active centerline path, samples perpendicular cross-sections
+  // every 5 mm, auto-segments each lumen, and reduces to min lumen + tortuosity.
+  const [accessBusy, setAccessBusy] = useState<AccessVesselId | null>(null);
+  const measureAccessVessel = useCallback((vesselId: AccessVesselId) => {
+    const volume = cornerstone.cache.getVolume(volumeId);
+    if (!volume) return;
+    const pathPoints = centerlineRef.current?.getPoints() ?? [];
+    if (pathPoints.length < 2) {
+      setAutoDetectError('Draw the vessel path with the centerline tool first (≥2 points).');
+      return;
+    }
+    setAccessBusy(vesselId);
+    // Defer the heavy sampling so the busy state can paint.
+    setTimeout(() => {
+      try {
+        const samples = TAVIGeometry.resamplePathByArcLength(pathPoints, 5);
+        const isIliac = vesselId.startsWith('iliac');
+        const maxDiameterMm = isIliac ? 20 : 45;
+        const sections: AccessVesselCrossSection[] = [];
+        for (const s of samples) {
+          const seg = autoSegmentCrossSectionAtPlane(volume, s.point, s.tangent, undefined, {
+            huMin: 150, huMax: 500, gridSize: 160, pixelSpacing: 0.3, maxDiameterMm,
+          });
+          const geo = seg ? TAVIGeometry.geometryForWorldContour(seg.contourPoints, s.tangent) : null;
+          if (seg && geo) {
+            sections.push({
+              arcLengthMm: s.arcLengthMm,
+              center: seg.centerWorld,
+              minDiameterMm: geo.minimumDiameterMm,
+              equivalentDiameterMm: geo.equivalentDiameterMm,
+              areaMm2: geo.areaMm2,
+              valid: true,
+            });
+          } else {
+            sections.push({
+              arcLengthMm: s.arcLengthMm, center: s.point,
+              minDiameterMm: 0, equivalentDiameterMm: 0, areaMm2: 0, valid: false,
+            });
+          }
+        }
+        const valid = sections.filter((x) => x.valid);
+        if (valid.length === 0) {
+          setAutoDetectError(`No lumen segmented along the ${vesselId} path. Adjust the centerline through contrast-filled lumen.`);
+          setAccessBusy(null);
+          return;
+        }
+        let minLumenDiameterMm = Infinity;
+        let minLumenAtArcLengthMm = 0;
+        for (const sec of valid) {
+          if (sec.minDiameterMm < minLumenDiameterMm) {
+            minLumenDiameterMm = sec.minDiameterMm;
+            minLumenAtArcLengthMm = sec.arcLengthMm;
+          }
+        }
+        const result: AccessVesselResult = {
+          vesselId,
+          pathPoints,
+          sections,
+          chordLengthMm: TAVIGeometry.vectorDistance(valid[0].center, valid[valid.length - 1].center),
+          pathLengthMm: valid[valid.length - 1].arcLengthMm - valid[0].arcLengthMm,
+          tortuosityIndex: TAVIGeometry.tortuosityIndex(pathPoints),
+          cumulativeAngulationDeg: TAVIGeometry.cumulativeAngulationDeg(pathPoints),
+          minLumenDiameterMm,
+          minLumenAtArcLengthMm,
+        };
+        session.captureAccessVessel(result);
+        setAutoDetectError(null);
+      } catch {
+        setAutoDetectError(`Access-vessel measurement failed for ${vesselId}.`);
+      } finally {
+        setAccessBusy(null);
+        forceUpdate();
+      }
+    }, 0);
+  }, [session, volumeId]);
+
   /** Capture a cusp hinge point from standard MPR views (before double-oblique mode) */
   const captureCuspFromMPR = useCallback((cusp: 'lcc' | 'ncc' | 'rcc') => {
     const engine = getEngine();
@@ -1540,6 +1617,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     ? recommendValveSizes(annulus.perimeterMm, annulus.areaMm2)
     : [];
 
+  // Sheath-fit assessment for ilio-femoral access.
+  const sheathOD = session.selectedSheathOuterDiameterMm
+    ?? valveRecs.find((r) => r.primarySize)?.primarySize?.sheathOuterDiameterMm
+    ?? null;
+  const accessMinLumen = session.iliofemoralMinLumenMm();
+  const sheathFit = (sheathOD != null && accessMinLumen != null)
+    ? assessSheathFit(
+        accessMinLumen,
+        sheathOD,
+        session.annulusCalcificationGrade >= 2 || session.cuspCalcificationGrade >= 2
+      )
+    : null;
+
   // Risk assessment
   const risks = assessTAVRRisks({
     leftCoronaryHeightMm: session.leftCoronaryHeightMm,
@@ -1664,6 +1754,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     lines.push(`  Planned Access:   ${session.plannedAccess}`);
     lines.push(`  Pigtail Access:   ${session.plannedPigtailAccess}`);
     lines.push('');
+
+    // Access vessels
+    if (session.accessVessels.size > 0) {
+      lines.push('── ACCESS VESSELS ──');
+      for (const [, v] of session.accessVessels) {
+        lines.push(`  ${v.vesselId}: min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}° · path ${fmt(v.pathLengthMm, 0)} mm`);
+      }
+      if (sheathFit) {
+        lines.push(`  Sheath OD ${fmt(sheathFit.sheathOuterDiameterMm)} mm vs min lumen ${fmt(sheathFit.minLumenDiameterMm)} mm → SFAR ${fmt(sheathFit.sfar, 2)} (${sheathFit.feasibility})`);
+      }
+      lines.push('');
+    }
 
     // Risk
     lines.push('── RISK ASSESSMENT ──');
@@ -1797,6 +1899,22 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         { label: 'Pigtail Access', value: session.plannedPigtailAccess },
       ],
     });
+
+    if (session.accessVessels.size > 0) {
+      const vesselRows: { label: string; value: string; unit: string }[] =
+        Array.from(session.accessVessels.values()).map((v) => ({
+          label: v.vesselId,
+          value: `${fmt(v.minLumenDiameterMm)} (TI ${fmt(v.tortuosityIndex, 2)}, ${fmt(v.cumulativeAngulationDeg, 0)}°)`,
+          unit: 'mm min ø',
+        }));
+      if (accessMinLumen != null) vesselRows.push({ label: 'Min Ilio-femoral Lumen', value: fmt(accessMinLumen), unit: 'mm' });
+      if (sheathOD != null) vesselRows.push({ label: 'Selected Sheath OD', value: fmt(sheathOD), unit: 'mm' });
+      if (sheathFit) {
+        vesselRows.push({ label: 'SFAR', value: fmt(sheathFit.sfar, 2), unit: '' });
+        vesselRows.push({ label: 'Access Feasibility', value: sheathFit.feasibility, unit: '' });
+      }
+      sections.push({ title: 'Access Vessels', rows: vesselRows });
+    }
 
     if (session.notes) {
       sections.push({ title: 'Comments', rows: [{ label: '', value: session.notes }] });
@@ -3453,6 +3571,63 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               </div>
             </div>
 
+            {/* ── Access Vessels (ilio-femoral runoff) ── */}
+            <div className="tavi-card">
+              <h3 className="tavi-card-title">Access Vessels</h3>
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+                Draw a vessel path with the centerline tool, then Measure. Min lumen = narrowest perpendicular diameter.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                {([
+                  ['thoracic-aorta', 'Thoracic Aorta'],
+                  ['abdominal-aorta', 'Abdominal Aorta'],
+                  ['iliac-left', 'Iliac L'],
+                  ['iliac-right', 'Iliac R'],
+                ] as [AccessVesselId, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    className="tavi-button tavi-button-capture"
+                    style={{ fontSize: '0.7rem', padding: '4px' }}
+                    disabled={accessBusy != null}
+                    onClick={() => measureAccessVessel(id)}
+                  >
+                    {accessBusy === id ? '…' : `Measure ${label}`}
+                  </button>
+                ))}
+              </div>
+              <div className="tavi-report-grid">
+                {([
+                  ['thoracic-aorta', 'Thoracic Aorta'],
+                  ['abdominal-aorta', 'Abdominal Aorta'],
+                  ['iliac-left', 'Iliac (L)'],
+                  ['iliac-right', 'Iliac (R)'],
+                ] as [AccessVesselId, string][]).map(([id, label]) => {
+                  const v = session.accessVessels.get(id);
+                  return v ? (
+                    <Row
+                      key={id}
+                      label={label}
+                      value={`min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}°`}
+                      warn={v.tortuosityIndex > 1.5 || v.cumulativeAngulationDeg > 90}
+                    />
+                  ) : null;
+                })}
+                {accessMinLumen != null && (
+                  <Row label="Min Ilio-femoral Lumen" value={`${fmt(accessMinLumen)} mm`} />
+                )}
+                {sheathOD != null && (
+                  <Row label="Selected Sheath OD" value={`${fmt(sheathOD)} mm`} />
+                )}
+                {sheathFit && (
+                  <>
+                    <Row label="Margin" value={`${fmt(sheathFit.marginMm)} mm`} warn={sheathFit.feasibility !== 'feasible'} />
+                    <Row label="SFAR" value={fmt(sheathFit.sfar, 2)} warn={sheathFit.sfar > 1.0} highlight={sheathFit.feasibility === 'feasible'} />
+                    <Row label="Access Feasibility" value={sheathFit.feasibility} warn={sheathFit.feasibility === 'unfavorable'} highlight={sheathFit.feasibility === 'feasible'} />
+                  </>
+                )}
+              </div>
+            </div>
+
             {/* ── 5. Structure Geometries ── */}
             <div className="tavi-card">
               <h3 className="tavi-card-title">Structure Geometries</h3>
@@ -3521,6 +3696,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <CheckItem done={!!fluoro} label="C-arm projection angles (Coplanar)" />
                 <CheckItem done={session.sinusPointSnapshots.length >= 3} label="Projection confirmation (Cusp Overlap)" />
                 <CheckItem done={session.membranousSeptumPointSnapshots.length >= 2} label="Septal length (conduction risk)" />
+                <CheckItem done={session.accessVessels.size > 0} label="Iliofemoral access vessels measured" />
               </div>
             </div>
 

@@ -811,4 +811,95 @@ export class TAVIGeometry {
 
     return result;
   }
+
+  // ── Access-vessel path metrics (ilio-femoral runoff) ──
+
+  /**
+   * Tortuosity index = path length / straight-line chord (dimensionless, ≥ 1).
+   * 1.0 = perfectly straight. Guards against a degenerate chord.
+   */
+  static tortuosityIndex(pathPoints: TAVIVector3D[]): number {
+    if (!pathPoints || pathPoints.length < 2) return 1;
+    let pathLength = 0;
+    for (let i = 1; i < pathPoints.length; i++) {
+      pathLength += this.vectorDistance(pathPoints[i], pathPoints[i - 1]);
+    }
+    const chord = this.vectorDistance(pathPoints[pathPoints.length - 1], pathPoints[0]);
+    if (chord < 1e-6) return 1;
+    return pathLength / chord;
+  }
+
+  /**
+   * Sum of turn angles at every interior vertex (degrees). Advisory metric:
+   * > ~90° total over the iliofemoral path predicts difficult delivery.
+   */
+  static cumulativeAngulationDeg(pathPoints: TAVIVector3D[]): number {
+    if (!pathPoints || pathPoints.length < 3) return 0;
+    let total = 0;
+    for (let i = 1; i < pathPoints.length - 1; i++) {
+      const vIn = this.vectorNormalize(this.vectorSubtract(pathPoints[i], pathPoints[i - 1]));
+      const vOut = this.vectorNormalize(this.vectorSubtract(pathPoints[i + 1], pathPoints[i]));
+      if (this.vectorIsZero(vIn) || this.vectorIsZero(vOut)) continue;
+      total += this.angleBetweenVectors(vIn, vOut);
+    }
+    return total;
+  }
+
+  /**
+   * Resample a sparse control-point path into evenly spaced samples (every
+   * `spacingMm`), each carrying a unit tangent. Endpoints are always included.
+   * Tangent at interior samples averages the two adjacent segment directions
+   * (matches CenterlineOverlay.getDirectionAtPoint's central-difference).
+   */
+  static resamplePathByArcLength(
+    pathPoints: TAVIVector3D[],
+    spacingMm: number
+  ): { point: TAVIVector3D; tangent: TAVIVector3D; arcLengthMm: number }[] {
+    const out: { point: TAVIVector3D; tangent: TAVIVector3D; arcLengthMm: number }[] = [];
+    if (!pathPoints || pathPoints.length < 2 || spacingMm <= 0) {
+      return pathPoints && pathPoints.length === 1
+        ? [{ point: pathPoints[0], tangent: { x: 0, y: 0, z: 1 }, arcLengthMm: 0 }]
+        : out;
+    }
+
+    // Per-segment direction + cumulative arc length at each vertex.
+    const segDir: TAVIVector3D[] = [];
+    const vertexArc: number[] = [0];
+    for (let i = 1; i < pathPoints.length; i++) {
+      const d = this.vectorSubtract(pathPoints[i], pathPoints[i - 1]);
+      segDir.push(this.vectorNormalize(d));
+      vertexArc.push(vertexArc[i - 1] + this.vectorLength(d));
+    }
+    const totalLen = vertexArc[vertexArc.length - 1];
+
+    const tangentAtArc = (arc: number): TAVIVector3D => {
+      // Find the segment containing `arc`.
+      let seg = 0;
+      while (seg < segDir.length - 1 && vertexArc[seg + 1] < arc) seg++;
+      // At an interior vertex, average the two adjacent segment dirs.
+      const eps = 1e-6;
+      if (Math.abs(arc - vertexArc[seg + 1]) < eps && seg + 1 < segDir.length) {
+        return this.vectorNormalize(this.vectorAdd(segDir[seg], segDir[seg + 1]));
+      }
+      return segDir[seg];
+    };
+
+    const pointAtArc = (arc: number): TAVIVector3D => {
+      let seg = 0;
+      while (seg < segDir.length - 1 && vertexArc[seg + 1] < arc) seg++;
+      const local = arc - vertexArc[seg];
+      return this.vectorAdd(pathPoints[seg], this.vectorScale(segDir[seg], local));
+    };
+
+    for (let arc = 0; arc < totalLen; arc += spacingMm) {
+      out.push({ point: pointAtArc(arc), tangent: tangentAtArc(arc), arcLengthMm: arc });
+    }
+    // Always include the final endpoint.
+    out.push({
+      point: pathPoints[pathPoints.length - 1],
+      tangent: segDir[segDir.length - 1],
+      arcLengthMm: totalLen,
+    });
+    return out;
+  }
 }

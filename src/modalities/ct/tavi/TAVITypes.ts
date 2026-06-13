@@ -21,6 +21,42 @@ export interface TAVIGeometryResult {
   minorAxisDirection: TAVIVector3D;
 }
 
+export type AccessVesselId = 'thoracic-aorta' | 'abdominal-aorta' | 'iliac-left' | 'iliac-right';
+
+export interface AccessVesselCrossSection {
+  /** cumulative arc-length from path start, mm */
+  arcLengthMm: number;
+  /** world position of the centerline sample point */
+  center: TAVIVector3D;
+  /** min lumen diameter at this section (rotating-caliper min width), mm */
+  minDiameterMm: number;
+  /** equivalent (area-derived) diameter, mm */
+  equivalentDiameterMm: number;
+  areaMm2: number;
+  /** false when auto-seg failed / was rejected at this section */
+  valid: boolean;
+}
+
+export interface AccessVesselResult {
+  vesselId: AccessVesselId;
+  /** control points of the curved path, world coords */
+  pathPoints: TAVIVector3D[];
+  /** per-section samples ordered by arcLengthMm */
+  sections: AccessVesselCrossSection[];
+  /** straight-line chord between first and last valid section center, mm */
+  chordLengthMm: number;
+  /** summed path length over valid sections, mm */
+  pathLengthMm: number;
+  /** tortuosity index = pathLengthMm / chordLengthMm (≥ 1), dimensionless */
+  tortuosityIndex: number;
+  /** total cumulative angulation across the path, degrees */
+  cumulativeAngulationDeg: number;
+  /** MINIMUM minDiameterMm over all valid sections (the access-limiting lumen), mm */
+  minLumenDiameterMm: number;
+  /** arc-length at which minLumenDiameterMm occurs, mm */
+  minLumenAtArcLengthMm: number;
+}
+
 export type SinusLabel = 'LCS' | 'RCS' | 'NCS'; // Left / Right / Non-coronary sinus
 
 export interface TAVISinusDiameterResult {
