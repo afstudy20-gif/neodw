@@ -1,4 +1,4 @@
-import { TAVIVector3D } from './TAVITypes';
+import { TAVIVector3D, TAVIPoint2D } from './TAVITypes';
 import { TAVIGeometry } from './TAVIGeometry';
 
 export interface AorticAxisResult {
@@ -310,6 +310,94 @@ export function autoSegmentCrossSectionAtPlane(
 
   console.warn('[AutoSeg] All threshold attempts failed');
   return null;
+}
+
+export interface ContourPixelSample {
+  /** HU value of every grid cell whose center falls inside the polygon. */
+  pixelValues: Float32Array;
+  /** Area each sampled cell represents (pixelSpacing²), mm². */
+  pixelAreaMm2: number;
+  sampleCount: number;
+}
+
+/** Even-odd ray-cast point-in-polygon test on the projected 2D plane. */
+function pointInPolygon2D(px: number, py: number, poly: TAVIPoint2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersects = (yi > py) !== (yj > py) &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Rasterize HU values inside a world-space contour by projecting it onto its
+ * own plane (same basis convention as TAVIGeometry area/perimeter), walking a
+ * regular grid over the polygon interior, and sampling the volume at each cell
+ * center with nearest-neighbour lookup.
+ *
+ * Used to drive 2D Agatston scoring for annulus / LVOT / per-cusp regions.
+ * Nearest-neighbour (not trilinear) is deliberate: Agatston is defined on
+ * native voxels, and HU smoothing would corrupt the 130/200/300/400 bands.
+ *
+ * @returns null if the volume is unreadable or fewer than 4 cells sampled.
+ */
+export function samplePixelValuesInWorldContour(
+  volume: any,
+  worldPoints: TAVIVector3D[],
+  planeNormal: TAVIVector3D,
+  options?: { pixelSpacing?: number; padMm?: number }
+): ContourPixelSample | null {
+  if (!worldPoints || worldPoints.length < 3) return null;
+  const info = extractVolumeInfo(volume);
+  if (!info) return null;
+
+  const pixelSpacing = options?.pixelSpacing ?? 0.5;
+  const padMm = options?.padMm ?? 2;
+
+  // Centroid (plane origin) = mean of contour points.
+  const centroid: TAVIVector3D = { x: 0, y: 0, z: 0 };
+  for (const p of worldPoints) {
+    centroid.x += p.x; centroid.y += p.y; centroid.z += p.z;
+  }
+  centroid.x /= worldPoints.length;
+  centroid.y /= worldPoints.length;
+  centroid.z /= worldPoints.length;
+
+  const basis = TAVIGeometry.planeBasisMake(planeNormal);
+  const poly2D = worldPoints.map((p) => TAVIGeometry.projectWorldPointWithBasis(p, centroid, basis));
+
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const q of poly2D) {
+    if (q.x < minU) minU = q.x;
+    if (q.x > maxU) maxU = q.x;
+    if (q.y < minV) minV = q.y;
+    if (q.y > maxV) maxV = q.y;
+  }
+  if (!Number.isFinite(minU) || !Number.isFinite(minV)) return null;
+  minU -= padMm; minV -= padMm; maxU += padMm; maxV += padMm;
+
+  const values: number[] = [];
+  for (let u = minU; u <= maxU; u += pixelSpacing) {
+    for (let v = minV; v <= maxV; v += pixelSpacing) {
+      if (!pointInPolygon2D(u, v, poly2D)) continue;
+      const wx = centroid.x + basis.basisU.x * u + basis.basisV.x * v;
+      const wy = centroid.y + basis.basisU.y * u + basis.basisV.y * v;
+      const wz = centroid.z + basis.basisU.z * u + basis.basisV.z * v;
+      const hu = sampleVolumeNearest(wx, wy, wz, info);
+      if (!Number.isNaN(hu)) values.push(hu);
+    }
+  }
+
+  if (values.length < 4) return null;
+  return {
+    pixelValues: Float32Array.from(values),
+    pixelAreaMm2: pixelSpacing * pixelSpacing,
+    sampleCount: values.length,
+  };
 }
 
 /** Internal: attempt segmentation with a specific HU threshold pair */

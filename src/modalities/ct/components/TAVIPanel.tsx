@@ -20,7 +20,7 @@ import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRi
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
-import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane } from '../tavi/AorticAxisDetection';
+import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, samplePixelValuesInWorldContour } from '../tavi/AorticAxisDetection';
 import { DoubleObliqueController } from '../tavi/DoubleObliqueController';
 import { ConstrainedContourTool } from '../tavi/ConstrainedContourTool';
 import { CenterlineOverlay } from '../tavi/CenterlineOverlay';
@@ -1149,12 +1149,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           return;
         }
 
-        // Create contour snapshot from best result
+        // Create contour snapshot from best result. Rasterize HU inside the
+        // contour so 2D Agatston can be scored (annulus / LVOT).
+        const caAuto = samplePixelValuesInWorldContour(
+          cornerstone.cache.getVolume(volumeId), bestCandidate.contourPoints, bestCandidate.normal
+        );
         const snapshot: TAVIContourSnapshot = {
           worldPoints: bestCandidate.contourPoints,
           pixelPoints: [],
           planeOrigin: bestCandidate.origin,
           planeNormal: bestCandidate.normal,
+          ...(caAuto ? { pixelValues: caAuto.pixelValues, pixelAreaMm2: caAuto.pixelAreaMm2 } : {}),
         };
         session.captureContourSnapshot(snapshot, activeStep);
 
@@ -1182,6 +1187,22 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       }
     });
   }, [activeStep, volumeId, session, renderingEngineId]);
+
+  // ── Per-cusp calcium sampling ──
+  // Cusps are single nadir points; synthesize a disc on the annulus plane
+  // around the nadir and rasterize HU inside it for a 2D Agatston estimate.
+  const CUSP_CA_RADIUS_MM = 6;
+  const sampleCuspCalcium = (id: 'lcc' | 'rcc' | 'ncc', center?: TAVIVector3D) => {
+    const volume = cornerstone.cache.getVolume(volumeId);
+    const normal = session.annulusPlaneNormal ?? session.activeAnnulusGeometry()?.planeNormal;
+    if (!volume || !center || !normal) return;
+    const ring = TAVIGeometry.discOnPlane(center, normal, CUSP_CA_RADIUS_MM, 24);
+    const s = samplePixelValuesInWorldContour(volume, ring, normal);
+    if (s) {
+      session.captureCuspCalciumSample(id, s.pixelValues, s.pixelAreaMm2);
+      forceUpdate();
+    }
+  };
 
   // ── Capture axis from crosshairs ──
 
@@ -1418,11 +1439,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             const worldPoints: TAVIVector3D[] = polyline.map(p => ({ x: p[0], y: p[1], z: p[2] }));
             const camera = vp.getCamera();
             const vpn = camera.viewPlaneNormal || [0, 0, 1];
+            const planeNormal = { x: vpn[0], y: vpn[1], z: vpn[2] };
+            // Rasterize HU inside the contour so 2D Agatston can be scored for
+            // calcium-bearing structures (annulus / LVOT). No-op for others.
+            const ca = samplePixelValuesInWorldContour(
+              cornerstone.cache.getVolume(volumeId), worldPoints, planeNormal
+            );
             const snapshot: TAVIContourSnapshot = {
               worldPoints,
               pixelPoints: [],
               planeOrigin: { x: polyline[0][0], y: polyline[0][1], z: polyline[0][2] },
-              planeNormal: { x: vpn[0], y: vpn[1], z: vpn[2] },
+              planeNormal,
+              ...(ca ? { pixelValues: ca.pixelValues, pixelAreaMm2: ca.pixelAreaMm2 } : {}),
             };
             session.captureContourSnapshot(snapshot, activeStep);
             if (activeStep === TAVIStructureAnnulus) {
@@ -1609,12 +1637,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     // Calcium
     lines.push('── CALCIFICATION ──');
-    lines.push(`  Cusp Grade: ${session.cuspCalcificationGrade} | Annulus Grade: ${session.annulusCalcificationGrade}`);
+    lines.push(`  Cusp Grades — LCC: ${session.cuspCalcificationGradeLCC} | RCC: ${session.cuspCalcificationGradeRCC} | NCC: ${session.cuspCalcificationGradeNCC}`);
+    lines.push(`  Annulus Grade: ${session.annulusCalcificationGrade}`);
     lines.push(`  Threshold: ${session.calciumThresholdHU} HU`);
     if (session.annulusCalcium) {
-      lines.push(`  Agatston 2D: ${fmt(session.annulusCalcium.agatstonScore2D, 0)}`);
-      lines.push(`  Hyperdense Area: ${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`);
+      lines.push(`  Annulus Agatston 2D: ${fmt(session.annulusCalcium.agatstonScore2D, 0)}`);
+      lines.push(`  Annulus Hyperdense Area: ${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`);
     }
+    if (session.cuspCalciumLCC) lines.push(`  LCC Agatston 2D: ${fmt(session.cuspCalciumLCC.agatstonScore2D, 0)}`);
+    if (session.cuspCalciumRCC) lines.push(`  RCC Agatston 2D: ${fmt(session.cuspCalciumRCC.agatstonScore2D, 0)}`);
+    if (session.cuspCalciumNCC) lines.push(`  NCC Agatston 2D: ${fmt(session.cuspCalciumNCC.agatstonScore2D, 0)}`);
+    if (session.lvotCalcium) lines.push(`  LVOT Agatston 2D: ${fmt(session.lvotCalcium.agatstonScore2D, 0)} | Dense ${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 1)}%`);
     lines.push('');
 
     if (session.notes) {
@@ -1687,12 +1720,21 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     sections.push({
       title: 'Calcification',
       rows: [
-        { label: 'Cusp Grade', value: String(session.cuspCalcificationGrade) },
+        { label: 'LCC Grade', value: String(session.cuspCalcificationGradeLCC) },
+        { label: 'RCC Grade', value: String(session.cuspCalcificationGradeRCC) },
+        { label: 'NCC Grade', value: String(session.cuspCalcificationGradeNCC) },
         { label: 'Annulus Grade', value: String(session.annulusCalcificationGrade) },
         { label: 'Threshold', value: String(session.calciumThresholdHU), unit: 'HU' },
         ...(session.annulusCalcium ? [
-          { label: 'Agatston 2D', value: fmt(session.annulusCalcium.agatstonScore2D, 0) },
-          { label: 'Hyperdense Area', value: fmt(session.annulusCalcium.hyperdenseAreaMm2), unit: 'mm²' },
+          { label: 'Annulus Agatston 2D', value: fmt(session.annulusCalcium.agatstonScore2D, 0) },
+          { label: 'Annulus Hyperdense Area', value: fmt(session.annulusCalcium.hyperdenseAreaMm2), unit: 'mm²' },
+        ] : []),
+        ...(session.cuspCalciumLCC ? [{ label: 'LCC Agatston 2D', value: fmt(session.cuspCalciumLCC.agatstonScore2D, 0) }] : []),
+        ...(session.cuspCalciumRCC ? [{ label: 'RCC Agatston 2D', value: fmt(session.cuspCalciumRCC.agatstonScore2D, 0) }] : []),
+        ...(session.cuspCalciumNCC ? [{ label: 'NCC Agatston 2D', value: fmt(session.cuspCalciumNCC.agatstonScore2D, 0) }] : []),
+        ...(session.lvotCalcium ? [
+          { label: 'LVOT Agatston 2D', value: fmt(session.lvotCalcium.agatstonScore2D, 0) },
+          { label: 'LVOT Ca Fraction', value: fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0), unit: '%' },
         ] : []),
       ],
     });
@@ -2945,21 +2987,43 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                     /> HU
                   </span>
                 </div>
-                <div className="tavi-row">
-                  <span className="tavi-row-label">Cusp Grade</span>
-                  <span className="tavi-row-value">
-                    <select
-                      className="tavi-inline-select"
-                      value={session.cuspCalcificationGrade}
-                      onChange={(e) => { session.cuspCalcificationGrade = Number(e.target.value); forceUpdate(); }}
-                    >
-                      <option value={0}>None (0)</option>
-                      <option value={1}>Mild (1)</option>
-                      <option value={2}>Moderate (2)</option>
-                      <option value={3}>Severe (3)</option>
-                    </select>
-                  </span>
-                </div>
+                {([
+                  ['lcc', 'LCC', session.cuspCalcificationGradeLCC, session.cuspLCC] as const,
+                  ['rcc', 'RCC', session.cuspCalcificationGradeRCC, session.cuspRCC] as const,
+                  ['ncc', 'NCC', session.cuspCalcificationGradeNCC, session.cuspNCC] as const,
+                ]).map(([id, label, grade, center]) => (
+                  <div className="tavi-row" key={id}>
+                    <span className="tavi-row-label">{label} Grade</span>
+                    <span className="tavi-row-value" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <select
+                        className="tavi-inline-select"
+                        value={grade}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (id === 'lcc') session.cuspCalcificationGradeLCC = v;
+                          else if (id === 'rcc') session.cuspCalcificationGradeRCC = v;
+                          else session.cuspCalcificationGradeNCC = v;
+                          session.recompute();
+                          forceUpdate();
+                        }}
+                      >
+                        <option value={0}>None (0)</option>
+                        <option value={1}>Mild (1)</option>
+                        <option value={2}>Moderate (2)</option>
+                        <option value={3}>Severe (3)</option>
+                      </select>
+                      <button
+                        className="tavi-button"
+                        style={{ fontSize: '0.7rem', padding: '2px 8px' }}
+                        disabled={!center || !(session.annulusPlaneNormal ?? session.activeAnnulusGeometry()?.planeNormal)}
+                        title="Sample HU in a 6mm disc around this cusp nadir for 2D Agatston"
+                        onClick={() => sampleCuspCalcium(id, center)}
+                      >
+                        Sample
+                      </button>
+                    </span>
+                  </div>
+                ))}
                 <div className="tavi-row">
                   <span className="tavi-row-label">Annulus Grade</span>
                   <span className="tavi-row-value">
@@ -2977,9 +3041,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 </div>
                 {session.annulusCalcium && (
                   <>
-                    <Row label="Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
-                    <Row label="Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
-                    <Row label="Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                    <Row label="Annulus Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
+                    <Row label="Annulus Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
+                    <Row label="Annulus Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                  </>
+                )}
+                {session.cuspCalciumLCC && <Row label="LCC Agatston 2D" value={fmt(session.cuspCalciumLCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumRCC && <Row label="RCC Agatston 2D" value={fmt(session.cuspCalciumRCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumNCC && <Row label="NCC Agatston 2D" value={fmt(session.cuspCalciumNCC.agatstonScore2D, 0)} />}
+                {session.lvotCalcium && (
+                  <>
+                    <Row label="LVOT Agatston 2D" value={fmt(session.lvotCalcium.agatstonScore2D, 0)} />
+                    <Row label="LVOT Ca Fraction" value={`${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0)}%`} />
                   </>
                 )}
               </div>
@@ -3328,16 +3401,29 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             <div className="tavi-card">
               <h3 className="tavi-card-title">Calcification</h3>
               <div className="tavi-report-grid">
-                <Row label="Cusp Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGrade]}
-                  warn={session.cuspCalcificationGrade >= 2} />
+                <Row label="LCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeLCC]}
+                  warn={session.cuspCalcificationGradeLCC >= 2} />
+                <Row label="RCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeRCC]}
+                  warn={session.cuspCalcificationGradeRCC >= 2} />
+                <Row label="NCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeNCC]}
+                  warn={session.cuspCalcificationGradeNCC >= 2} />
                 <Row label="Annulus Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.annulusCalcificationGrade]}
                   warn={session.annulusCalcificationGrade >= 2} />
                 <Row label="Threshold" value={`${session.calciumThresholdHU} HU`} />
                 {session.annulusCalcium && (
                   <>
-                    <Row label="Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
-                    <Row label="Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
-                    <Row label="Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                    <Row label="Annulus Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
+                    <Row label="Annulus Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
+                    <Row label="Annulus Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                  </>
+                )}
+                {session.cuspCalciumLCC && <Row label="LCC Agatston 2D" value={fmt(session.cuspCalciumLCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumRCC && <Row label="RCC Agatston 2D" value={fmt(session.cuspCalciumRCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumNCC && <Row label="NCC Agatston 2D" value={fmt(session.cuspCalciumNCC.agatstonScore2D, 0)} />}
+                {session.lvotCalcium && (
+                  <>
+                    <Row label="LVOT Agatston 2D" value={fmt(session.lvotCalcium.agatstonScore2D, 0)} />
+                    <Row label="LVOT Ca Fraction" value={`${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0)}%`} />
                   </>
                 )}
               </div>

@@ -156,6 +156,28 @@ export class TAVIGeometry {
     return worldPoints.map((p) => this.projectWorldPointWithBasis(p, planeOrigin, basis));
   }
 
+  /**
+   * Build a closed circular polygon of `segments` world points lying on the
+   * plane through `center` with the given normal. Used to synthesize a
+   * sampling region around a single nadir point (e.g. per-cusp calcium).
+   */
+  static discOnPlane(
+    center: TAVIVector3D,
+    planeNormal: TAVIVector3D,
+    radiusMm: number,
+    segments = 24
+  ): TAVIVector3D[] {
+    const basis = this.planeBasisMake(planeNormal);
+    const ring: TAVIVector3D[] = [];
+    for (let k = 0; k < segments; k++) {
+      const theta = (2 * Math.PI * k) / segments;
+      const u = this.vectorScale(basis.basisU, radiusMm * Math.cos(theta));
+      const v = this.vectorScale(basis.basisV, radiusMm * Math.sin(theta));
+      ring.push(this.vectorAdd(center, this.vectorAdd(u, v)));
+    }
+    return ring;
+  }
+
   static convexHull(points: TAVIPoint2D[]): TAVIPoint2D[] {
     if (points.length <= 3) return points;
 

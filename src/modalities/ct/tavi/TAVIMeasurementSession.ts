@@ -29,6 +29,11 @@ function TAVIRoundToHalfMillimeter(value: number): number {
 export class TAVIMeasurementSession {
   public calciumThresholdHU = 850.0;
   public cuspCalcificationGrade = 0;
+  /** Per-cusp manual calcium grades (0..3). Aggregate `cuspCalcificationGrade`
+   *  is auto-synced to the max of these in recompute() for risk scoring. */
+  public cuspCalcificationGradeLCC = 0;
+  public cuspCalcificationGradeRCC = 0;
+  public cuspCalcificationGradeNCC = 0;
   public annulusCalcificationGrade = 0;
   public useAssistedAnnulusForPlanning = false;
   public notes = '';
@@ -77,6 +82,15 @@ export class TAVIMeasurementSession {
   public sinusCalcium?: TAVICalciumResult | null;
   public stjCalcium?: TAVICalciumResult | null;
   public ascendingAortaCalcium?: TAVICalciumResult | null;
+  /** Computed per-cusp 2D Agatston (populated via captureCuspCalciumSample). */
+  public cuspCalciumLCC?: TAVICalciumResult | null;
+  public cuspCalciumRCC?: TAVICalciumResult | null;
+  public cuspCalciumNCC?: TAVICalciumResult | null;
+  /** Sampled HU pixels per cusp disc — kept so recompute() can re-run on
+   *  calciumThresholdHU change. Cusps have no contour snapshot to stamp. */
+  public cuspPixelSampleLCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
+  public cuspPixelSampleRCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
+  public cuspPixelSampleNCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
 
   /** Multi-level cross-section thumbnails (ProSizeAV page 2 style) */
   public multiLevelThumbnails: Map<number, string> = new Map();
@@ -125,6 +139,12 @@ export class TAVIMeasurementSession {
     this.sinusCalcium = null;
     this.stjCalcium = null;
     this.ascendingAortaCalcium = null;
+    this.cuspCalciumLCC = null;
+    this.cuspCalciumRCC = null;
+    this.cuspCalciumNCC = null;
+    this.cuspPixelSampleLCC = null;
+    this.cuspPixelSampleRCC = null;
+    this.cuspPixelSampleNCC = null;
     this.multiLevelThumbnails.clear();
     this.multiLevelGeometries.clear();
     this.annulusRawContourPoints = [];
@@ -141,6 +161,9 @@ export class TAVIMeasurementSession {
     this.useAssistedAnnulusForPlanning = false;
     this.calciumThresholdHU = 850.0;
     this.cuspCalcificationGrade = 0;
+    this.cuspCalcificationGradeLCC = 0;
+    this.cuspCalcificationGradeRCC = 0;
+    this.cuspCalcificationGradeNCC = 0;
     this.annulusCalcificationGrade = 0;
     this.notes = '';
   }
@@ -182,6 +205,30 @@ export class TAVIMeasurementSession {
         break;
     }
     this.applyMetadataFromContour(snapshot);
+    this.recompute();
+  }
+
+  /** Attach sampled LVOT HU pixels to the LVOT snapshot so recompute() scores it. */
+  public captureLvotCalciumSample(pixelValues: Float32Array, pixelAreaMm2: number): void {
+    const base = this.lvotSnapshot ?? {
+      worldPoints: [],
+      planeOrigin: { x: 0, y: 0, z: 0 },
+      planeNormal: { x: 0, y: 0, z: 1 },
+    };
+    this.lvotSnapshot = { ...base, pixelValues, pixelAreaMm2 };
+    this.recompute();
+  }
+
+  /** Store sampled per-cusp HU pixels; recompute() converts to 2D Agatston. */
+  public captureCuspCalciumSample(
+    id: 'lcc' | 'rcc' | 'ncc',
+    pixelValues: Float32Array,
+    pixelAreaMm2: number
+  ): void {
+    const sample = { pixelValues, pixelAreaMm2 };
+    if (id === 'lcc') this.cuspPixelSampleLCC = sample;
+    else if (id === 'rcc') this.cuspPixelSampleRCC = sample;
+    else this.cuspPixelSampleNCC = sample;
     this.recompute();
   }
 
@@ -331,15 +378,25 @@ export class TAVIMeasurementSession {
         )
       : null;
 
-    if (this.annulusSnapshot?.pixelValues && this.annulusSnapshot.pixelAreaMm2) {
-      this.annulusCalcium = TAVIGeometry.calciumResultForPixelValues(
-        this.annulusSnapshot.pixelValues,
-        this.annulusSnapshot.pixelAreaMm2,
-        this.calciumThresholdHU
-      );
-    } else {
-      this.annulusCalcium = null;
-    }
+    const calc = (sample?: { pixelValues?: Float32Array; pixelAreaMm2?: number } | null) =>
+      sample?.pixelValues && sample.pixelAreaMm2
+        ? TAVIGeometry.calciumResultForPixelValues(sample.pixelValues, sample.pixelAreaMm2, this.calciumThresholdHU)
+        : null;
+
+    this.annulusCalcium = calc(this.annulusSnapshot);
+    this.lvotCalcium = calc(this.lvotSnapshot);
+    this.cuspCalciumLCC = calc(this.cuspPixelSampleLCC);
+    this.cuspCalciumRCC = calc(this.cuspPixelSampleRCC);
+    this.cuspCalciumNCC = calc(this.cuspPixelSampleNCC);
+
+    // Keep the aggregate cusp grade in sync for risk scoring
+    // (TAVIValveDatabase.assessTAVRRisks consumes cuspCalcificationGrade).
+    this.cuspCalcificationGrade = Math.max(
+      this.cuspCalcificationGradeLCC,
+      this.cuspCalcificationGradeRCC,
+      this.cuspCalcificationGradeNCC,
+      this.cuspCalcificationGrade
+    );
 
     const planningAnnulus = this.activeAnnulusGeometry();
     this.fluoroAngle = planningAnnulus ? TAVIGeometry.fluoroAngleForPlaneNormal(planningAnnulus.planeNormal) : null;
@@ -532,12 +589,31 @@ export class TAVIMeasurementSession {
     }
 
     // Calcium
-    if (this.annulusCalcium) {
+    const hasAnyCalcium =
+      this.annulusCalcium || this.lvotCalcium ||
+      this.cuspCalciumLCC || this.cuspCalciumRCC || this.cuspCalciumNCC ||
+      this.cuspCalcificationGradeLCC > 0 || this.cuspCalcificationGradeRCC > 0 ||
+      this.cuspCalcificationGradeNCC > 0 || this.annulusCalcificationGrade > 0;
+    if (hasAnyCalcium) {
       lines.push('CALCIUM ASSESSMENT');
       lines.push('───────────────────────────────────────────');
       lines.push(`Threshold:        ${this.calciumThresholdHU} HU`);
-      lines.push(`Agatston (2D):    ${r(this.annulusCalcium.agatstonScore2D, 0)}`);
-      lines.push(`Dense fraction:   ${r(this.annulusCalcium.fractionAboveThreshold * 100, 1)}%`);
+      if (this.annulusCalcium) {
+        lines.push(`Annulus Agatston (2D): ${r(this.annulusCalcium.agatstonScore2D, 0)}`);
+        lines.push(`Annulus dense frac:    ${r(this.annulusCalcium.fractionAboveThreshold * 100, 1)}%`);
+      }
+      if (this.cuspCalciumLCC || this.cuspCalciumRCC || this.cuspCalciumNCC) {
+        lines.push('Per-cusp Agatston (2D):');
+        lines.push(`  LCC: ${r(this.cuspCalciumLCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeLCC}`);
+        lines.push(`  RCC: ${r(this.cuspCalciumRCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeRCC}`);
+        lines.push(`  NCC: ${r(this.cuspCalciumNCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeNCC}`);
+      } else {
+        lines.push(`Cusp grades — LCC: ${this.cuspCalcificationGradeLCC} | RCC: ${this.cuspCalcificationGradeRCC} | NCC: ${this.cuspCalcificationGradeNCC}`);
+      }
+      if (this.lvotCalcium) {
+        lines.push(`LVOT Agatston (2D):    ${r(this.lvotCalcium.agatstonScore2D, 0)}`);
+        lines.push(`LVOT dense frac:       ${r(this.lvotCalcium.fractionAboveThreshold * 100, 1)}%`);
+      }
       lines.push('');
     }
 
@@ -578,6 +654,15 @@ export class TAVIMeasurementSession {
         : 0;
       rows.push(['Annulus Eccentricity', eccentricity.toFixed(3), '']);
     }
+
+    if (this.annulusCalcium) rows.push(['Annulus Agatston 2D', this.annulusCalcium.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumLCC) rows.push(['LCC Agatston 2D', this.cuspCalciumLCC.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumRCC) rows.push(['RCC Agatston 2D', this.cuspCalciumRCC.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumNCC) rows.push(['NCC Agatston 2D', this.cuspCalciumNCC.agatstonScore2D.toFixed(0), '']);
+    rows.push(['LCC Ca Grade', String(this.cuspCalcificationGradeLCC), '']);
+    rows.push(['RCC Ca Grade', String(this.cuspCalcificationGradeRCC), '']);
+    rows.push(['NCC Ca Grade', String(this.cuspCalcificationGradeNCC), '']);
+    if (this.lvotCalcium) rows.push(['LVOT Agatston 2D', this.lvotCalcium.agatstonScore2D.toFixed(0), '']);
 
     if (this.leftCoronaryHeightMm != null) {
       rows.push(['LCA Height', this.leftCoronaryHeightMm.toFixed(1), 'mm']);
