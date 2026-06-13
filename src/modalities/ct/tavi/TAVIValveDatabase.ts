@@ -2,12 +2,21 @@
  * TAVR prosthesis sizing database.
  *
  * Sizing ranges are derived from manufacturer IFU charts:
- * - Edwards Sapien 3 / Sapien 3 Ultra
- * - Medtronic Evolut FX / Evolut PRO+
+ * - Edwards Sapien 3 / Sapien 3 Ultra (balloon-expandable)
+ * - Medtronic Evolut FX / Evolut PRO+ (self-expanding)
+ * - Boston Scientific ACURATE neo2 (self-expanding)
+ * - Abbott Navitor (self-expanding)
+ * - Meril Myval (balloon-expandable)
  *
  * Each entry maps an annular measurement range to a valve size.
  * The "recommended" flag indicates the best-fit size; adjacent sizes
  * are listed as alternatives when the patient sits at a boundary.
+ *
+ * ⚠ CLINICAL SAFETY: the numeric ranges below are nominal/typical values
+ * assembled from manufacturer literature and TAVI sizing references. IFU
+ * revisions differ by region (US/CE). They MUST be independently verified
+ * against the current, region-specific manufacturer Instructions-For-Use
+ * before any clinical use. Research use only — not for clinical decisions.
  */
 
 export interface ValveSize {
@@ -60,7 +69,79 @@ const evolutFX: ValveFamily = {
   ],
 };
 
-export const VALVE_FAMILIES: ValveFamily[] = [sapien3Ultra, evolutFX];
+// Edwards SAPIEN 3 (non-Ultra), balloon-expandable
+const sapien3: ValveFamily = {
+  name: 'Sapien 3',
+  manufacturer: 'Edwards Lifesciences',
+  type: 'balloon-expandable',
+  sizes: [
+    { size: 20, perimeterDiameterMin: 18.6, perimeterDiameterMax: 20.9, areaMin: 273, areaMax: 345, perimeterMin: 58.6, perimeterMax: 65.8 },
+    { size: 23, perimeterDiameterMin: 20.7, perimeterDiameterMax: 23.4, areaMin: 338, areaMax: 430, perimeterMin: 65.2, perimeterMax: 73.5 },
+    { size: 26, perimeterDiameterMin: 23.4, perimeterDiameterMax: 26.3, areaMin: 430, areaMax: 546, perimeterMin: 73.5, perimeterMax: 82.8 },
+    { size: 29, perimeterDiameterMin: 26.2, perimeterDiameterMax: 29.5, areaMin: 540, areaMax: 683, perimeterMin: 82.4, perimeterMax: 92.7 },
+  ],
+};
+
+// Medtronic Evolut PRO+, self-expanding
+const evolutProPlus: ValveFamily = {
+  name: 'Evolut PRO+',
+  manufacturer: 'Medtronic',
+  type: 'self-expanding',
+  sizes: [
+    { size: 23, perimeterDiameterMin: 18.0, perimeterDiameterMax: 20.0, areaMin: 254, areaMax: 314, perimeterMin: 56.5, perimeterMax: 62.8 },
+    { size: 26, perimeterDiameterMin: 20.0, perimeterDiameterMax: 23.0, areaMin: 314, areaMax: 415, perimeterMin: 62.8, perimeterMax: 72.3 },
+    { size: 29, perimeterDiameterMin: 23.0, perimeterDiameterMax: 26.0, areaMin: 415, areaMax: 531, perimeterMin: 72.3, perimeterMax: 81.7 },
+    { size: 34, perimeterDiameterMin: 26.0, perimeterDiameterMax: 30.0, areaMin: 531, areaMax: 707, perimeterMin: 81.7, perimeterMax: 94.2 },
+  ],
+};
+
+// Boston Scientific ACURATE neo2, self-expanding (labels S/M/L → 23/25/27)
+const acurateNeo2: ValveFamily = {
+  name: 'ACURATE neo2',
+  manufacturer: 'Boston Scientific',
+  type: 'self-expanding',
+  sizes: [
+    { size: 23, perimeterDiameterMin: 21.0, perimeterDiameterMax: 23.0, areaMin: 346, areaMax: 415, perimeterMin: 66.0, perimeterMax: 72.3 },
+    { size: 25, perimeterDiameterMin: 23.0, perimeterDiameterMax: 25.0, areaMin: 415, areaMax: 491, perimeterMin: 72.3, perimeterMax: 78.5 },
+    { size: 27, perimeterDiameterMin: 25.0, perimeterDiameterMax: 27.0, areaMin: 491, areaMax: 573, perimeterMin: 78.5, perimeterMax: 84.8 },
+  ],
+};
+
+// Abbott Navitor, self-expanding
+const navitor: ValveFamily = {
+  name: 'Navitor',
+  manufacturer: 'Abbott',
+  type: 'self-expanding',
+  sizes: [
+    { size: 23, perimeterDiameterMin: 19.0, perimeterDiameterMax: 21.0, areaMin: 284, areaMax: 346, perimeterMin: 59.7, perimeterMax: 66.0 },
+    { size: 25, perimeterDiameterMin: 21.0, perimeterDiameterMax: 23.0, areaMin: 346, areaMax: 415, perimeterMin: 66.0, perimeterMax: 72.3 },
+    { size: 27, perimeterDiameterMin: 23.0, perimeterDiameterMax: 25.0, areaMin: 415, areaMax: 491, perimeterMin: 72.3, perimeterMax: 78.5 },
+    { size: 29, perimeterDiameterMin: 25.0, perimeterDiameterMax: 27.0, areaMin: 491, areaMax: 573, perimeterMin: 78.5, perimeterMax: 84.8 },
+  ],
+};
+
+// Meril Myval (standard nominal sizes), balloon-expandable
+const myval: ValveFamily = {
+  name: 'Myval',
+  manufacturer: 'Meril Life Sciences',
+  type: 'balloon-expandable',
+  sizes: [
+    { size: 20, perimeterDiameterMin: 18.0, perimeterDiameterMax: 20.5, areaMin: 254, areaMax: 330, perimeterMin: 56.5, perimeterMax: 64.4 },
+    { size: 23, perimeterDiameterMin: 20.5, perimeterDiameterMax: 23.5, areaMin: 330, areaMax: 434, perimeterMin: 64.4, perimeterMax: 73.8 },
+    { size: 26, perimeterDiameterMin: 23.5, perimeterDiameterMax: 26.5, areaMin: 434, areaMax: 552, perimeterMin: 73.8, perimeterMax: 83.3 },
+    { size: 29, perimeterDiameterMin: 26.5, perimeterDiameterMax: 29.5, areaMin: 552, areaMax: 683, perimeterMin: 83.3, perimeterMax: 92.7 },
+  ],
+};
+
+export const VALVE_FAMILIES: ValveFamily[] = [
+  sapien3,
+  sapien3Ultra,
+  evolutFX,
+  evolutProPlus,
+  acurateNeo2,
+  navitor,
+  myval,
+];
 
 export interface ValveSizeRecommendation {
   family: ValveFamily;

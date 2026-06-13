@@ -1634,6 +1634,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     URL.revokeObjectURL(url);
   }, [session, annulus, fluoro, valveRecs, risks]);
 
+  // Export measurements as CSV (Excel / spreadsheet).
+  const exportCsvReport = useCallback(() => {
+    const csv = session.csvReport();
+    // Prepend UTF-8 BOM so Excel renders mm²/° and quoted cells correctly.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `TAVR_Report_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [session]);
+
   const exportPdfReport = useCallback(async (encapsulate: boolean) => {
     const { buildPdfReport, downloadPdf } = await import('../../../shared/dicom/pdfReport');
     const { downloadEncapsulatedPdf } = await import('../../../shared/dicom/encapsulatedPdf');
@@ -2983,6 +2996,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               </button>
               <button className="tavi-button tavi-button-export" onClick={exportReport} style={{ flex: 1 }}>
                 Export Text
+              </button>
+              <button className="tavi-button tavi-button-export" onClick={exportCsvReport} style={{ flex: 1 }} title="Export measurements as CSV (Excel/spreadsheet)">
+                Export CSV
               </button>
               <button className="tavi-button tavi-button-export" onClick={() => void exportPdfReport(false)} style={{ flex: 1 }} title="PDF report">
                 Export PDF
