@@ -6,6 +6,7 @@ import {
   intersectAabb,
   marchRangeAlongRay,
   pointInPolygon,
+  readVoxelHu,
   runScalpelErase,
   shouldEraseVoxel,
   type ScalpelVolumeLike,
@@ -129,6 +130,59 @@ describe('scalpelRayMarch', () => {
 
     const center = scalarData[5 * dims[0] * dims[1] + 5 * dims[0] + 5];
     expect(center).toBe(SCALPEL_AIR_HU);
+  });
+
+  it('readVoxelHu uses VTK scalar array when getAtIJK returns null', () => {
+    const dims: [number, number, number] = [4, 4, 4];
+    const scalarData = new Int16Array(64).fill(250);
+    const vm = { getAtIJK: () => null as number | null, setAtIJK: () => {} };
+    expect(readVoxelHu(1, 1, 1, dims, vm, scalarData, null)).toBe(250);
+    expect(readVoxelHu(1, 1, 1, dims, vm, null, null)).toBeNull();
+  });
+
+  it('runScalpelErase erases when getAtIJK is null but VTK scalars are populated', () => {
+    const dims: [number, number, number] = [10, 10, 10];
+    const scalarData = new Int16Array(dims[0] * dims[1] * dims[2]).fill(-1024);
+    for (let k = 3; k <= 6; k++) {
+      for (let j = 3; j <= 6; j++) {
+        for (let i = 3; i <= 6; i++) {
+          scalarData[k * dims[0] * dims[1] + j * dims[0] + i] = 500;
+        }
+      }
+    }
+
+    const volume: ScalpelVolumeLike = {
+      voxelManager: {
+        getAtIJK: () => null,
+        setAtIJK: (i, j, k, value) => {
+          scalarData[k * dims[0] * dims[1] + j * dims[0] + i] = value;
+        },
+        getCompleteScalarDataArray: () => scalarData,
+        setCompleteScalarDataArray: (data) => scalarData.set(data),
+      },
+      imageData: {
+        getDimensions: () => dims,
+        getSpacing: () => [1, 1, 1],
+        getBounds: () => [0, 9, 0, 9, 0, 9],
+        worldToIndex: (world) => [world[0], world[1], world[2]],
+        getPointData: () => ({
+          getScalars: () => ({ getData: () => scalarData }),
+        }),
+      },
+      scalarData,
+    };
+
+    const viewport: ScalpelViewportLike = {
+      getCamera: () => ({
+        position: [5, 5, -20],
+        focalPoint: [5, 5, 5],
+        parallelProjection: false,
+      }),
+      canvasToWorld: ([cx, cy]) => [cx, cy, 5],
+    };
+
+    const stats = runScalpelErase(viewport, volume, [[3, 3], [7, 3], [7, 7], [3, 7]]);
+    expect(stats?.erased).toBeGreaterThan(0);
   });
 
   it('runScalpelErase reports mapFailures when canvasToWorld is missing', () => {

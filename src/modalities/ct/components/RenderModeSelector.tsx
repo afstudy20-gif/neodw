@@ -350,8 +350,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
   const markVolumeFramesModified = useCallback((volume: any, viewport: cornerstone.Types.IVolumeViewport, modifiedSlices?: Set<number>) => {
     const texture = volume?.vtkOpenGLTexture;
-    if (texture?.setUpdatedFrame && modifiedSlices?.size) {
-      for (const kk of modifiedSlices) {
+    const usedPerFrameTextureUpdate = !!(texture?.setUpdatedFrame && modifiedSlices?.size);
+    if (usedPerFrameTextureUpdate) {
+      for (const kk of modifiedSlices!) {
         try { texture.setUpdatedFrame(kk); } catch { /* ignore */ }
       }
     } else if (volume?.invalidateVolume) {
@@ -378,7 +379,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       engine?.render();
     } catch { /* ignore */ }
 
-    // Fallback: Re-bind the volume to force the WebGL texture to completely rebuild from cached image arrays.
+    // Re-bind only when per-slice texture updates are unavailable. Re-binding streaming
+    // volumes reloads from DICOM cache and can undo in-place scalar edits (scalpel erase).
+    if (usedPerFrameTextureUpdate) return;
+
     try {
       const engine = cornerstone.getRenderingEngine(renderingEngineId);
       if (engine && viewport) {
@@ -740,13 +744,14 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // Use DOCUMENT-level listeners to bypass any VTK event capturing.
     // Filter by checking if mouse is within the canvas bounding rect.
     const isInCanvas = (e: MouseEvent) => {
-      const rect = canvas!.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       return e.clientX >= rect.left && e.clientX <= rect.right &&
              e.clientY >= rect.top && e.clientY <= rect.bottom;
     };
 
+    // Match HUProbeOverlay / region-grow: coords relative to viewport.element
     const toLocal = (e: MouseEvent): [number, number] => {
-      const rect = canvas!.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       return [e.clientX - rect.left, e.clientY - rect.top];
     };
 

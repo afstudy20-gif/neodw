@@ -148,13 +148,34 @@ export function marchRangeAlongRay(
   );
   if (focalDist < 1e-3) return null;
 
-  return { tMin: focalDist * 0.05, tMax: focalDist * 2.5 };
+  // Align with HUProbeOverlay ray-march window (0.2×–2× focal distance).
+  return { tMin: focalDist * 0.2, tMax: focalDist * 2 };
 }
 
 export function shouldEraseVoxel(hu: number | null | undefined, eraseValue = SCALPEL_AIR_HU): boolean {
   if (hu === null || hu === undefined) return false;
   if (hu <= SCALPEL_TISSUE_MIN_HU) return false;
   return hu !== eraseValue;
+}
+
+/** Prefer live VTK/scalar arrays — streaming volumes often return null from getAtIJK. */
+export function readVoxelHu(
+  ii: number,
+  jj: number,
+  kk: number,
+  dims: Point3,
+  vm: ScalpelVolumeLike['voxelManager'],
+  vtkScalarData: Int16Array | Float32Array | null | undefined,
+  scalarData: Int16Array | Float32Array | null,
+): number | null | undefined {
+  const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
+  if (vtkScalarData && voxelKey >= 0 && voxelKey < vtkScalarData.length) {
+    return vtkScalarData[voxelKey];
+  }
+  if (scalarData && voxelKey >= 0 && voxelKey < scalarData.length) {
+    return scalarData[voxelKey];
+  }
+  return vm.getAtIJK(ii, jj, kk);
 }
 
 export function collectPolygonRaySamples(
@@ -257,7 +278,7 @@ export function runScalpelErase(
     const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
     if (erasedSet.has(voxelKey)) return;
 
-    const hu = vm.getAtIJK(ii, jj, kk);
+    const hu = readVoxelHu(ii, jj, kk, dims, vm, vtkScalarData, scalarData);
     if (!shouldEraseVoxel(hu, eraseValue)) return;
 
     vm.setAtIJK(ii, jj, kk, eraseValue);
