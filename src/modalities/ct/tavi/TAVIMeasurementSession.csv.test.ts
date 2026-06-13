@@ -22,14 +22,16 @@ function geom(overrides: Partial<TAVIGeometryResult> = {}): TAVIGeometryResult {
 }
 
 describe('TAVIMeasurementSession.csvReport', () => {
-  it('emits a header row plus the always-present access rows for an empty session', () => {
+  it('emits a header row plus the always-present cusp-grade and access rows for an empty session', () => {
     const s = new TAVIMeasurementSession();
     const r = rows(s.csvReport());
     expect(r[0]).toEqual(['Parameter', 'Value', 'Unit']);
-    // Empty session has no annulus/structure rows — only the 2 access rows follow.
-    expect(r).toHaveLength(3);
-    expect(r[1][0]).toBe('Planned Access');
-    expect(r[2][0]).toBe('Planned Pigtail Access');
+    // Empty session: header + LCC/RCC/NCC Ca Grade (always emitted) + 2 access rows.
+    const labels = r.map((row) => row[0]);
+    expect(labels).toEqual([
+      'Parameter', 'LCC Ca Grade', 'RCC Ca Grade', 'NCC Ca Grade',
+      'Planned Access', 'Planned Pigtail Access',
+    ]);
   });
 
   it('every cell is double-quoted and every row has exactly 3 columns', () => {
