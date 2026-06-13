@@ -2,12 +2,12 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import {
-  SCALPEL_AIR_HU,
   addScaled,
   buildViewRay,
   collectPolygonRaySamples,
   marchRangeAlongRay,
   shouldEraseVoxel,
+  eraseValueForScalarType,
 } from './scalpelRayMarch';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
@@ -349,10 +349,20 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
   }, []);
 
-  const getTransparentVoxelValue = useCallback((_volume: any): number => {
-    // CT VRT presets map -3024 HU to zero opacity. Using 0 (water) leaves erased
-    // voxels visible as soft tissue — the most common reason scalpel "does nothing".
-    return SCALPEL_AIR_HU;
+  const getTransparentVoxelValue = useCallback((volume: any): number => {
+    // The erase value must be expressed in the array's STORED units, not raw HU.
+    // For an UNSIGNED scalar array (Uint16 CT, PixelRepresentation 0) writing a
+    // raw −3024 wraps to a huge dense value — the structure gets brighter instead
+    // of disappearing. eraseValueForScalarType returns 0 (air) for unsigned data
+    // and −3024 for signed/float, where −3024 HU maps to zero VRT opacity.
+    let ctorName: string | undefined;
+    try {
+      const firstImageId = volume?.imageIds?.[0];
+      const img = firstImageId ? (cornerstone.cache.getImage(firstImageId) as any) : null;
+      const arr = img?.voxelManager?.getScalarData?.() ?? volume?.voxelManager?.getCompleteScalarDataArray?.();
+      ctorName = arr?.constructor?.name;
+    } catch { /* ignore */ }
+    return eraseValueForScalarType(ctorName);
   }, []);
 
   const markVolumeFramesModified = useCallback((volume: any, viewport: cornerstone.Types.IVolumeViewport, modifiedSlices?: Set<number>) => {
@@ -624,6 +634,24 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
     }
 
+    // Read-back verification: confirm the erase value actually landed in the
+    // LIVE per-image array the GPU texture uploads from (cache.getImage →
+    // voxelManager.getScalarData). If `wrote` is false, the write target is
+    // wrong; if true but the structure still shows, it's a texture-refresh issue.
+    let readbackOk: boolean | null = null;
+    let scalarTypeName: string | undefined;
+    if (erasedSet.size > 0) {
+      const anyKey = erasedSet.values().next().value as number;
+      const kk = Math.floor(anyKey / (dims[0] * dims[1]));
+      const within = anyKey - kk * dims[0] * dims[1];
+      try {
+        const img = cornerstone.cache.getImage(volume.imageIds[kk]) as any;
+        const liveArr = img?.voxelManager?.getScalarData?.();
+        scalarTypeName = liveArr?.constructor?.name;
+        if (liveArr) readbackOk = liveArr[within] === ERASE_VALUE;
+      } catch { /* ignore */ }
+    }
+
     (window as any).__lastScalpelStats = {
       erased,
       modifiedSlices: modifiedSlices.size,
@@ -631,13 +659,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       rayHits,
       mapFailures,
       eraseValue: ERASE_VALUE,
+      scalarTypeName,
+      readbackOk,
       dims,
       bounds,
     };
 
     console.log(
       `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}, ` +
-      `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}`
+      `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}, ` +
+      `scalarType=${scalarTypeName}, readbackOk=${readbackOk}`
     );
 
     if (erased > 0) {

@@ -7,7 +7,26 @@ import {
   marchRangeAlongRay,
   pointInPolygon,
   shouldEraseVoxel,
+  eraseValueForScalarType,
 } from './scalpelRayMarch';
+
+describe('eraseValueForScalarType', () => {
+  it('returns 0 (air, stored units) for unsigned arrays to avoid HU wrap-around', () => {
+    expect(eraseValueForScalarType('Uint16Array')).toBe(0);
+    expect(eraseValueForScalarType('Uint8Array')).toBe(0);
+    expect(eraseValueForScalarType('Uint32Array')).toBe(0);
+  });
+  it('returns -3024 HU for signed / float arrays (maps to zero VRT opacity)', () => {
+    expect(eraseValueForScalarType('Int16Array')).toBe(SCALPEL_AIR_HU);
+    expect(eraseValueForScalarType('Float32Array')).toBe(SCALPEL_AIR_HU);
+    expect(eraseValueForScalarType('Int8Array')).toBe(SCALPEL_AIR_HU);
+  });
+  it('defaults to -3024 for unknown / missing type', () => {
+    expect(eraseValueForScalarType(undefined)).toBe(SCALPEL_AIR_HU);
+    expect(eraseValueForScalarType(null)).toBe(SCALPEL_AIR_HU);
+    expect(eraseValueForScalarType('')).toBe(SCALPEL_AIR_HU);
+  });
+});
 
 describe('scalpelRayMarch', () => {
   it('detects points inside a polygon', () => {
