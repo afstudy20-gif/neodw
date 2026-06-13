@@ -15,7 +15,7 @@ import {
   TAVIStructureSinusPoints,
   TAVIStructureMembranousSeptum,
 } from '../tavi/TAVIMeasurementSession';
-import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
+import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, SinusLabel, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
 import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
@@ -808,6 +808,39 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
   }, [session, renderingEngineId]);
 
+  // Capture a single sinus width from the two most-recent Probe annotations.
+  const captureSinusWidth = useCallback((label: SinusLabel) => {
+    const engine = getEngine();
+    if (!engine) return;
+    let probes: any[] = [];
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      if (ps?.length) probes = ps;
+    }
+    if (probes.length < 2) return; // need two points across the sinus belly
+    const a = probes[probes.length - 2].data.handles.points[0];
+    const b = probes[probes.length - 1].data.handles.points[0];
+    session.captureSinusDiameter(
+      label,
+      { x: a[0], y: a[1], z: a[2] },
+      { x: b[0], y: b[1], z: b[2] }
+    );
+    // Clean up probe annotations across viewports (mirror captureCoronaryPoint).
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      if (ps) {
+        for (const probe of [...ps]) {
+          if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
+        }
+      }
+    }
+    forceUpdate();
+  }, [session, renderingEngineId]);
+
   /** Capture a cusp hinge point from standard MPR views (before double-oblique mode) */
   const captureCuspFromMPR = useCallback((cusp: 'lcc' | 'ncc' | 'rcc') => {
     const engine = getEngine();
@@ -1581,6 +1614,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         lines.push(`  ${name}: —`);
       }
     }
+    for (const lbl of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = session.sinusDiameters[lbl];
+      if (d) lines.push(`  Sinus ${lbl}: ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` | h ${fmt(d.heightMm)} mm` : ''}`);
+    }
     lines.push('');
 
     // Valve sizing
@@ -1707,6 +1744,20 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         { label: 'Aortic Angulation', value: fmt(session.horizontalAortaAngleDegrees), unit: '°' },
       ],
     });
+
+    if (Object.keys(session.sinusDiameters).length > 0) {
+      sections.push({
+        title: 'Sinus of Valsalva',
+        rows: (['LCS', 'RCS', 'NCS'] as SinusLabel[])
+          .map((lbl) => session.sinusDiameters[lbl])
+          .filter((d): d is NonNullable<typeof d> => !!d)
+          .map((d) => ({
+            label: d.label,
+            value: fmt(d.diameterMm),
+            unit: d.heightMm != null ? `mm · h ${fmt(d.heightMm)} mm` : 'mm',
+          })),
+      });
+    }
 
     sections.push({
       title: 'Risk Assessment',
@@ -2032,6 +2083,23 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               </button>
                             </div>
                           )}
+                          {/* Per-sinus diameters (LCS / RCS / NCS) — two Probe clicks each */}
+                          <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            Per-sinus width — place 2 probes across each sinus, then Confirm.
+                          </div>
+                          {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
+                            const d = session.sinusDiameters[lbl];
+                            return (
+                              <PlaceRow
+                                key={lbl}
+                                label={`${lbl}${d ? ` ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)}` : ''}` : ''}`}
+                                captured={!!d}
+                                onPlace={() => enableProbeTool()}
+                                onConfirm={() => captureSinusWidth(lbl)}
+                                onUndo={() => { session.clearSinusDiameter(lbl); enableProbeTool(); forceUpdate(); }}
+                              />
+                            );
+                          })}
                         </Section>
 
                         {/* ── 4. NC Cusp Guide ── */}
@@ -3392,6 +3460,16 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <GeoRow label="Ascending Aorta" geo={session.ascendingAortaGeometry} />
                 <GeoRow label="STJ" geo={session.stjGeometry} />
                 <GeoRow label="Sinus (SOV)" geo={session.sinusGeometry} />
+                {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
+                  const d = session.sinusDiameters[lbl];
+                  return d ? (
+                    <Row
+                      key={lbl}
+                      label={`Sinus ${lbl}`}
+                      value={`${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)} mm` : ''}`}
+                    />
+                  ) : null;
+                })}
                 <GeoRow label="Annulus" geo={annulus} />
                 <GeoRow label="LVOT" geo={session.lvotGeometry} />
               </div>

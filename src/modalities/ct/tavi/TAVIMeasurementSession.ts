@@ -6,6 +6,8 @@ import {
   TAVICalciumResult,
   TAVIFluoroAngleResult,
   TAVIProjectionConfirmationResult,
+  TAVISinusDiameterResult,
+  SinusLabel,
   AccessRoute,
   PigtailAccessRoute,
 } from './TAVITypes';
@@ -19,6 +21,7 @@ export const TAVIStructureSinus = 'sinus';
 export const TAVIStructureSTJ = 'stj';
 export const TAVIStructureAscendingAorta = 'ascending-aorta';
 export const TAVIStructureSinusPoints = 'sinus-points';
+export const TAVIStructureSinusDiameters = 'sinus-diameters';
 export const TAVIStructureLVOT = 'lvot';
 export const TAVIStructureMembranousSeptum = 'membranous-septum';
 
@@ -74,6 +77,12 @@ export class TAVIMeasurementSession {
   public assistedAnnulusGeometry?: TAVIGeometryResult | null;
   public lvotGeometry?: TAVIGeometryResult | null;
   public sinusGeometry?: TAVIGeometryResult | null;
+  /** Per-sinus width point pairs (LCS/RCS/NCS), each two world points. */
+  public sinusDiameterPoints: Partial<Record<SinusLabel, { a: TAVIVector3D; b: TAVIVector3D }>> = {};
+  /** Optional per-sinus floor (nadir) points for sinus-height computation. */
+  public sinusFloorPoints: Partial<Record<SinusLabel, TAVIVector3D>> = {};
+  /** Computed per-sinus diameter + height results (derived in recompute). */
+  public sinusDiameters: Partial<Record<SinusLabel, TAVISinusDiameterResult>> = {};
   public stjGeometry?: TAVIGeometryResult | null;
   public ascendingAortaGeometry?: TAVIGeometryResult | null;
 
@@ -132,6 +141,9 @@ export class TAVIMeasurementSession {
     this.assistedAnnulusGeometry = null;
     this.lvotGeometry = null;
     this.sinusGeometry = null;
+    this.sinusDiameterPoints = {};
+    this.sinusFloorPoints = {};
+    this.sinusDiameters = {};
     this.stjGeometry = null;
     this.ascendingAortaGeometry = null;
     this.annulusCalcium = null;
@@ -229,6 +241,25 @@ export class TAVIMeasurementSession {
     if (id === 'lcc') this.cuspPixelSampleLCC = sample;
     else if (id === 'rcc') this.cuspPixelSampleRCC = sample;
     else this.cuspPixelSampleNCC = sample;
+    this.recompute();
+  }
+
+  /** Capture/replace a single sinus diameter (two world points). */
+  public captureSinusDiameter(label: SinusLabel, a: TAVIVector3D, b: TAVIVector3D): void {
+    this.sinusDiameterPoints = { ...this.sinusDiameterPoints, [label]: { a: { ...a }, b: { ...b } } };
+    this.recompute();
+  }
+
+  /** Capture/replace the floor (nadir) point of a sinus for height measurement. */
+  public captureSinusFloor(label: SinusLabel, floor: TAVIVector3D): void {
+    this.sinusFloorPoints = { ...this.sinusFloorPoints, [label]: { ...floor } };
+    this.recompute();
+  }
+
+  /** Clear one sinus's diameter + floor measurements. */
+  public clearSinusDiameter(label: SinusLabel): void {
+    const dp = { ...this.sinusDiameterPoints }; delete dp[label]; this.sinusDiameterPoints = dp;
+    const fp = { ...this.sinusFloorPoints }; delete fp[label]; this.sinusFloorPoints = fp;
     this.recompute();
   }
 
@@ -377,6 +408,20 @@ export class TAVIMeasurementSession {
           this.ascendingAortaSnapshot.planeNormal
         )
       : null;
+
+    // Per-sinus (LCS/RCS/NCS) diameters + optional heights (floor → STJ plane).
+    this.sinusDiameters = {};
+    const stjForSinus = this.stjGeometry;
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const pts = this.sinusDiameterPoints[label];
+      if (!pts) continue;
+      const diameterMm = TAVIGeometry.vectorDistance(pts.a, pts.b);
+      const floorPoint = this.sinusFloorPoints[label];
+      const heightMm = floorPoint && stjForSinus
+        ? TAVIGeometry.sinusHeightToPlane(floorPoint, stjForSinus.centroid, stjForSinus.planeNormal)
+        : undefined;
+      this.sinusDiameters[label] = { label, pointA: pts.a, pointB: pts.b, diameterMm, floorPoint, heightMm };
+    }
 
     const calc = (sample?: { pixelValues?: Float32Array; pixelAreaMm2?: number } | null) =>
       sample?.pixelValues && sample.pixelAreaMm2
@@ -572,6 +617,10 @@ export class TAVIMeasurementSession {
         lines.push(`${name}: ${r(geom.minimumDiameterMm)}×${r(geom.maximumDiameterMm)} mm, area ${r(geom.areaMm2)} mm²`);
       }
     }
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = this.sinusDiameters[label];
+      if (d) lines.push(`Sinus ${label}: ${r(d.diameterMm)} mm${d.heightMm != null ? `, height ${r(d.heightMm)} mm` : ''}`);
+    }
     lines.push('');
 
     // Implantation angles
@@ -684,6 +733,13 @@ export class TAVIMeasurementSession {
         rows.push([`${name} Area`, geom.areaMm2.toFixed(1), 'mm2']);
         rows.push([`${name} Perimeter`, geom.perimeterMm.toFixed(1), 'mm']);
       }
+    }
+
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = this.sinusDiameters[label];
+      if (!d) continue;
+      rows.push([`Sinus ${label} Diameter`, d.diameterMm.toFixed(1), 'mm']);
+      if (d.heightMm != null) rows.push([`Sinus ${label} Height`, d.heightMm.toFixed(1), 'mm']);
     }
 
     // Multi-level geometries

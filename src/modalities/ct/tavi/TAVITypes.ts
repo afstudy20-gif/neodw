@@ -21,6 +21,20 @@ export interface TAVIGeometryResult {
   minorAxisDirection: TAVIVector3D;
 }
 
+export type SinusLabel = 'LCS' | 'RCS' | 'NCS'; // Left / Right / Non-coronary sinus
+
+export interface TAVISinusDiameterResult {
+  label: SinusLabel;
+  /** Two world points defining the sinus width. */
+  pointA: TAVIVector3D;
+  pointB: TAVIVector3D;
+  diameterMm: number;
+  /** Optional sinus floor (nadir) world point for the height measurement. */
+  floorPoint?: TAVIVector3D;
+  /** |perpendicular distance from floor to the STJ plane|, mm. */
+  heightMm?: number;
+}
+
 export interface TAVICalciumResult {
   thresholdHU: number;
   totalAreaMm2: number;

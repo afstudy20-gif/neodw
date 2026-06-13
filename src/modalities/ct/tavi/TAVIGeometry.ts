@@ -443,6 +443,15 @@ export class TAVIGeometry {
     return this.vectorDot(this.vectorSubtract(point, origin), normalizedNormal);
   }
 
+  /** Sinus height = |perpendicular distance from sinus floor to the STJ plane|, mm. */
+  static sinusHeightToPlane(
+    floor: TAVIVector3D,
+    planeOrigin: TAVIVector3D,
+    planeNormal: TAVIVector3D
+  ): number {
+    return Math.abs(this.distanceFromPointToPlane(floor, planeOrigin, planeNormal));
+  }
+
   static fluoroAngleForPlaneNormal(planeNormal: TAVIVector3D): TAVIFluoroAngleResult {
     const normal = this.vectorNormalize(planeNormal);
     if (this.vectorIsZero(normal)) return {
