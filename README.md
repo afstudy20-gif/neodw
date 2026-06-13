@@ -48,9 +48,14 @@ npm run preview    # serve build locally
 | Environment | COOP / COEP | Effect |
 |---|---|---|
 | **Vite dev** (`vite.config.ts`) | `same-origin` + `require-corp` | Full `SharedArrayBuffer`; best for local volume debugging |
-| **Production** (`nginx.conf`, Netlify, Vercel) | **Not set** | Single-threaded WASM fallback; avoids breaking third-party embeds on the welcome page |
+| **Production** (`nginx.conf`, Netlify, Vercel) | `same-origin` + `credentialless` | `SharedArrayBuffer` available; multi-threaded WASM volume decode |
 
-Production configs intentionally omit COOP/COEP — see the comment in `nginx.conf`. Volume rendering still works via the fallback path. If you later need SAB in production, prefer `Cross-Origin-Embedder-Policy: credentialless` and self-host fonts instead of `require-corp`.
+Production uses `credentialless` (not `require-corp`) so no-credentials subresources without a `Cross-Origin-Resource-Policy` header still load. Two changes were made to land this safely:
+
+- Fonts are self-hosted via `@fontsource/inter` and `@fontsource/jetbrains-mono` (imported in `src/main.tsx`), so the page no longer depends on `fonts.googleapis.com` / `fonts.gstatic.com`.
+- The third-party MapMyVisitors widget on the Welcome page was removed; the in-app `<WorldMap>` SVG (rendered from `ipapi.co` + `abacus.jasoncameron.dev` data) covers the same use case without a script-tag embed.
+
+If you add a new third-party embed, verify it sends `Cross-Origin-Resource-Policy: cross-origin` (or runs as a no-credentials subresource that `credentialless` is happy to load) before merging.
 
 ### Debugging DICOM files
 
