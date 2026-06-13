@@ -1,6 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
+import {
+  SCALPEL_AIR_HU,
+  addScaled,
+  buildViewRay,
+  collectPolygonRaySamples,
+  marchRangeAlongRay,
+  shouldEraseVoxel,
+} from './scalpelRayMarch';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
 type RenderMode =
@@ -341,19 +349,11 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
   }, []);
 
-  const getTransparentVoxelValue = useCallback((volume: any): number => {
-    const vtkScalarData = volume?.imageData?.getPointData?.()?.getScalars?.()?.getData?.();
-    const firstSliceData = getSliceScalarData(volume, 0);
-    const dataType = [
-      vtkScalarData?.constructor?.name,
-      firstSliceData?.constructor?.name,
-      volume?.dataType,
-    ].find(Boolean);
-
-    // Unsigned DICOM volume data commonly stores air/background at raw value 0
-    // after modality rescale, while signed/float HU data can safely use -3024.
-    return String(dataType ?? '').startsWith('Uint') ? 0 : -3024;
-  }, [getSliceScalarData]);
+  const getTransparentVoxelValue = useCallback((_volume: any): number => {
+    // CT VRT presets map -3024 HU to zero opacity. Using 0 (water) leaves erased
+    // voxels visible as soft tissue — the most common reason scalpel "does nothing".
+    return SCALPEL_AIR_HU;
+  }, []);
 
   const markVolumeFramesModified = useCallback((volume: any, viewport: cornerstone.Types.IVolumeViewport, modifiedSlices?: Set<number>) => {
     const texture = volume?.vtkOpenGLTexture;
@@ -547,13 +547,12 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     const ERASE_VALUE = getTransparentVoxelValue(volume);
 
-    // Fast path: direct copy of the live VTK scalar array
     const vtkScalars = imageData.getPointData?.()?.getScalars?.();
     const vtkScalarData = vtkScalars?.getData?.();
-    
-    let scalarData = null;
+
+    let scalarData: ScalpelBackupArray | null = null;
     try {
-      scalarData = vm.getCompleteScalarDataArray?.();
+      scalarData = vm.getCompleteScalarDataArray?.() ?? null;
     } catch { /* ignore */ }
     if (!scalarData) {
       try {
@@ -561,8 +560,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       } catch { /* ignore */ }
     }
 
-    // Cache slice arrays for fast writes during ray-marching
-    const sliceDataCache: { [kk: number]: any } = {};
+    const sliceDataCache: { [kk: number]: ScalpelBackupArray | null | undefined } = {};
     const getSliceData = (kk: number) => {
       if (sliceDataCache[kk] !== undefined) return sliceDataCache[kk];
       sliceDataCache[kk] = getSliceScalarData(volume, kk);
@@ -571,166 +569,58 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     const canCommitCompleteArray = !!scalarData && typeof vm.setCompleteScalarDataArray === 'function';
 
-    // View direction
-    const camDir = [
-      cam.focalPoint[0] - cam.position[0],
-      cam.focalPoint[1] - cam.position[1],
-      cam.focalPoint[2] - cam.position[2],
-    ];
-    const camLen = Math.sqrt(camDir[0] ** 2 + camDir[1] ** 2 + camDir[2] ** 2);
-    const viewDirNorm = [camDir[0] / camLen, camDir[1] / camLen, camDir[2] / camLen];
-
-    const isParallel = cam.parallelProjection;
-
-    // Build bounding box of drawn region
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const [px, py] of canvasPoints) {
-      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
-      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-    }
-
-    // Point-in-polygon test (ray casting algorithm)
-    const pointInPoly = (x: number, y: number): boolean => {
-      let inside = false;
-      const n = canvasPoints.length;
-      for (let i = 0, j = n - 1; i < n; j = i++) {
-        const [xi, yi] = canvasPoints[i];
-        const [xj, yj] = canvasPoints[j];
-        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
-          inside = !inside;
-        }
-      }
-      return inside;
-    };
-
-    const step = 2;
-    const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.45;
+    const rayStep = Math.min(spacing[0], spacing[1], spacing[2]) * 0.5;
     let erased = 0;
     const modifiedSlices = new Set<number>();
-    const erasedSet = new Set<number>(); // deduplicate voxel writes
-    const dpr = window.devicePixelRatio || 1;
+    const erasedSet = new Set<number>();
     let rays = 0;
     let rayHits = 0;
-    let dprFallbackHits = 0;
+    let mapFailures = 0;
 
-    const makeRay = (worldTarget: number[]) => {
-      if (isParallel) {
-        return {
-          rayDir: [...viewDirNorm],
-          startPoint: [...worldTarget],
-        };
-      }
+    const writeErasedVoxel = (ii: number, jj: number, kk: number) => {
+      const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
+      if (erasedSet.has(voxelKey)) return;
 
-      const dir = [
-        worldTarget[0] - cam.position![0],
-        worldTarget[1] - cam.position![1],
-        worldTarget[2] - cam.position![2],
-      ];
-      const dLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2 + dir[2] ** 2);
-      return {
-        rayDir: [dir[0] / dLen, dir[1] / dLen, dir[2] / dLen],
-        startPoint: [...cam.position!],
-      };
+      const hu = vm.getAtIJK(ii, jj, kk);
+      if (!shouldEraseVoxel(hu, ERASE_VALUE)) return;
+
+      vm.setAtIJK(ii, jj, kk, ERASE_VALUE);
+      if (vtkScalarData) vtkScalarData[voxelKey] = ERASE_VALUE;
+      if (scalarData) scalarData[voxelKey] = ERASE_VALUE;
+
+      const sliceData = getSliceData(kk);
+      if (sliceData) sliceData[jj * dims[0] + ii] = ERASE_VALUE;
+
+      erasedSet.add(voxelKey);
+      modifiedSlices.add(kk);
+      erased++;
     };
 
-    const intersectAabb = (startPoint: number[], rayDir: number[]) => {
-      let tMin = -Infinity;
-      let tMax = Infinity;
+    for (const [cx, cy] of collectPolygonRaySamples(canvasPoints, 2)) {
+      rays++;
 
-      for (let i = 0; i < 3; i++) {
-        const bMin = bounds[i * 2];
-        const bMax = bounds[i * 2 + 1];
-        const o = startPoint[i];
-        const d = rayDir[i];
-
-        if (Math.abs(d) < 1e-6) {
-          if (o < bMin || o > bMax) return null;
-        } else {
-          let t1 = (bMin - o) / d;
-          let t2 = (bMax - o) / d;
-
-          if (t1 > t2) {
-            const temp = t1;
-            t1 = t2;
-            t2 = temp;
-          }
-
-          tMin = Math.max(tMin, t1);
-          tMax = Math.min(tMax, t2);
-
-          if (tMin > tMax) return null;
-        }
+      const worldTarget = viewport.canvasToWorld?.([cx, cy]);
+      if (!worldTarget) {
+        mapFailures++;
+        continue;
       }
 
-      return { tMin, tMax };
-    };
+      const viewRay = buildViewRay(cam, worldTarget);
+      if (!viewRay) continue;
 
-    const getCanvasRay = (cx: number, cy: number) => {
-      const candidates: Array<{ point: [number, number]; dprFallback: boolean }> = [
-        { point: [cx, cy], dprFallback: false },
-      ];
-      if (dpr !== 1) {
-        candidates.push({ point: [cx * dpr, cy * dpr], dprFallback: true });
-      }
+      const march = marchRangeAlongRay(viewRay.origin, viewRay.dir, bounds, cam, worldTarget);
+      if (!march) continue;
+      rayHits++;
 
-      for (const candidate of candidates) {
-        const worldTarget = (viewport as any).canvasToWorld?.(candidate.point);
-        if (!worldTarget) continue;
-        const ray = makeRay(worldTarget);
-        const hit = intersectAabb(ray.startPoint, ray.rayDir);
-        if (hit) {
-          if (candidate.dprFallback) dprFallbackHits++;
-          return { ...ray, ...hit };
-        }
-      }
+      for (let d = march.tMin; d <= march.tMax; d += rayStep) {
+        const worldPos = addScaled(viewRay.origin, viewRay.dir, d);
+        const ijk = imageData.worldToIndex(worldPos);
+        const ii = Math.round(ijk[0]);
+        const jj = Math.round(ijk[1]);
+        const kk = Math.round(ijk[2]);
 
-      return null;
-    };
-
-    for (let cx = Math.floor(minX); cx <= Math.ceil(maxX); cx += step) {
-      for (let cy = Math.floor(minY); cy <= Math.ceil(maxY); cy += step) {
-        if (!pointInPoly(cx, cy)) continue;
-        rays++;
-
-        const rayHit = getCanvasRay(cx, cy);
-        if (!rayHit) continue;
-        rayHits++;
-
-        // March along ray strictly inside the AABB [tMin, tMax]
-        for (let d = rayHit.tMin; d <= rayHit.tMax; d += rayStep) {
-          const wx = rayHit.startPoint[0] + rayHit.rayDir[0] * d;
-          const wy = rayHit.startPoint[1] + rayHit.rayDir[1] * d;
-          const wz = rayHit.startPoint[2] + rayHit.rayDir[2] * d;
-
-          const ijk = imageData.worldToIndex([wx, wy, wz]);
-          const ii = Math.round(ijk[0]);
-          const jj = Math.round(ijk[1]);
-          const kk = Math.round(ijk[2]);
-
-          if (ii < 0 || ii >= dims[0] || jj < 0 || jj >= dims[1] || kk < 0 || kk >= dims[2]) continue;
-
-          // Deduplicate: build a voxel key to avoid redundant setAtIJK calls
-          const voxelKey = kk * dims[0] * dims[1] + jj * dims[0] + ii;
-          if (erasedSet.has(voxelKey)) continue;
-
-          const hu = vm.getAtIJK(ii, jj, kk);
-          if (hu !== ERASE_VALUE && hu !== null && hu !== undefined) {
-            vm.setAtIJK(ii, jj, kk, ERASE_VALUE);
-            if (vtkScalarData) {
-              vtkScalarData[voxelKey] = ERASE_VALUE;
-            }
-            if (scalarData) {
-              scalarData[voxelKey] = ERASE_VALUE;
-            }
-            const sliceData = getSliceData(kk);
-            if (sliceData) {
-              sliceData[jj * dims[0] + ii] = ERASE_VALUE;
-            }
-            erasedSet.add(voxelKey);
-            modifiedSlices.add(kk);
-            erased++;
-          }
-        }
+        if (ii < 0 || ii >= dims[0] || jj < 0 || jj >= dims[1] || kk < 0 || kk >= dims[2]) continue;
+        writeErasedVoxel(ii, jj, kk);
       }
     }
 
@@ -739,7 +629,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       modifiedSlices: modifiedSlices.size,
       rays,
       rayHits,
-      dprFallbackHits,
+      mapFailures,
       eraseValue: ERASE_VALUE,
       dims,
       bounds,
@@ -747,7 +637,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
     console.log(
       `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}, ` +
-      `rays=${rays}, hits=${rayHits}, dprFallback=${dprFallbackHits}, eraseValue=${ERASE_VALUE}`
+      `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}`
     );
 
     if (erased > 0) {
@@ -784,19 +674,35 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // and either intercept the drag or fight with the document-capture
     // listener below, leaving the eraser non-functional.
     function getVolume3dToolGroups(): unknown[] {
+      const groups: unknown[] = [];
+      const seen = new Set<unknown>();
+      const addGroup = (tg: unknown | undefined) => {
+        if (!tg || seen.has(tg)) return;
+        seen.add(tg);
+        groups.push(tg);
+      };
+
       try {
-        const mgr = (cornerstoneTools.ToolGroupManager as unknown as {
+        const mgr = cornerstoneTools.ToolGroupManager as unknown as {
           getAllToolGroups?: () => unknown[];
-          getToolGroupForViewport?: (viewportId: string, renderingEngineId: string) => unknown;
-        });
+          getToolGroup?: (id: string) => unknown;
+        };
+
+        for (const id of ['vol3dToolGroup', 'cardiac3dToolGroup']) {
+          addGroup(mgr.getToolGroup?.(id));
+        }
+
         if (typeof mgr.getAllToolGroups === 'function') {
-          return mgr.getAllToolGroups().filter((tg) => {
+          for (const tg of mgr.getAllToolGroups()) {
             const info = (tg as { viewportsInfo?: Array<{ viewportId: string }> }).viewportsInfo;
-            return Array.isArray(info) && info.some((v) => v.viewportId === 'volume3d');
-          });
+            if (Array.isArray(info) && info.some((v) => v.viewportId === 'volume3d')) {
+              addGroup(tg);
+            }
+          }
         }
       } catch { /* ignore */ }
-      return [];
+
+      return groups;
     }
 
     function setVolume3dPrimaryToolsActive(active: boolean) {
@@ -841,18 +747,18 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
 
     if (scalpelMode === 'off') {
-      // Remove canvas & re-enable VTK interactor
       if (scalpelCanvasRef.current) {
         scalpelCanvasRef.current.remove();
         scalpelCanvasRef.current = null;
       }
-      // Re-enable VTK interactor
+      try {
+        if (viewport?.canvas) viewport.canvas.style.pointerEvents = '';
+      } catch { /* ignore */ }
       try {
         const renderer = (viewport as any)?.getRenderer?.();
         const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
         if (interactor) interactor.setEnabled(true);
       } catch { /* ignore */ }
-      // Restore tool group bindings
       setVolume3dPrimaryToolsActive(true);
       return;
     }
@@ -863,7 +769,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     // Deactivate competing tools BEFORE attaching our canvas + listeners.
     setVolume3dPrimaryToolsActive(false);
 
-    // DISABLE VTK interactor so it doesn't steal mouse events
+    // Keep VTK from stealing drags; overlay canvas receives the stroke.
+    try {
+      if (viewport.canvas) viewport.canvas.style.pointerEvents = 'none';
+    } catch { /* ignore */ }
     try {
       const renderer = (viewport as any).getRenderer?.();
       const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
@@ -877,7 +786,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     let canvas = scalpelCanvasRef.current;
     if (!canvas) {
       canvas = document.createElement('canvas');
-      canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:55;cursor:crosshair;';
+      canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:55;cursor:crosshair;touch-action:none;';
       el.style.position = 'relative';
       el.appendChild(canvas);
       scalpelCanvasRef.current = canvas;

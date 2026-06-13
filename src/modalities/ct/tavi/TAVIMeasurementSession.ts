@@ -6,6 +6,10 @@ import {
   TAVICalciumResult,
   TAVIFluoroAngleResult,
   TAVIProjectionConfirmationResult,
+  TAVISinusDiameterResult,
+  SinusLabel,
+  AccessVesselId,
+  AccessVesselResult,
   AccessRoute,
   PigtailAccessRoute,
 } from './TAVITypes';
@@ -19,8 +23,13 @@ export const TAVIStructureSinus = 'sinus';
 export const TAVIStructureSTJ = 'stj';
 export const TAVIStructureAscendingAorta = 'ascending-aorta';
 export const TAVIStructureSinusPoints = 'sinus-points';
+export const TAVIStructureSinusDiameters = 'sinus-diameters';
 export const TAVIStructureLVOT = 'lvot';
 export const TAVIStructureMembranousSeptum = 'membranous-septum';
+export const TAVIStructureThoracicAorta = 'thoracic-aorta';
+export const TAVIStructureAbdominalAorta = 'abdominal-aorta';
+export const TAVIStructureIliacLeft = 'iliac-left';
+export const TAVIStructureIliacRight = 'iliac-right';
 
 function TAVIRoundToHalfMillimeter(value: number): number {
   return Math.round(value * 2.0) / 2.0;
@@ -29,6 +38,11 @@ function TAVIRoundToHalfMillimeter(value: number): number {
 export class TAVIMeasurementSession {
   public calciumThresholdHU = 850.0;
   public cuspCalcificationGrade = 0;
+  /** Per-cusp manual calcium grades (0..3). Aggregate `cuspCalcificationGrade`
+   *  is auto-synced to the max of these in recompute() for risk scoring. */
+  public cuspCalcificationGradeLCC = 0;
+  public cuspCalcificationGradeRCC = 0;
+  public cuspCalcificationGradeNCC = 0;
   public annulusCalcificationGrade = 0;
   public useAssistedAnnulusForPlanning = false;
   public notes = '';
@@ -57,7 +71,7 @@ export class TAVIMeasurementSession {
   public sinusPointSnapshots: TAVIPointSnapshot[] = [];
   public membranousSeptumPointSnapshots: TAVIPointSnapshot[] = [];
 
-  /** Three-point cusp definition (ProSizeAV-style) */
+  /** Three-point cusp definition (structured) */
   public cuspLCC?: TAVIVector3D;
   public cuspNCC?: TAVIVector3D;
   public cuspRCC?: TAVIVector3D;
@@ -69,6 +83,17 @@ export class TAVIMeasurementSession {
   public assistedAnnulusGeometry?: TAVIGeometryResult | null;
   public lvotGeometry?: TAVIGeometryResult | null;
   public sinusGeometry?: TAVIGeometryResult | null;
+  /** Per-sinus width point pairs (LCS/RCS/NCS), each two world points. */
+  public sinusDiameterPoints: Partial<Record<SinusLabel, { a: TAVIVector3D; b: TAVIVector3D }>> = {};
+  /** Optional per-sinus floor (nadir) points for sinus-height computation. */
+  public sinusFloorPoints: Partial<Record<SinusLabel, TAVIVector3D>> = {};
+  /** Computed per-sinus diameter + height results (derived in recompute). */
+  public sinusDiameters: Partial<Record<SinusLabel, TAVISinusDiameterResult>> = {};
+
+  /** Ilio-femoral access vessel measurements keyed by vessel id. */
+  public accessVessels: Map<AccessVesselId, AccessVesselResult> = new Map();
+  /** Sheath OD (mm) selected for the access sheath-fit check. */
+  public selectedSheathOuterDiameterMm?: number | null;
   public stjGeometry?: TAVIGeometryResult | null;
   public ascendingAortaGeometry?: TAVIGeometryResult | null;
 
@@ -77,8 +102,17 @@ export class TAVIMeasurementSession {
   public sinusCalcium?: TAVICalciumResult | null;
   public stjCalcium?: TAVICalciumResult | null;
   public ascendingAortaCalcium?: TAVICalciumResult | null;
+  /** Computed per-cusp 2D Agatston (populated via captureCuspCalciumSample). */
+  public cuspCalciumLCC?: TAVICalciumResult | null;
+  public cuspCalciumRCC?: TAVICalciumResult | null;
+  public cuspCalciumNCC?: TAVICalciumResult | null;
+  /** Sampled HU pixels per cusp disc — kept so recompute() can re-run on
+   *  calciumThresholdHU change. Cusps have no contour snapshot to stamp. */
+  public cuspPixelSampleLCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
+  public cuspPixelSampleRCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
+  public cuspPixelSampleNCC?: { pixelValues: Float32Array; pixelAreaMm2: number } | null;
 
-  /** Multi-level cross-section thumbnails (ProSizeAV page 2 style) */
+  /** Multi-level cross-section thumbnails (multi-level) */
   public multiLevelThumbnails: Map<number, string> = new Map();
   /** Multi-level geometry results keyed by distance from annulus plane */
   public multiLevelGeometries: Map<number, TAVIGeometryResult> = new Map();
@@ -118,6 +152,11 @@ export class TAVIMeasurementSession {
     this.assistedAnnulusGeometry = null;
     this.lvotGeometry = null;
     this.sinusGeometry = null;
+    this.sinusDiameterPoints = {};
+    this.sinusFloorPoints = {};
+    this.sinusDiameters = {};
+    this.accessVessels = new Map();
+    this.selectedSheathOuterDiameterMm = null;
     this.stjGeometry = null;
     this.ascendingAortaGeometry = null;
     this.annulusCalcium = null;
@@ -125,6 +164,12 @@ export class TAVIMeasurementSession {
     this.sinusCalcium = null;
     this.stjCalcium = null;
     this.ascendingAortaCalcium = null;
+    this.cuspCalciumLCC = null;
+    this.cuspCalciumRCC = null;
+    this.cuspCalciumNCC = null;
+    this.cuspPixelSampleLCC = null;
+    this.cuspPixelSampleRCC = null;
+    this.cuspPixelSampleNCC = null;
     this.multiLevelThumbnails.clear();
     this.multiLevelGeometries.clear();
     this.annulusRawContourPoints = [];
@@ -141,6 +186,9 @@ export class TAVIMeasurementSession {
     this.useAssistedAnnulusForPlanning = false;
     this.calciumThresholdHU = 850.0;
     this.cuspCalcificationGrade = 0;
+    this.cuspCalcificationGradeLCC = 0;
+    this.cuspCalcificationGradeRCC = 0;
+    this.cuspCalcificationGradeNCC = 0;
     this.annulusCalcificationGrade = 0;
     this.notes = '';
   }
@@ -185,6 +233,74 @@ export class TAVIMeasurementSession {
     this.recompute();
   }
 
+  /** Attach sampled LVOT HU pixels to the LVOT snapshot so recompute() scores it. */
+  public captureLvotCalciumSample(pixelValues: Float32Array, pixelAreaMm2: number): void {
+    const base = this.lvotSnapshot ?? {
+      worldPoints: [],
+      planeOrigin: { x: 0, y: 0, z: 0 },
+      planeNormal: { x: 0, y: 0, z: 1 },
+    };
+    this.lvotSnapshot = { ...base, pixelValues, pixelAreaMm2 };
+    this.recompute();
+  }
+
+  /** Store sampled per-cusp HU pixels; recompute() converts to 2D Agatston. */
+  public captureCuspCalciumSample(
+    id: 'lcc' | 'rcc' | 'ncc',
+    pixelValues: Float32Array,
+    pixelAreaMm2: number
+  ): void {
+    const sample = { pixelValues, pixelAreaMm2 };
+    if (id === 'lcc') this.cuspPixelSampleLCC = sample;
+    else if (id === 'rcc') this.cuspPixelSampleRCC = sample;
+    else this.cuspPixelSampleNCC = sample;
+    this.recompute();
+  }
+
+  /** Capture/replace a single sinus diameter (two world points). */
+  public captureSinusDiameter(label: SinusLabel, a: TAVIVector3D, b: TAVIVector3D): void {
+    this.sinusDiameterPoints = { ...this.sinusDiameterPoints, [label]: { a: { ...a }, b: { ...b } } };
+    this.recompute();
+  }
+
+  /** Capture/replace the floor (nadir) point of a sinus for height measurement. */
+  public captureSinusFloor(label: SinusLabel, floor: TAVIVector3D): void {
+    this.sinusFloorPoints = { ...this.sinusFloorPoints, [label]: { ...floor } };
+    this.recompute();
+  }
+
+  /** Clear one sinus's diameter + floor measurements. */
+  public clearSinusDiameter(label: SinusLabel): void {
+    const dp = { ...this.sinusDiameterPoints }; delete dp[label]; this.sinusDiameterPoints = dp;
+    const fp = { ...this.sinusFloorPoints }; delete fp[label]; this.sinusFloorPoints = fp;
+    this.recompute();
+  }
+
+  /**
+   * Store a computed access-vessel result. The heavy per-section auto-seg loop
+   * runs in the panel (where the Cornerstone volume is available); the session
+   * only stores the finished result, staying volume-agnostic.
+   */
+  public captureAccessVessel(result: AccessVesselResult): void {
+    this.accessVessels = new Map(this.accessVessels);
+    this.accessVessels.set(result.vesselId, { ...result });
+  }
+
+  /** Remove one access-vessel measurement. */
+  public clearAccessVessel(vesselId: AccessVesselId): void {
+    const next = new Map(this.accessVessels);
+    next.delete(vesselId);
+    this.accessVessels = next;
+  }
+
+  /** Minimum lumen diameter across all measured access vessels (access-limiting). */
+  public iliofemoralMinLumenMm(): number | null {
+    const mins = Array.from(this.accessVessels.values())
+      .map((v) => v.minLumenDiameterMm)
+      .filter((v): v is number => v != null && Number.isFinite(v));
+    return mins.length ? Math.min(...mins) : null;
+  }
+
   public capturePointSnapshot(snapshot: TAVIPointSnapshot, identifier: string) {
     switch (identifier) {
       case TAVIStructureLeftOstium:
@@ -221,7 +337,7 @@ export class TAVIMeasurementSession {
   }
 
   /**
-   * Capture the annulus plane from 3 cusp nadir points (ProSizeAV-style).
+   * Capture the annulus plane from 3 cusp nadir points (structured).
    * Computes the plane normal via cross product and orients it along the aortic axis if available.
    */
   public captureThreePointAnnulusPlane(
@@ -253,7 +369,7 @@ export class TAVIMeasurementSession {
   }
 
   /**
-   * Capture a constrained annulus contour (ProSizeAV-style: clicked points on the annulus plane).
+   * Capture a constrained annulus contour (structured: clicked points on the annulus plane).
    * Optionally smooths the contour via spline interpolation before storing.
    */
   /** Raw (unsmoothed) contour points for editing */
@@ -331,15 +447,39 @@ export class TAVIMeasurementSession {
         )
       : null;
 
-    if (this.annulusSnapshot?.pixelValues && this.annulusSnapshot.pixelAreaMm2) {
-      this.annulusCalcium = TAVIGeometry.calciumResultForPixelValues(
-        this.annulusSnapshot.pixelValues,
-        this.annulusSnapshot.pixelAreaMm2,
-        this.calciumThresholdHU
-      );
-    } else {
-      this.annulusCalcium = null;
+    // Per-sinus (LCS/RCS/NCS) diameters + optional heights (floor → STJ plane).
+    this.sinusDiameters = {};
+    const stjForSinus = this.stjGeometry;
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const pts = this.sinusDiameterPoints[label];
+      if (!pts) continue;
+      const diameterMm = TAVIGeometry.vectorDistance(pts.a, pts.b);
+      const floorPoint = this.sinusFloorPoints[label];
+      const heightMm = floorPoint && stjForSinus
+        ? TAVIGeometry.sinusHeightToPlane(floorPoint, stjForSinus.centroid, stjForSinus.planeNormal)
+        : undefined;
+      this.sinusDiameters[label] = { label, pointA: pts.a, pointB: pts.b, diameterMm, floorPoint, heightMm };
     }
+
+    const calc = (sample?: { pixelValues?: Float32Array; pixelAreaMm2?: number } | null) =>
+      sample?.pixelValues && sample.pixelAreaMm2
+        ? TAVIGeometry.calciumResultForPixelValues(sample.pixelValues, sample.pixelAreaMm2, this.calciumThresholdHU)
+        : null;
+
+    this.annulusCalcium = calc(this.annulusSnapshot);
+    this.lvotCalcium = calc(this.lvotSnapshot);
+    this.cuspCalciumLCC = calc(this.cuspPixelSampleLCC);
+    this.cuspCalciumRCC = calc(this.cuspPixelSampleRCC);
+    this.cuspCalciumNCC = calc(this.cuspPixelSampleNCC);
+
+    // Keep the aggregate cusp grade in sync for risk scoring
+    // (TAVIValveDatabase.assessTAVRRisks consumes cuspCalcificationGrade).
+    this.cuspCalcificationGrade = Math.max(
+      this.cuspCalcificationGradeLCC,
+      this.cuspCalcificationGradeRCC,
+      this.cuspCalcificationGradeNCC,
+      this.cuspCalcificationGrade
+    );
 
     const planningAnnulus = this.activeAnnulusGeometry();
     this.fluoroAngle = planningAnnulus ? TAVIGeometry.fluoroAngleForPlaneNormal(planningAnnulus.planeNormal) : null;
@@ -455,7 +595,7 @@ export class TAVIMeasurementSession {
     return 'Core workflow complete. Review the assisted annulus, preview angle, calcium assist, and export the report.';
   }
 
-  /** Generate a structured text report (ProSizeAV export format) */
+  /** Generate a structured text report (structured export format) */
   public textReport(): string {
     const lines: string[] = [];
     const r = (v: number | null | undefined, decimals = 1) =>
@@ -515,6 +655,10 @@ export class TAVIMeasurementSession {
         lines.push(`${name}: ${r(geom.minimumDiameterMm)}×${r(geom.maximumDiameterMm)} mm, area ${r(geom.areaMm2)} mm²`);
       }
     }
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = this.sinusDiameters[label];
+      if (d) lines.push(`Sinus ${label}: ${r(d.diameterMm)} mm${d.heightMm != null ? `, height ${r(d.heightMm)} mm` : ''}`);
+    }
     lines.push('');
 
     // Implantation angles
@@ -532,12 +676,31 @@ export class TAVIMeasurementSession {
     }
 
     // Calcium
-    if (this.annulusCalcium) {
+    const hasAnyCalcium =
+      this.annulusCalcium || this.lvotCalcium ||
+      this.cuspCalciumLCC || this.cuspCalciumRCC || this.cuspCalciumNCC ||
+      this.cuspCalcificationGradeLCC > 0 || this.cuspCalcificationGradeRCC > 0 ||
+      this.cuspCalcificationGradeNCC > 0 || this.annulusCalcificationGrade > 0;
+    if (hasAnyCalcium) {
       lines.push('CALCIUM ASSESSMENT');
       lines.push('───────────────────────────────────────────');
       lines.push(`Threshold:        ${this.calciumThresholdHU} HU`);
-      lines.push(`Agatston (2D):    ${r(this.annulusCalcium.agatstonScore2D, 0)}`);
-      lines.push(`Dense fraction:   ${r(this.annulusCalcium.fractionAboveThreshold * 100, 1)}%`);
+      if (this.annulusCalcium) {
+        lines.push(`Annulus Agatston (2D): ${r(this.annulusCalcium.agatstonScore2D, 0)}`);
+        lines.push(`Annulus dense frac:    ${r(this.annulusCalcium.fractionAboveThreshold * 100, 1)}%`);
+      }
+      if (this.cuspCalciumLCC || this.cuspCalciumRCC || this.cuspCalciumNCC) {
+        lines.push('Per-cusp Agatston (2D):');
+        lines.push(`  LCC: ${r(this.cuspCalciumLCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeLCC}`);
+        lines.push(`  RCC: ${r(this.cuspCalciumRCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeRCC}`);
+        lines.push(`  NCC: ${r(this.cuspCalciumNCC?.agatstonScore2D ?? null, 0)}  grade ${this.cuspCalcificationGradeNCC}`);
+      } else {
+        lines.push(`Cusp grades — LCC: ${this.cuspCalcificationGradeLCC} | RCC: ${this.cuspCalcificationGradeRCC} | NCC: ${this.cuspCalcificationGradeNCC}`);
+      }
+      if (this.lvotCalcium) {
+        lines.push(`LVOT Agatston (2D):    ${r(this.lvotCalcium.agatstonScore2D, 0)}`);
+        lines.push(`LVOT dense frac:       ${r(this.lvotCalcium.fractionAboveThreshold * 100, 1)}%`);
+      }
       lines.push('');
     }
 
@@ -547,6 +710,25 @@ export class TAVIMeasurementSession {
     lines.push(`Planned Access:         ${this.plannedAccess}`);
     lines.push(`Planned Pigtail Access: ${this.plannedPigtailAccess}`);
     lines.push('');
+
+    // Access vessels (ilio-femoral runoff)
+    if (this.accessVessels.size > 0) {
+      lines.push('ACCESS VESSELS');
+      lines.push('───────────────────────────────────────────');
+      const vesselNames: Record<AccessVesselId, string> = {
+        'thoracic-aorta': 'Thoracic Aorta',
+        'abdominal-aorta': 'Abdominal Aorta',
+        'iliac-left': 'Iliac (L)',
+        'iliac-right': 'Iliac (R)',
+      };
+      for (const [id, v] of this.accessVessels) {
+        lines.push(
+          `${vesselNames[id]}: min ø ${r(v.minLumenDiameterMm)} mm @ ${r(v.minLumenAtArcLengthMm, 0)}mm, ` +
+          `tortuosity ${r(v.tortuosityIndex, 2)} (${r(v.cumulativeAngulationDeg, 0)}° total)`
+        );
+      }
+      lines.push('');
+    }
 
     // Notes
     if (this.notes) {
@@ -579,6 +761,15 @@ export class TAVIMeasurementSession {
       rows.push(['Annulus Eccentricity', eccentricity.toFixed(3), '']);
     }
 
+    if (this.annulusCalcium) rows.push(['Annulus Agatston 2D', this.annulusCalcium.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumLCC) rows.push(['LCC Agatston 2D', this.cuspCalciumLCC.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumRCC) rows.push(['RCC Agatston 2D', this.cuspCalciumRCC.agatstonScore2D.toFixed(0), '']);
+    if (this.cuspCalciumNCC) rows.push(['NCC Agatston 2D', this.cuspCalciumNCC.agatstonScore2D.toFixed(0), '']);
+    rows.push(['LCC Ca Grade', String(this.cuspCalcificationGradeLCC), '']);
+    rows.push(['RCC Ca Grade', String(this.cuspCalcificationGradeRCC), '']);
+    rows.push(['NCC Ca Grade', String(this.cuspCalcificationGradeNCC), '']);
+    if (this.lvotCalcium) rows.push(['LVOT Agatston 2D', this.lvotCalcium.agatstonScore2D.toFixed(0), '']);
+
     if (this.leftCoronaryHeightMm != null) {
       rows.push(['LCA Height', this.leftCoronaryHeightMm.toFixed(1), 'mm']);
     }
@@ -601,6 +792,13 @@ export class TAVIMeasurementSession {
       }
     }
 
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = this.sinusDiameters[label];
+      if (!d) continue;
+      rows.push([`Sinus ${label} Diameter`, d.diameterMm.toFixed(1), 'mm']);
+      if (d.heightMm != null) rows.push([`Sinus ${label} Height`, d.heightMm.toFixed(1), 'mm']);
+    }
+
     // Multi-level geometries
     for (const [dist, geom] of this.multiLevelGeometries) {
       const prefix = dist < 0 ? `LVOT ${Math.abs(dist)}mm` : `AV +${dist}mm`;
@@ -621,6 +819,21 @@ export class TAVIMeasurementSession {
 
     rows.push(['Planned Access', this.plannedAccess, '']);
     rows.push(['Planned Pigtail Access', this.plannedPigtailAccess, '']);
+
+    const vesselCsvNames: Record<AccessVesselId, string> = {
+      'thoracic-aorta': 'Thoracic Aorta',
+      'abdominal-aorta': 'Abdominal Aorta',
+      'iliac-left': 'Iliac L',
+      'iliac-right': 'Iliac R',
+    };
+    for (const [id, v] of this.accessVessels) {
+      const n = vesselCsvNames[id];
+      rows.push([`${n} Min Lumen`, v.minLumenDiameterMm.toFixed(1), 'mm']);
+      rows.push([`${n} Tortuosity Index`, v.tortuosityIndex.toFixed(2), '']);
+      rows.push([`${n} Cumulative Angulation`, v.cumulativeAngulationDeg.toFixed(0), 'deg']);
+      rows.push([`${n} Path Length`, v.pathLengthMm.toFixed(1), 'mm']);
+      rows.push([`${n} Chord Length`, v.chordLengthMm.toFixed(1), 'mm']);
+    }
 
     return rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
   }

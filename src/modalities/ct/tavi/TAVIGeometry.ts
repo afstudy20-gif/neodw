@@ -156,6 +156,28 @@ export class TAVIGeometry {
     return worldPoints.map((p) => this.projectWorldPointWithBasis(p, planeOrigin, basis));
   }
 
+  /**
+   * Build a closed circular polygon of `segments` world points lying on the
+   * plane through `center` with the given normal. Used to synthesize a
+   * sampling region around a single nadir point (e.g. per-cusp calcium).
+   */
+  static discOnPlane(
+    center: TAVIVector3D,
+    planeNormal: TAVIVector3D,
+    radiusMm: number,
+    segments = 24
+  ): TAVIVector3D[] {
+    const basis = this.planeBasisMake(planeNormal);
+    const ring: TAVIVector3D[] = [];
+    for (let k = 0; k < segments; k++) {
+      const theta = (2 * Math.PI * k) / segments;
+      const u = this.vectorScale(basis.basisU, radiusMm * Math.cos(theta));
+      const v = this.vectorScale(basis.basisV, radiusMm * Math.sin(theta));
+      ring.push(this.vectorAdd(center, this.vectorAdd(u, v)));
+    }
+    return ring;
+  }
+
   static convexHull(points: TAVIPoint2D[]): TAVIPoint2D[] {
     if (points.length <= 3) return points;
 
@@ -421,6 +443,15 @@ export class TAVIGeometry {
     return this.vectorDot(this.vectorSubtract(point, origin), normalizedNormal);
   }
 
+  /** Sinus height = |perpendicular distance from sinus floor to the STJ plane|, mm. */
+  static sinusHeightToPlane(
+    floor: TAVIVector3D,
+    planeOrigin: TAVIVector3D,
+    planeNormal: TAVIVector3D
+  ): number {
+    return Math.abs(this.distanceFromPointToPlane(floor, planeOrigin, planeNormal));
+  }
+
   static fluoroAngleForPlaneNormal(planeNormal: TAVIVector3D): TAVIFluoroAngleResult {
     const normal = this.vectorNormalize(planeNormal);
     if (this.vectorIsZero(normal)) return {
@@ -459,6 +490,44 @@ export class TAVIGeometry {
 
     const clampedDot = Math.max(-1.0, Math.min(1.0, this.vectorDot(normLhs, normRhs)));
     return (Math.acos(clampedDot) * 180.0) / Math.PI;
+  }
+
+  /**
+   * Deviation (0–90°) of a viewing direction from an annulus plane normal.
+   * Antiparallel normals fold to 0 — looking down the annulus axis from either
+   * side is equally "en-face". 0° = a true perpendicular cross-section.
+   */
+  static perpendicularityDeviationDegrees(
+    currentViewNormal: TAVIVector3D,
+    annulusPlaneNormal: TAVIVector3D
+  ): number {
+    const nView = this.vectorNormalize(currentViewNormal);
+    const nAnn = this.vectorNormalize(annulusPlaneNormal);
+    if (this.vectorIsZero(nView) || this.vectorIsZero(nAnn)) return 0;
+    const theta = this.angleBetweenVectors(nView, nAnn);
+    return theta > 90 ? 180 - theta : theta;
+  }
+
+  /**
+   * N world points around a circle of the given radius lying on the plane
+   * through `centroid` with `planeNormal`. Used for read-only annulus disc
+   * glyphs and per-cusp sampling rings.
+   */
+  static discRingPoints(
+    centroid: TAVIVector3D,
+    planeNormal: TAVIVector3D,
+    radiusMm: number,
+    segments = 24
+  ): TAVIVector3D[] {
+    const basis = this.planeBasisMake(planeNormal);
+    const ring: TAVIVector3D[] = [];
+    for (let k = 0; k < segments; k++) {
+      const theta = (2 * Math.PI * k) / segments;
+      const u = this.vectorScale(basis.basisU, radiusMm * Math.cos(theta));
+      const v = this.vectorScale(basis.basisV, radiusMm * Math.sin(theta));
+      ring.push(this.vectorAdd(centroid, this.vectorAdd(u, v)));
+    }
+    return ring;
   }
 
   static projectionConfirmationForReferenceNormal(
@@ -779,5 +848,96 @@ export class TAVIGeometry {
     }
 
     return result;
+  }
+
+  // ── Access-vessel path metrics (ilio-femoral runoff) ──
+
+  /**
+   * Tortuosity index = path length / straight-line chord (dimensionless, ≥ 1).
+   * 1.0 = perfectly straight. Guards against a degenerate chord.
+   */
+  static tortuosityIndex(pathPoints: TAVIVector3D[]): number {
+    if (!pathPoints || pathPoints.length < 2) return 1;
+    let pathLength = 0;
+    for (let i = 1; i < pathPoints.length; i++) {
+      pathLength += this.vectorDistance(pathPoints[i], pathPoints[i - 1]);
+    }
+    const chord = this.vectorDistance(pathPoints[pathPoints.length - 1], pathPoints[0]);
+    if (chord < 1e-6) return 1;
+    return pathLength / chord;
+  }
+
+  /**
+   * Sum of turn angles at every interior vertex (degrees). Advisory metric:
+   * > ~90° total over the iliofemoral path predicts difficult delivery.
+   */
+  static cumulativeAngulationDeg(pathPoints: TAVIVector3D[]): number {
+    if (!pathPoints || pathPoints.length < 3) return 0;
+    let total = 0;
+    for (let i = 1; i < pathPoints.length - 1; i++) {
+      const vIn = this.vectorNormalize(this.vectorSubtract(pathPoints[i], pathPoints[i - 1]));
+      const vOut = this.vectorNormalize(this.vectorSubtract(pathPoints[i + 1], pathPoints[i]));
+      if (this.vectorIsZero(vIn) || this.vectorIsZero(vOut)) continue;
+      total += this.angleBetweenVectors(vIn, vOut);
+    }
+    return total;
+  }
+
+  /**
+   * Resample a sparse control-point path into evenly spaced samples (every
+   * `spacingMm`), each carrying a unit tangent. Endpoints are always included.
+   * Tangent at interior samples averages the two adjacent segment directions
+   * (matches CenterlineOverlay.getDirectionAtPoint's central-difference).
+   */
+  static resamplePathByArcLength(
+    pathPoints: TAVIVector3D[],
+    spacingMm: number
+  ): { point: TAVIVector3D; tangent: TAVIVector3D; arcLengthMm: number }[] {
+    const out: { point: TAVIVector3D; tangent: TAVIVector3D; arcLengthMm: number }[] = [];
+    if (!pathPoints || pathPoints.length < 2 || spacingMm <= 0) {
+      return pathPoints && pathPoints.length === 1
+        ? [{ point: pathPoints[0], tangent: { x: 0, y: 0, z: 1 }, arcLengthMm: 0 }]
+        : out;
+    }
+
+    // Per-segment direction + cumulative arc length at each vertex.
+    const segDir: TAVIVector3D[] = [];
+    const vertexArc: number[] = [0];
+    for (let i = 1; i < pathPoints.length; i++) {
+      const d = this.vectorSubtract(pathPoints[i], pathPoints[i - 1]);
+      segDir.push(this.vectorNormalize(d));
+      vertexArc.push(vertexArc[i - 1] + this.vectorLength(d));
+    }
+    const totalLen = vertexArc[vertexArc.length - 1];
+
+    const tangentAtArc = (arc: number): TAVIVector3D => {
+      // Find the segment containing `arc`.
+      let seg = 0;
+      while (seg < segDir.length - 1 && vertexArc[seg + 1] < arc) seg++;
+      // At an interior vertex, average the two adjacent segment dirs.
+      const eps = 1e-6;
+      if (Math.abs(arc - vertexArc[seg + 1]) < eps && seg + 1 < segDir.length) {
+        return this.vectorNormalize(this.vectorAdd(segDir[seg], segDir[seg + 1]));
+      }
+      return segDir[seg];
+    };
+
+    const pointAtArc = (arc: number): TAVIVector3D => {
+      let seg = 0;
+      while (seg < segDir.length - 1 && vertexArc[seg + 1] < arc) seg++;
+      const local = arc - vertexArc[seg];
+      return this.vectorAdd(pathPoints[seg], this.vectorScale(segDir[seg], local));
+    };
+
+    for (let arc = 0; arc < totalLen; arc += spacingMm) {
+      out.push({ point: pointAtArc(arc), tangent: tangentAtArc(arc), arcLengthMm: arc });
+    }
+    // Always include the final endpoint.
+    out.push({
+      point: pathPoints[pathPoints.length - 1],
+      tangent: segDir[segDir.length - 1],
+      arcLengthMm: totalLen,
+    });
+    return out;
   }
 }

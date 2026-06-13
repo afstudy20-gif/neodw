@@ -24,7 +24,7 @@ interface CoronaryHeightViewProps {
 }
 
 /**
- * Coronary Height Stretched Vessel View — ProSizeAV-style.
+ * Coronary Height Stretched Vessel View — structured.
  * Shows two side-by-side panels with longitudinal cross-sections
  * through each coronary ostium, with basal plane line and height measurement.
  *
@@ -160,7 +160,7 @@ export const CoronaryHeightView: React.FC<CoronaryHeightViewProps> = ({
     setCapturing(false);
   }, [controller, renderingEngineId, annulusCentroid, annulusNormal, leftOstium, rightOstium]);
 
-  // Draw overlay on captured thumbnail — ProSizeAV-style with real coordinate mapping
+  // Draw overlay on captured thumbnail — structured with real coordinate mapping
   const drawOverlay = useCallback((
     canvas: HTMLCanvasElement,
     thumb: string,

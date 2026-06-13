@@ -15,12 +15,12 @@ import {
   TAVIStructureSinusPoints,
   TAVIStructureMembranousSeptum,
 } from '../tavi/TAVIMeasurementSession';
-import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
-import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
+import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, SinusLabel, AccessVesselId, AccessVesselResult, AccessVesselCrossSection, ACCESS_ROUTES, PIGTAIL_ACCESS_ROUTES } from '../tavi/TAVITypes';
+import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, assessSheathFit, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
-import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane } from '../tavi/AorticAxisDetection';
+import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, samplePixelValuesInWorldContour, snapPointToLumenCentroid, snapPointToAxialMinimum } from '../tavi/AorticAxisDetection';
 import { DoubleObliqueController } from '../tavi/DoubleObliqueController';
 import { ConstrainedContourTool } from '../tavi/ConstrainedContourTool';
 import { CenterlineOverlay } from '../tavi/CenterlineOverlay';
@@ -117,8 +117,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [multiPoints, setMultiPoints] = useState<TAVIPointSnapshot[]>([]);
   const [activeTab, setActiveTab] = useState<'capture' | 'report'>('capture');
   const [deploymentRatio, setDeploymentRatio] = useState<'80/20' | '90/10'>('80/20');
+  const [livePerp, setLivePerp] = useState<number | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
 
-  // ProSizeAV-style workflow state — default to axis-validation (ProSize-Style)
+  // structured workflow state — default to axis-validation (guided)
   const [workflowPhase, setWorkflowPhase] = useState<TAVIWorkflowPhase>('axis-validation');
   const [axisResult, setAxisResult] = useState<AorticAxisResult | null>(null);
   const [axisDetecting, setAxisDetecting] = useState(false);
@@ -253,6 +255,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         lines.push({ from: session.rightOstiumSnapshot.worldPoint, to: projected, label: h != null ? `${h.toFixed(1)}mm` : '', color: '#ff6b6b' });
       }
       controllerRef.current.setMeasurementLines(lines);
+
+      // Live perpendicularity reference + annulus disc glyph radius.
+      controllerRef.current.setPerpendicularityReference(
+        annulus ? annulus.planeNormal : null,
+        (dev) => setLivePerp(dev)
+      );
+      controllerRef.current.setAnnulusDiscRadiusMm(annulus ? annulus.equivalentDiameterMm / 2 : 0);
       return;
     }
 
@@ -326,7 +335,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, viewportMode, refresh]);
 
-  // ── ProSizeAV-style Axis Detection ──
+  // ── structured Axis Detection ──
 
   const startAutoAxisDetection = useCallback(() => {
     setAxisDetecting(true);
@@ -374,7 +383,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           controller.initialize(result.centerPoint, result.axisDirection);
           controllerRef.current = controller;
 
-          // Skip centerline-review: go directly to cusp definition (like ProSizeAV/3mensio)
+          // Skip centerline-review: go directly to cusp definition (like dedicated TAVI planners)
           // Save controller state for cusp reset
           const state = controller.getState();
           preCuspStateRef.current = {
@@ -421,7 +430,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       TAVIStructureAorticAxis
     );
 
-    // Go directly to cusp definition (like ProSizeAV)
+    // Go directly to cusp definition (guided workflow)
     preCuspStateRef.current = {
       axisPoint: { ...state.axisPoint },
       axisDirection: { ...state.axisDirection },
@@ -473,6 +482,15 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
   // ── Cusp Definition (Phase 2) ──
 
+  /** Snap a cusp nadir toward the local HU minimum along the aortic axis. */
+  const snapCuspNadir = (raw: TAVIVector3D): TAVIVector3D => {
+    if (!snapEnabled) return raw;
+    const volume = cornerstone.cache.getVolume(volumeId);
+    const axisDir = session.aorticAxisDirection ?? controllerRef.current?.getAxisDirection();
+    if (!volume || !axisDir) return raw;
+    return snapPointToAxialMinimum(volume, raw, axisDir, { searchMm: 4 }) ?? raw;
+  };
+
   /** Capture a cusp point from the latest Probe annotation in EITHER viewport.
    *  Cusp hinge points can be identified in the reference (longitudinal) view
    *  where the cusp nadir is visible in profile, or in the working (cross-section) view. */
@@ -495,7 +513,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const rawCusp: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const worldPoint: TAVIVector3D = snapCuspNadir(rawCusp);
 
     // Remove the annotation after capturing
     cornerstoneTools.annotation.state.removeAnnotation(ann.annotationUID);
@@ -541,7 +560,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
 
     forceUpdate();
-  }, [cuspStep, cuspPoints, session]);
+  }, [cuspStep, cuspPoints, session, snapEnabled, volumeId]);
 
   /** Go back to annulus tracing with existing points loaded for editing */
   const editAnnulus = useCallback(() => {
@@ -777,8 +796,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
-    console.log(`[TAVI] captureCoronaryPoint(${side}): world=(${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)})`);
+    const rawPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    // Snap onto the contrast-filled lumen centroid for reproducible heights.
+    const snapVolume = snapEnabled ? cornerstone.cache.getVolume(volumeId) : null;
+    const snapped = snapVolume ? snapPointToLumenCentroid(snapVolume, rawPoint) : null;
+    const worldPoint: TAVIVector3D = snapped ?? rawPoint;
 
     // Remove ALL probe annotations from ALL viewports (clean up duplicates)
     for (const vpId of ['coronal', 'sagittal', 'axial']) {
@@ -806,7 +828,117 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     } else if (side === 'right') {
       setCoronaryStep('multi-level');
     }
+  }, [session, renderingEngineId, snapEnabled, volumeId]);
+
+  // Capture a single sinus width from the two most-recent Probe annotations.
+  const captureSinusWidth = useCallback((label: SinusLabel) => {
+    const engine = getEngine();
+    if (!engine) return;
+    let probes: any[] = [];
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      if (ps?.length) probes = ps;
+    }
+    if (probes.length < 2) return; // need two points across the sinus belly
+    const a = probes[probes.length - 2].data.handles.points[0];
+    const b = probes[probes.length - 1].data.handles.points[0];
+    session.captureSinusDiameter(
+      label,
+      { x: a[0], y: a[1], z: a[2] },
+      { x: b[0], y: b[1], z: b[2] }
+    );
+    // Clean up probe annotations across viewports (mirror captureCoronaryPoint).
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      if (ps) {
+        for (const probe of [...ps]) {
+          if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
+        }
+      }
+    }
+    forceUpdate();
   }, [session, renderingEngineId]);
+
+  // ── Ilio-femoral access vessel measurement ──
+  // Snapshots the active centerline path, samples perpendicular cross-sections
+  // every 5 mm, auto-segments each lumen, and reduces to min lumen + tortuosity.
+  const [accessBusy, setAccessBusy] = useState<AccessVesselId | null>(null);
+  const measureAccessVessel = useCallback((vesselId: AccessVesselId) => {
+    const volume = cornerstone.cache.getVolume(volumeId);
+    if (!volume) return;
+    const pathPoints = centerlineRef.current?.getPoints() ?? [];
+    if (pathPoints.length < 2) {
+      setAutoDetectError('Draw the vessel path with the centerline tool first (≥2 points).');
+      return;
+    }
+    setAccessBusy(vesselId);
+    // Defer the heavy sampling so the busy state can paint.
+    setTimeout(() => {
+      try {
+        const samples = TAVIGeometry.resamplePathByArcLength(pathPoints, 5);
+        const isIliac = vesselId.startsWith('iliac');
+        const maxDiameterMm = isIliac ? 20 : 45;
+        const sections: AccessVesselCrossSection[] = [];
+        for (const s of samples) {
+          const seg = autoSegmentCrossSectionAtPlane(volume, s.point, s.tangent, undefined, {
+            huMin: 150, huMax: 500, gridSize: 160, pixelSpacing: 0.3, maxDiameterMm,
+          });
+          const geo = seg ? TAVIGeometry.geometryForWorldContour(seg.contourPoints, s.tangent) : null;
+          if (seg && geo) {
+            sections.push({
+              arcLengthMm: s.arcLengthMm,
+              center: seg.centerWorld,
+              minDiameterMm: geo.minimumDiameterMm,
+              equivalentDiameterMm: geo.equivalentDiameterMm,
+              areaMm2: geo.areaMm2,
+              valid: true,
+            });
+          } else {
+            sections.push({
+              arcLengthMm: s.arcLengthMm, center: s.point,
+              minDiameterMm: 0, equivalentDiameterMm: 0, areaMm2: 0, valid: false,
+            });
+          }
+        }
+        const valid = sections.filter((x) => x.valid);
+        if (valid.length === 0) {
+          setAutoDetectError(`No lumen segmented along the ${vesselId} path. Adjust the centerline through contrast-filled lumen.`);
+          setAccessBusy(null);
+          return;
+        }
+        let minLumenDiameterMm = Infinity;
+        let minLumenAtArcLengthMm = 0;
+        for (const sec of valid) {
+          if (sec.minDiameterMm < minLumenDiameterMm) {
+            minLumenDiameterMm = sec.minDiameterMm;
+            minLumenAtArcLengthMm = sec.arcLengthMm;
+          }
+        }
+        const result: AccessVesselResult = {
+          vesselId,
+          pathPoints,
+          sections,
+          chordLengthMm: TAVIGeometry.vectorDistance(valid[0].center, valid[valid.length - 1].center),
+          pathLengthMm: valid[valid.length - 1].arcLengthMm - valid[0].arcLengthMm,
+          tortuosityIndex: TAVIGeometry.tortuosityIndex(pathPoints),
+          cumulativeAngulationDeg: TAVIGeometry.cumulativeAngulationDeg(pathPoints),
+          minLumenDiameterMm,
+          minLumenAtArcLengthMm,
+        };
+        session.captureAccessVessel(result);
+        setAutoDetectError(null);
+      } catch {
+        setAutoDetectError(`Access-vessel measurement failed for ${vesselId}.`);
+      } finally {
+        setAccessBusy(null);
+        forceUpdate();
+      }
+    }, 0);
+  }, [session, volumeId]);
 
   /** Capture a cusp hinge point from standard MPR views (before double-oblique mode) */
   const captureCuspFromMPR = useCallback((cusp: 'lcc' | 'ncc' | 'rcc') => {
@@ -827,7 +959,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!ann) return;
 
     const p = ann.data.handles.points[0];
-    const worldPoint: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
+    const worldPoint: TAVIVector3D = snapCuspNadir({ x: p[0], y: p[1], z: p[2] });
 
     // Remove ALL probe annotations
     for (const vpId of ['coronal', 'sagittal', 'axial']) {
@@ -848,8 +980,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     session.recompute();
     forceUpdate();
-    console.log(`[TAVI] captureCuspFromMPR(${cusp}): world=(${p[0].toFixed(1)}, ${p[1].toFixed(1)}, ${p[2].toFixed(1)})`);
-  }, [session]);
+  }, [session, snapEnabled, volumeId]);
 
   /** Auto-capture NC guide points: poll for Probe annotations when NC guide is active */
   const ncGuidePointsRef = useRef<TAVIVector3D[]>([]);
@@ -1149,12 +1280,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           return;
         }
 
-        // Create contour snapshot from best result
+        // Create contour snapshot from best result. Rasterize HU inside the
+        // contour so 2D Agatston can be scored (annulus / LVOT).
+        const caAuto = samplePixelValuesInWorldContour(
+          cornerstone.cache.getVolume(volumeId), bestCandidate.contourPoints, bestCandidate.normal
+        );
         const snapshot: TAVIContourSnapshot = {
           worldPoints: bestCandidate.contourPoints,
           pixelPoints: [],
           planeOrigin: bestCandidate.origin,
           planeNormal: bestCandidate.normal,
+          ...(caAuto ? { pixelValues: caAuto.pixelValues, pixelAreaMm2: caAuto.pixelAreaMm2 } : {}),
         };
         session.captureContourSnapshot(snapshot, activeStep);
 
@@ -1182,6 +1318,22 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       }
     });
   }, [activeStep, volumeId, session, renderingEngineId]);
+
+  // ── Per-cusp calcium sampling ──
+  // Cusps are single nadir points; synthesize a disc on the annulus plane
+  // around the nadir and rasterize HU inside it for a 2D Agatston estimate.
+  const CUSP_CA_RADIUS_MM = 6;
+  const sampleCuspCalcium = (id: 'lcc' | 'rcc' | 'ncc', center?: TAVIVector3D) => {
+    const volume = cornerstone.cache.getVolume(volumeId);
+    const normal = session.annulusPlaneNormal ?? session.activeAnnulusGeometry()?.planeNormal;
+    if (!volume || !center || !normal) return;
+    const ring = TAVIGeometry.discOnPlane(center, normal, CUSP_CA_RADIUS_MM, 24);
+    const s = samplePixelValuesInWorldContour(volume, ring, normal);
+    if (s) {
+      session.captureCuspCalciumSample(id, s.pixelValues, s.pixelAreaMm2);
+      forceUpdate();
+    }
+  };
 
   // ── Capture axis from crosshairs ──
 
@@ -1302,7 +1454,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       controller.initialize(center!, axisDir!);
       controllerRef.current = controller;
 
-      // Go directly to cusp definition (like ProSizeAV)
+      // Go directly to cusp definition (guided workflow)
       const state = controller.getState();
       preCuspStateRef.current = {
         axisPoint: { ...state.axisPoint },
@@ -1418,11 +1570,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             const worldPoints: TAVIVector3D[] = polyline.map(p => ({ x: p[0], y: p[1], z: p[2] }));
             const camera = vp.getCamera();
             const vpn = camera.viewPlaneNormal || [0, 0, 1];
+            const planeNormal = { x: vpn[0], y: vpn[1], z: vpn[2] };
+            // Rasterize HU inside the contour so 2D Agatston can be scored for
+            // calcium-bearing structures (annulus / LVOT). No-op for others.
+            const ca = samplePixelValuesInWorldContour(
+              cornerstone.cache.getVolume(volumeId), worldPoints, planeNormal
+            );
             const snapshot: TAVIContourSnapshot = {
               worldPoints,
               pixelPoints: [],
               planeOrigin: { x: polyline[0][0], y: polyline[0][1], z: polyline[0][2] },
-              planeNormal: { x: vpn[0], y: vpn[1], z: vpn[2] },
+              planeNormal,
+              ...(ca ? { pixelValues: ca.pixelValues, pixelAreaMm2: ca.pixelAreaMm2 } : {}),
             };
             session.captureContourSnapshot(snapshot, activeStep);
             if (activeStep === TAVIStructureAnnulus) {
@@ -1478,6 +1637,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const valveRecs: ValveSizeRecommendation[] = annulus
     ? recommendValveSizes(annulus.perimeterMm, annulus.areaMm2)
     : [];
+
+  // Sheath-fit assessment for ilio-femoral access.
+  const sheathOD = session.selectedSheathOuterDiameterMm
+    ?? valveRecs.find((r) => r.primarySize)?.primarySize?.sheathOuterDiameterMm
+    ?? null;
+  const accessMinLumen = session.iliofemoralMinLumenMm();
+  const sheathFit = (sheathOD != null && accessMinLumen != null)
+    ? assessSheathFit(
+        accessMinLumen,
+        sheathOD,
+        session.annulusCalcificationGrade >= 2 || session.cuspCalcificationGrade >= 2
+      )
+    : null;
 
   // Risk assessment
   const risks = assessTAVRRisks({
@@ -1553,6 +1725,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         lines.push(`  ${name}: —`);
       }
     }
+    for (const lbl of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const d = session.sinusDiameters[lbl];
+      if (d) lines.push(`  Sinus ${lbl}: ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` | h ${fmt(d.heightMm)} mm` : ''}`);
+    }
     lines.push('');
 
     // Valve sizing
@@ -1600,6 +1776,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     lines.push(`  Pigtail Access:   ${session.plannedPigtailAccess}`);
     lines.push('');
 
+    // Access vessels
+    if (session.accessVessels.size > 0) {
+      lines.push('── ACCESS VESSELS ──');
+      for (const [, v] of session.accessVessels) {
+        lines.push(`  ${v.vesselId}: min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}° · path ${fmt(v.pathLengthMm, 0)} mm`);
+      }
+      if (sheathFit) {
+        lines.push(`  Sheath OD ${fmt(sheathFit.sheathOuterDiameterMm)} mm vs min lumen ${fmt(sheathFit.minLumenDiameterMm)} mm → SFAR ${fmt(sheathFit.sfar, 2)} (${sheathFit.feasibility})`);
+      }
+      lines.push('');
+    }
+
     // Risk
     lines.push('── RISK ASSESSMENT ──');
     lines.push(`  Coronary Obstruction: ${risks.coronaryObstructionRisk.toUpperCase()} — ${risks.coronaryObstructionNote}`);
@@ -1609,12 +1797,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     // Calcium
     lines.push('── CALCIFICATION ──');
-    lines.push(`  Cusp Grade: ${session.cuspCalcificationGrade} | Annulus Grade: ${session.annulusCalcificationGrade}`);
+    lines.push(`  Cusp Grades — LCC: ${session.cuspCalcificationGradeLCC} | RCC: ${session.cuspCalcificationGradeRCC} | NCC: ${session.cuspCalcificationGradeNCC}`);
+    lines.push(`  Annulus Grade: ${session.annulusCalcificationGrade}`);
     lines.push(`  Threshold: ${session.calciumThresholdHU} HU`);
     if (session.annulusCalcium) {
-      lines.push(`  Agatston 2D: ${fmt(session.annulusCalcium.agatstonScore2D, 0)}`);
-      lines.push(`  Hyperdense Area: ${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`);
+      lines.push(`  Annulus Agatston 2D: ${fmt(session.annulusCalcium.agatstonScore2D, 0)}`);
+      lines.push(`  Annulus Hyperdense Area: ${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`);
     }
+    if (session.cuspCalciumLCC) lines.push(`  LCC Agatston 2D: ${fmt(session.cuspCalciumLCC.agatstonScore2D, 0)}`);
+    if (session.cuspCalciumRCC) lines.push(`  RCC Agatston 2D: ${fmt(session.cuspCalciumRCC.agatstonScore2D, 0)}`);
+    if (session.cuspCalciumNCC) lines.push(`  NCC Agatston 2D: ${fmt(session.cuspCalciumNCC.agatstonScore2D, 0)}`);
+    if (session.lvotCalcium) lines.push(`  LVOT Agatston 2D: ${fmt(session.lvotCalcium.agatstonScore2D, 0)} | Dense ${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 1)}%`);
     lines.push('');
 
     if (session.notes) {
@@ -1633,6 +1826,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     a.click();
     URL.revokeObjectURL(url);
   }, [session, annulus, fluoro, valveRecs, risks]);
+
+  // Export measurements as CSV (Excel / spreadsheet).
+  const exportCsvReport = useCallback(() => {
+    const csv = session.csvReport();
+    // Prepend UTF-8 BOM so Excel renders mm²/° and quoted cells correctly.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `TAVR_Report_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [session]);
 
   const exportPdfReport = useCallback(async (encapsulate: boolean) => {
     const { buildPdfReport, downloadPdf } = await import('../../../shared/dicom/pdfReport');
@@ -1662,6 +1868,20 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       ],
     });
 
+    if (Object.keys(session.sinusDiameters).length > 0) {
+      sections.push({
+        title: 'Sinus of Valsalva',
+        rows: (['LCS', 'RCS', 'NCS'] as SinusLabel[])
+          .map((lbl) => session.sinusDiameters[lbl])
+          .filter((d): d is NonNullable<typeof d> => !!d)
+          .map((d) => ({
+            label: d.label,
+            value: fmt(d.diameterMm),
+            unit: d.heightMm != null ? `mm · h ${fmt(d.heightMm)} mm` : 'mm',
+          })),
+      });
+    }
+
     sections.push({
       title: 'Risk Assessment',
       rows: [
@@ -1674,12 +1894,21 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     sections.push({
       title: 'Calcification',
       rows: [
-        { label: 'Cusp Grade', value: String(session.cuspCalcificationGrade) },
+        { label: 'LCC Grade', value: String(session.cuspCalcificationGradeLCC) },
+        { label: 'RCC Grade', value: String(session.cuspCalcificationGradeRCC) },
+        { label: 'NCC Grade', value: String(session.cuspCalcificationGradeNCC) },
         { label: 'Annulus Grade', value: String(session.annulusCalcificationGrade) },
         { label: 'Threshold', value: String(session.calciumThresholdHU), unit: 'HU' },
         ...(session.annulusCalcium ? [
-          { label: 'Agatston 2D', value: fmt(session.annulusCalcium.agatstonScore2D, 0) },
-          { label: 'Hyperdense Area', value: fmt(session.annulusCalcium.hyperdenseAreaMm2), unit: 'mm²' },
+          { label: 'Annulus Agatston 2D', value: fmt(session.annulusCalcium.agatstonScore2D, 0) },
+          { label: 'Annulus Hyperdense Area', value: fmt(session.annulusCalcium.hyperdenseAreaMm2), unit: 'mm²' },
+        ] : []),
+        ...(session.cuspCalciumLCC ? [{ label: 'LCC Agatston 2D', value: fmt(session.cuspCalciumLCC.agatstonScore2D, 0) }] : []),
+        ...(session.cuspCalciumRCC ? [{ label: 'RCC Agatston 2D', value: fmt(session.cuspCalciumRCC.agatstonScore2D, 0) }] : []),
+        ...(session.cuspCalciumNCC ? [{ label: 'NCC Agatston 2D', value: fmt(session.cuspCalciumNCC.agatstonScore2D, 0) }] : []),
+        ...(session.lvotCalcium ? [
+          { label: 'LVOT Agatston 2D', value: fmt(session.lvotCalcium.agatstonScore2D, 0) },
+          { label: 'LVOT Ca Fraction', value: fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0), unit: '%' },
         ] : []),
       ],
     });
@@ -1691,6 +1920,22 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         { label: 'Pigtail Access', value: session.plannedPigtailAccess },
       ],
     });
+
+    if (session.accessVessels.size > 0) {
+      const vesselRows: { label: string; value: string; unit: string }[] =
+        Array.from(session.accessVessels.values()).map((v) => ({
+          label: v.vesselId,
+          value: `${fmt(v.minLumenDiameterMm)} (TI ${fmt(v.tortuosityIndex, 2)}, ${fmt(v.cumulativeAngulationDeg, 0)}°)`,
+          unit: 'mm min ø',
+        }));
+      if (accessMinLumen != null) vesselRows.push({ label: 'Min Ilio-femoral Lumen', value: fmt(accessMinLumen), unit: 'mm' });
+      if (sheathOD != null) vesselRows.push({ label: 'Selected Sheath OD', value: fmt(sheathOD), unit: 'mm' });
+      if (sheathFit) {
+        vesselRows.push({ label: 'SFAR', value: fmt(sheathFit.sfar, 2), unit: '' });
+        vesselRows.push({ label: 'Access Feasibility', value: sheathFit.feasibility, unit: '' });
+      }
+      sections.push({ title: 'Access Vessels', rows: vesselRows });
+    }
 
     if (session.notes) {
       sections.push({ title: 'Comments', rows: [{ label: '', value: session.notes }] });
@@ -1774,7 +2019,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                   }}
                   style={{ flex: 1, fontSize: '0.75rem' }}
                 >
-                  ProSize-Style
+                  Guided (double-oblique)
                 </button>
               </div>
 
@@ -1977,6 +2222,23 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               </button>
                             </div>
                           )}
+                          {/* Per-sinus diameters (LCS / RCS / NCS) — two Probe clicks each */}
+                          <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            Per-sinus width — place 2 probes across each sinus, then Confirm.
+                          </div>
+                          {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
+                            const d = session.sinusDiameters[lbl];
+                            return (
+                              <PlaceRow
+                                key={lbl}
+                                label={`${lbl}${d ? ` ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)}` : ''}` : ''}`}
+                                captured={!!d}
+                                onPlace={() => enableProbeTool()}
+                                onConfirm={() => captureSinusWidth(lbl)}
+                                onUndo={() => { session.clearSinusDiameter(lbl); enableProbeTool(); forceUpdate(); }}
+                              />
+                            );
+                          })}
                         </Section>
 
                         {/* ── 4. NC Cusp Guide ── */}
@@ -2008,6 +2270,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
                         {/* ── 5. Coronary Ostia ── */}
                         <Section num="5" title="Coronary Ostia">
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
+                            <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
+                            Snap to anatomy (lumen centroid / cusp nadir)
+                          </label>
                           <PlaceRow label="RCO" captured={!!session.rightOstiumSnapshot}
                             onPlace={() => enableProbeTool()}
                             onConfirm={() => captureCoronaryPoint('right')}
@@ -2016,6 +2282,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             onPlace={() => enableProbeTool()}
                             onConfirm={() => captureCoronaryPoint('left')}
                             onUndo={() => { session.leftOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
+                          {livePerp != null && (
+                            <Row label="View ⟂ to annulus" value={`${livePerp.toFixed(1)}° off`} warn={livePerp > 15} highlight={livePerp <= 5} />
+                          )}
                         </Section>
 
                         {/* ── 6. Cusp Hinge Points ── */}
@@ -2932,21 +3201,43 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                     /> HU
                   </span>
                 </div>
-                <div className="tavi-row">
-                  <span className="tavi-row-label">Cusp Grade</span>
-                  <span className="tavi-row-value">
-                    <select
-                      className="tavi-inline-select"
-                      value={session.cuspCalcificationGrade}
-                      onChange={(e) => { session.cuspCalcificationGrade = Number(e.target.value); forceUpdate(); }}
-                    >
-                      <option value={0}>None (0)</option>
-                      <option value={1}>Mild (1)</option>
-                      <option value={2}>Moderate (2)</option>
-                      <option value={3}>Severe (3)</option>
-                    </select>
-                  </span>
-                </div>
+                {([
+                  ['lcc', 'LCC', session.cuspCalcificationGradeLCC, session.cuspLCC] as const,
+                  ['rcc', 'RCC', session.cuspCalcificationGradeRCC, session.cuspRCC] as const,
+                  ['ncc', 'NCC', session.cuspCalcificationGradeNCC, session.cuspNCC] as const,
+                ]).map(([id, label, grade, center]) => (
+                  <div className="tavi-row" key={id}>
+                    <span className="tavi-row-label">{label} Grade</span>
+                    <span className="tavi-row-value" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <select
+                        className="tavi-inline-select"
+                        value={grade}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (id === 'lcc') session.cuspCalcificationGradeLCC = v;
+                          else if (id === 'rcc') session.cuspCalcificationGradeRCC = v;
+                          else session.cuspCalcificationGradeNCC = v;
+                          session.recompute();
+                          forceUpdate();
+                        }}
+                      >
+                        <option value={0}>None (0)</option>
+                        <option value={1}>Mild (1)</option>
+                        <option value={2}>Moderate (2)</option>
+                        <option value={3}>Severe (3)</option>
+                      </select>
+                      <button
+                        className="tavi-button"
+                        style={{ fontSize: '0.7rem', padding: '2px 8px' }}
+                        disabled={!center || !(session.annulusPlaneNormal ?? session.activeAnnulusGeometry()?.planeNormal)}
+                        title="Sample HU in a 6mm disc around this cusp nadir for 2D Agatston"
+                        onClick={() => sampleCuspCalcium(id, center)}
+                      >
+                        Sample
+                      </button>
+                    </span>
+                  </div>
+                ))}
                 <div className="tavi-row">
                   <span className="tavi-row-label">Annulus Grade</span>
                   <span className="tavi-row-value">
@@ -2964,9 +3255,18 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 </div>
                 {session.annulusCalcium && (
                   <>
-                    <Row label="Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
-                    <Row label="Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
-                    <Row label="Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                    <Row label="Annulus Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
+                    <Row label="Annulus Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
+                    <Row label="Annulus Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                  </>
+                )}
+                {session.cuspCalciumLCC && <Row label="LCC Agatston 2D" value={fmt(session.cuspCalciumLCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumRCC && <Row label="RCC Agatston 2D" value={fmt(session.cuspCalciumRCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumNCC && <Row label="NCC Agatston 2D" value={fmt(session.cuspCalciumNCC.agatstonScore2D, 0)} />}
+                {session.lvotCalcium && (
+                  <>
+                    <Row label="LVOT Agatston 2D" value={fmt(session.lvotCalcium.agatstonScore2D, 0)} />
+                    <Row label="LVOT Ca Fraction" value={`${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0)}%`} />
                   </>
                 )}
               </div>
@@ -2983,6 +3283,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               </button>
               <button className="tavi-button tavi-button-export" onClick={exportReport} style={{ flex: 1 }}>
                 Export Text
+              </button>
+              <button className="tavi-button tavi-button-export" onClick={exportCsvReport} style={{ flex: 1 }} title="Export measurements as CSV (Excel/spreadsheet)">
+                Export CSV
               </button>
               <button className="tavi-button tavi-button-export" onClick={() => void exportPdfReport(false)} style={{ flex: 1 }} title="PDF report">
                 Export PDF
@@ -3296,6 +3599,63 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               </div>
             </div>
 
+            {/* ── Access Vessels (ilio-femoral runoff) ── */}
+            <div className="tavi-card">
+              <h3 className="tavi-card-title">Access Vessels</h3>
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+                Draw a vessel path with the centerline tool, then Measure. Min lumen = narrowest perpendicular diameter.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                {([
+                  ['thoracic-aorta', 'Thoracic Aorta'],
+                  ['abdominal-aorta', 'Abdominal Aorta'],
+                  ['iliac-left', 'Iliac L'],
+                  ['iliac-right', 'Iliac R'],
+                ] as [AccessVesselId, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    className="tavi-button tavi-button-capture"
+                    style={{ fontSize: '0.7rem', padding: '4px' }}
+                    disabled={accessBusy != null}
+                    onClick={() => measureAccessVessel(id)}
+                  >
+                    {accessBusy === id ? '…' : `Measure ${label}`}
+                  </button>
+                ))}
+              </div>
+              <div className="tavi-report-grid">
+                {([
+                  ['thoracic-aorta', 'Thoracic Aorta'],
+                  ['abdominal-aorta', 'Abdominal Aorta'],
+                  ['iliac-left', 'Iliac (L)'],
+                  ['iliac-right', 'Iliac (R)'],
+                ] as [AccessVesselId, string][]).map(([id, label]) => {
+                  const v = session.accessVessels.get(id);
+                  return v ? (
+                    <Row
+                      key={id}
+                      label={label}
+                      value={`min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}°`}
+                      warn={v.tortuosityIndex > 1.5 || v.cumulativeAngulationDeg > 90}
+                    />
+                  ) : null;
+                })}
+                {accessMinLumen != null && (
+                  <Row label="Min Ilio-femoral Lumen" value={`${fmt(accessMinLumen)} mm`} />
+                )}
+                {sheathOD != null && (
+                  <Row label="Selected Sheath OD" value={`${fmt(sheathOD)} mm`} />
+                )}
+                {sheathFit && (
+                  <>
+                    <Row label="Margin" value={`${fmt(sheathFit.marginMm)} mm`} warn={sheathFit.feasibility !== 'feasible'} />
+                    <Row label="SFAR" value={fmt(sheathFit.sfar, 2)} warn={sheathFit.sfar > 1.0} highlight={sheathFit.feasibility === 'feasible'} />
+                    <Row label="Access Feasibility" value={sheathFit.feasibility} warn={sheathFit.feasibility === 'unfavorable'} highlight={sheathFit.feasibility === 'feasible'} />
+                  </>
+                )}
+              </div>
+            </div>
+
             {/* ── 5. Structure Geometries ── */}
             <div className="tavi-card">
               <h3 className="tavi-card-title">Structure Geometries</h3>
@@ -3303,6 +3663,16 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <GeoRow label="Ascending Aorta" geo={session.ascendingAortaGeometry} />
                 <GeoRow label="STJ" geo={session.stjGeometry} />
                 <GeoRow label="Sinus (SOV)" geo={session.sinusGeometry} />
+                {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
+                  const d = session.sinusDiameters[lbl];
+                  return d ? (
+                    <Row
+                      key={lbl}
+                      label={`Sinus ${lbl}`}
+                      value={`${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)} mm` : ''}`}
+                    />
+                  ) : null;
+                })}
                 <GeoRow label="Annulus" geo={annulus} />
                 <GeoRow label="LVOT" geo={session.lvotGeometry} />
               </div>
@@ -3312,16 +3682,29 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             <div className="tavi-card">
               <h3 className="tavi-card-title">Calcification</h3>
               <div className="tavi-report-grid">
-                <Row label="Cusp Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGrade]}
-                  warn={session.cuspCalcificationGrade >= 2} />
+                <Row label="LCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeLCC]}
+                  warn={session.cuspCalcificationGradeLCC >= 2} />
+                <Row label="RCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeRCC]}
+                  warn={session.cuspCalcificationGradeRCC >= 2} />
+                <Row label="NCC Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.cuspCalcificationGradeNCC]}
+                  warn={session.cuspCalcificationGradeNCC >= 2} />
                 <Row label="Annulus Grade" value={['None', 'Mild', 'Moderate', 'Severe'][session.annulusCalcificationGrade]}
                   warn={session.annulusCalcificationGrade >= 2} />
                 <Row label="Threshold" value={`${session.calciumThresholdHU} HU`} />
                 {session.annulusCalcium && (
                   <>
-                    <Row label="Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
-                    <Row label="Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
-                    <Row label="Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                    <Row label="Annulus Agatston 2D" value={fmt(session.annulusCalcium.agatstonScore2D, 0)} />
+                    <Row label="Annulus Hyperdense Area" value={`${fmt(session.annulusCalcium.hyperdenseAreaMm2)} mm²`} />
+                    <Row label="Annulus Ca Fraction" value={`${fmt(session.annulusCalcium.fractionAboveThreshold * 100, 0)}%`} />
+                  </>
+                )}
+                {session.cuspCalciumLCC && <Row label="LCC Agatston 2D" value={fmt(session.cuspCalciumLCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumRCC && <Row label="RCC Agatston 2D" value={fmt(session.cuspCalciumRCC.agatstonScore2D, 0)} />}
+                {session.cuspCalciumNCC && <Row label="NCC Agatston 2D" value={fmt(session.cuspCalciumNCC.agatstonScore2D, 0)} />}
+                {session.lvotCalcium && (
+                  <>
+                    <Row label="LVOT Agatston 2D" value={fmt(session.lvotCalcium.agatstonScore2D, 0)} />
+                    <Row label="LVOT Ca Fraction" value={`${fmt(session.lvotCalcium.fractionAboveThreshold * 100, 0)}%`} />
                   </>
                 )}
               </div>
@@ -3341,6 +3724,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <CheckItem done={!!fluoro} label="C-arm projection angles (Coplanar)" />
                 <CheckItem done={session.sinusPointSnapshots.length >= 3} label="Projection confirmation (Cusp Overlap)" />
                 <CheckItem done={session.membranousSeptumPointSnapshots.length >= 2} label="Septal length (conduction risk)" />
+                <CheckItem done={session.accessVessels.size > 0} label="Iliofemoral access vessels measured" />
               </div>
             </div>
 
