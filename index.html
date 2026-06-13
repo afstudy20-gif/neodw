@@ -35,9 +35,12 @@
     <meta name="apple-mobile-web-app-title" content="NeoDW" />
     <meta name="application-name" content="NeoDW" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+    <!--
+      Fonts are now self-hosted via @fontsource (see src/main.tsx). The
+      previous Google Fonts CDN <link> would be blocked under
+      Cross-Origin-Embedder-Policy: credentialless because the gstatic
+      response does not advertise Cross-Origin-Resource-Policy.
+    -->
   </head>
   <body>
     <div id="root"></div>

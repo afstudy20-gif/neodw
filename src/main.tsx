@@ -1,5 +1,16 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+// Self-hosted fonts via @fontsource — bundled by Vite, served same-origin.
+// Replaces the fonts.googleapis.com / fonts.gstatic.com CDN <link> tag so
+// the page can run under Cross-Origin-Embedder-Policy: credentialless
+// (third-party font subresources without CORP would otherwise be blocked).
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/500.css';
+import '@fontsource/jetbrains-mono/600.css';
 import App from './App';
 import './styles/shell.css';
 
