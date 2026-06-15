@@ -120,6 +120,38 @@ export function isArchiveName(name: string): 'zip' | 'rar' | 'tar' | null {
   return null;
 }
 
+// Raster images we can decode via the browser canvas and wrap as Secondary
+// Capture DICOM (animated GIF / multi-page TIFF are intentionally excluded).
+function isRasterImageName(name: string): boolean {
+  return /\.(jpe?g|png|bmp|webp)$/i.test(name);
+}
+
+// Sniff JPEG (FF D8 FF) / PNG (89 50 4E 47) magic regardless of extension.
+async function sniffRasterImage(file: File): Promise<boolean> {
+  if (file.size < 4) return false;
+  try {
+    const b = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true; // JPEG
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true; // PNG
+  } catch { /* ignore */ }
+  return false;
+}
+
+// Convert a raster image File to a Secondary Capture DICOM File (best-effort).
+async function convertImageToDicom(file: File): Promise<File | null> {
+  try {
+    const { jpegFileToDicom } = await import('./dicom/jpegToDicom');
+    const bytes = await jpegFileToDicom(file, {
+      seriesDescription: `Imported: ${file.name}`,
+    });
+    const base = (file.name.split('/').pop() || file.name).replace(/\.[^.]+$/, '');
+    return new File([bytes as BlobPart], `${base}.dcm`, { type: 'application/dicom' });
+  } catch (e) {
+    console.warn('[intake] image→DICOM conversion failed', file.name, e);
+    return null;
+  }
+}
+
 // Sniff first 4 bytes to detect archive regardless of extension.
 export async function sniffArchive(file: File): Promise<'zip' | 'rar' | null> {
   if (file.size < 8) return null;
@@ -180,7 +212,8 @@ export async function expandAndFilterDicom(files: File[]): Promise<File[]> {
   // here matters because many PACS/CD exports drop files without any
   // extension and without a Part-10 preamble (implicit VR), and the
   // heuristic can miss when a private tag sits at offset 0.
-  const JUNK_EXT = /\.(jpe?g|png|gif|bmp|tiff?|webp|pdf|txt|rtf|doc|docx|xls|xlsx|ppt|pptx|xml|json|html?|css|js|ts|zip|rar|7z|tgz|tar|gz|bz2|mp3|mp4|mov|avi|wmv|mkv|webm|exe|bat|sh|app|msi|log)$/i;
+  // jpeg/png/bmp/webp are NOT junk — converted to Secondary Capture DICOM below.
+  const JUNK_EXT = /\.(gif|tiff?|pdf|txt|rtf|doc|docx|xls|xlsx|ppt|pptx|xml|json|html?|css|js|ts|zip|rar|7z|tgz|tar|gz|bz2|mp3|mp4|mov|avi|wmv|mkv|webm|exe|bat|sh|app|msi|log)$/i;
   const out: File[] = [];
   for (const f of expanded) {
     const lower = f.name.toLowerCase();
@@ -189,6 +222,12 @@ export async function expandAndFilterDicom(files: File[]): Promise<File[]> {
     // Skip hidden / system files
     const base = lower.split('/').pop() || lower;
     if (base.startsWith('.') || base === 'thumbs.db') continue;
+    // Raster images → wrap as Secondary Capture DICOM so they load like any series.
+    if (isRasterImageName(base) || (await sniffRasterImage(f))) {
+      const converted = await convertImageToDicom(f);
+      if (converted) out.push(converted);
+      continue;
+    }
     // Skip known non-DICOM extensions
     if (JUNK_EXT.test(base)) continue;
     // Skip tiny files that can't possibly be DICOM (< 256 bytes)

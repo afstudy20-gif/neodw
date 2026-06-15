@@ -2,12 +2,12 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import {
-  SCALPEL_AIR_HU,
   addScaled,
   buildViewRay,
   collectPolygonRaySamples,
   marchRangeAlongRay,
   shouldEraseVoxel,
+  eraseValueForScalarType,
 } from './scalpelRayMarch';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
@@ -349,10 +349,20 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     }
   }, []);
 
-  const getTransparentVoxelValue = useCallback((_volume: any): number => {
-    // CT VRT presets map -3024 HU to zero opacity. Using 0 (water) leaves erased
-    // voxels visible as soft tissue — the most common reason scalpel "does nothing".
-    return SCALPEL_AIR_HU;
+  const getTransparentVoxelValue = useCallback((volume: any): number => {
+    // The erase value must be expressed in the array's STORED units, not raw HU.
+    // For an UNSIGNED scalar array (Uint16 CT, PixelRepresentation 0) writing a
+    // raw −3024 wraps to a huge dense value — the structure gets brighter instead
+    // of disappearing. eraseValueForScalarType returns 0 (air) for unsigned data
+    // and −3024 for signed/float, where −3024 HU maps to zero VRT opacity.
+    let ctorName: string | undefined;
+    try {
+      const firstImageId = volume?.imageIds?.[0];
+      const img = firstImageId ? (cornerstone.cache.getImage(firstImageId) as any) : null;
+      const arr = img?.voxelManager?.getScalarData?.() ?? volume?.voxelManager?.getCompleteScalarDataArray?.();
+      ctorName = arr?.constructor?.name;
+    } catch { /* ignore */ }
+    return eraseValueForScalarType(ctorName);
   }, []);
 
   const markVolumeFramesModified = useCallback((volume: any, viewport: cornerstone.Types.IVolumeViewport, modifiedSlices?: Set<number>) => {
@@ -377,46 +387,19 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       mapper?.modified?.();
     } catch { /* ignore */ }
 
-    // Fast-path render
+    // THE FIX: setUpdatedFrame only FLAGS frames dirty — the streaming texture
+    // re-uploads them to the GPU inside update3DFromRaw(), which a plain
+    // viewport.render() after an off-render edit does NOT reach (observed: 546
+    // frames left pending, so the carve never appeared). Prime a render so the
+    // GL context is current, push the dirty frames to the GPU explicitly, then
+    // redraw. This replaces the old setVolumesForViewports re-bind hammer (which
+    // also failed to upload and reset the user's preset/shading).
+    const engine = cornerstone.getRenderingEngine(renderingEngineId);
     viewport.render();
-    try {
-      const engine = cornerstone.getRenderingEngine(renderingEngineId);
-      engine?.renderViewport(viewport.id);
-      engine?.render();
-    } catch { /* ignore */ }
-
-    // Fallback: Re-bind the volume to force the WebGL texture to completely rebuild from cached image arrays.
-    try {
-      const engine = cornerstone.getRenderingEngine(renderingEngineId);
-      if (engine && viewport) {
-        cornerstone.setVolumesForViewports(engine, [{ volumeId }], [viewport.id]).then(() => {
-          // Restore active preset
-          const activePreset = (viewport as any).getProperties?.()?.preset || 'CT-Cardiac3';
-          viewport.setProperties({ preset: activePreset });
-          
-          // Restore shading settings
-          try {
-            const actor = viewport.getDefaultActor()?.actor;
-            if (actor) {
-              const property = (actor as any).getProperty?.();
-              if (property) {
-                property.setShade(true);
-                property.setAmbient(ambient);
-                property.setDiffuse(diffuse);
-                property.setSpecular(specular);
-                property.setSpecularPower(specularPower);
-              }
-            }
-          } catch { /* ignore */ }
-
-          viewport.render();
-          engine.render();
-        });
-      }
-    } catch (e) {
-      console.warn('[Scalpel] Re-binding volume failed:', e);
-    }
-  }, [renderingEngineId, volumeId, ambient, diffuse, specular, specularPower]);
+    try { texture?.update3DFromRaw?.(); } catch { /* ignore */ }
+    viewport.render();
+    try { engine?.render(); } catch { /* ignore */ }
+  }, [renderingEngineId]);
 
   // Save volume data backup for undo.
   // Cornerstone3D streaming volumes store each slice in a separate image cache entry.
@@ -624,6 +607,24 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
     }
 
+    // Read-back verification: confirm the erase value actually landed in the
+    // LIVE per-image array the GPU texture uploads from (cache.getImage →
+    // voxelManager.getScalarData). If `wrote` is false, the write target is
+    // wrong; if true but the structure still shows, it's a texture-refresh issue.
+    let readbackOk: boolean | null = null;
+    let scalarTypeName: string | undefined;
+    if (erasedSet.size > 0) {
+      const anyKey = erasedSet.values().next().value as number;
+      const kk = Math.floor(anyKey / (dims[0] * dims[1]));
+      const within = anyKey - kk * dims[0] * dims[1];
+      try {
+        const img = cornerstone.cache.getImage(volume.imageIds[kk]) as any;
+        const liveArr = img?.voxelManager?.getScalarData?.();
+        scalarTypeName = liveArr?.constructor?.name;
+        if (liveArr) readbackOk = liveArr[within] === ERASE_VALUE;
+      } catch { /* ignore */ }
+    }
+
     (window as any).__lastScalpelStats = {
       erased,
       modifiedSlices: modifiedSlices.size,
@@ -631,13 +632,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       rayHits,
       mapFailures,
       eraseValue: ERASE_VALUE,
+      scalarTypeName,
+      readbackOk,
       dims,
       bounds,
     };
 
     console.log(
       `[Scalpel] Ray-march complete: erased=${erased}, slices=${modifiedSlices.size}, ` +
-      `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}`
+      `rays=${rays}, hits=${rayHits}, mapFailures=${mapFailures}, eraseValue=${ERASE_VALUE}, ` +
+      `scalarType=${scalarTypeName}, readbackOk=${readbackOk}`
     );
 
     if (erased > 0) {
@@ -816,21 +820,21 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       ctx.setLineDash([]);
     };
 
-    // Use DOCUMENT-level listeners to bypass any VTK event capturing.
-    // Filter by checking if mouse is within the canvas bounding rect.
-    const isInCanvas = (e: MouseEvent) => {
-      const rect = canvas!.getBoundingClientRect();
-      return e.clientX >= rect.left && e.clientX <= rect.right &&
-             e.clientY >= rect.top && e.clientY <= rect.bottom;
-    };
-
+    // DOCUMENT-level capture listeners bypass VTK event capturing; the stroke
+    // is gated on e.target === canvas (see onDown) so the control deck stays
+    // clickable.
     const toLocal = (e: MouseEvent): [number, number] => {
       const rect = canvas!.getBoundingClientRect();
       return [e.clientX - rect.left, e.clientY - rect.top];
     };
 
     const onDown = (e: MouseEvent) => {
-      if (e.button !== 0 || !isInCanvas(e)) return;
+      // Only start a stroke when the click actually lands on the overlay canvas.
+      // Using the event target (not a bounding-rect test) means clicks on the
+      // control deck — which sits ON TOP of the canvas — pass straight through
+      // to its buttons instead of being swallowed in the capture phase. This is
+      // the fix for "after pressing Erase, no 3D menu is clickable".
+      if (e.button !== 0 || e.target !== canvas) return;
       e.preventDefault();
       e.stopPropagation();
       isDrawingRef.current = true;

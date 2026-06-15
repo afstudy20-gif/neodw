@@ -151,6 +151,24 @@ export function marchRangeAlongRay(
   return { tMin: focalDist * 0.05, tMax: focalDist * 2.5 };
 }
 
+/**
+ * Pick the stored value that renders as "air" (zero VRT opacity) for a given
+ * scalar typed-array type. This is the crux of the scalpel working at all:
+ *
+ * CT volumes are commonly stored as an UNSIGNED type (Uint16, PixelRepresentation
+ * 0) with a negative RescaleIntercept (e.g. −1024). The stored value is
+ * `(HU − intercept)/slope`, so the lowest air maps to stored 0. Writing a raw
+ * HU like −3024 into a Uint16 array WRAPS to ~62512 — a very dense voxel — so
+ * the structure is not erased (it gets brighter). For unsigned data the correct
+ * "air" stored value is therefore 0; for signed/float data −3024 HU is below air
+ * and maps to zero opacity directly.
+ *
+ * @param arrayCtorName e.g. "Int16Array", "Uint16Array", "Float32Array"
+ */
+export function eraseValueForScalarType(arrayCtorName: string | undefined | null): number {
+  return arrayCtorName && arrayCtorName.startsWith('Uint') ? 0 : SCALPEL_AIR_HU;
+}
+
 export function shouldEraseVoxel(hu: number | null | undefined, eraseValue = SCALPEL_AIR_HU): boolean {
   if (hu === null || hu === undefined) return false;
   if (hu <= SCALPEL_TISSUE_MIN_HU) return false;

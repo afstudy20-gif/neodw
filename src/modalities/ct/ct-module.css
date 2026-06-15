@@ -1343,9 +1343,19 @@ button:focus:not(:focus-visible) {
   backdrop-filter: blur(8px);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 10px 14px;
-  z-index: 10;
+  padding: 6px 12px;
+  /* Above the scalpel overlay canvas (z-index 55) so the deck stays clickable
+     while the scalpel is active. */
+  z-index: 60;
+  /* Cap height so the control deck never swallows the viewport; scroll the rest. */
+  max-height: 38vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
+
+/* Tighten the stacked control rows so the deck stays compact. */
+.vol3d-overlay-controls .render-mode { gap: 2px; }
+.vol3d-overlay-controls .render-mode > div { padding-top: 2px !important; padding-bottom: 2px !important; }
 
 .vol3d-orientation-labels {
   position: absolute;
