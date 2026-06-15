@@ -1,6 +1,6 @@
 import * as Comlink from 'comlink';
-import { parseHeaderLogic } from './parseHeadersWorker';
-import type { ParseHeadersWorkerApi, ParsedHeader } from './parseHeadersWorker';
+import { parseHeaderLogic, type ParsedHeader } from './parseHeaderLogic';
+import type { ParseHeadersWorkerApi } from './parseHeadersWorker';
 
 // 256 KB is enough for >99% of clinical DICOM headers; falls back to
 // full-file read when the parser bails out (e.g. multi-frame with
