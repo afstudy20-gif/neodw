@@ -118,19 +118,23 @@ export interface ParsedHeader {
   hasPart10Header: boolean;
 }
 
+export function parseHeaderLogic(bytes: Uint8Array): ParsedHeader {
+  const { dataSet, hasPart10 } = parseDataSet(bytes);
+  const ds = dataSet as { string: (tag: string) => string | undefined };
+  const metadata: Record<string, string> = {};
+  for (const [key, tag] of Object.entries(TAGS)) {
+    try {
+      metadata[key] = ds.string(tag) ?? '';
+    } catch {
+      metadata[key] = '';
+    }
+  }
+  return { metadata, hasPart10Header: hasPart10 };
+}
+
 const api = {
   parseHeader(bytes: Uint8Array): ParsedHeader {
-    const { dataSet, hasPart10 } = parseDataSet(bytes);
-    const ds = dataSet as { string: (tag: string) => string | undefined };
-    const metadata: Record<string, string> = {};
-    for (const [key, tag] of Object.entries(TAGS)) {
-      try {
-        metadata[key] = ds.string(tag) ?? '';
-      } catch {
-        metadata[key] = '';
-      }
-    }
-    return { metadata, hasPart10Header: hasPart10 };
+    return parseHeaderLogic(bytes);
   },
 };
 
