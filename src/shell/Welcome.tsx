@@ -9,27 +9,6 @@ interface Props {
 
 const APP_VERSION = '0.1.0';
 
-const COUNTRY_XY: Record<string, [number, number]> = {
-  us:[90,80], ca:[85,55], mx:[95,100], br:[135,130], ar:[130,155],
-  gb:[178,65], fr:[182,75], de:[190,70], es:[178,80], it:[192,82],
-  nl:[185,68], se:[195,55], no:[190,50], ru:[245,60], pl:[200,68],
-  tr:[215,90], sa:[225,105], ae:[235,105], il:[215,95], eg:[215,105],
-  za:[215,155], ng:[195,120], ke:[225,130], ma:[180,95],
-  in:[265,105], pk:[260,100], bd:[275,105], lk:[270,115],
-  cn:[290,85], jp:[320,85], kr:[315,87], id:[300,135], ph:[310,115], vn:[295,110], th:[285,110], my:[295,125], sg:[295,128],
-  au:[315,160], nz:[340,165],
-  ir:[235,95], iq:[225,95], ua:[210,72], ro:[205,80], gr:[205,85], pt:[175,85], be:[185,72], ch:[188,75], at:[195,75], cz:[198,73], hu:[200,77], ie:[172,65], fi:[205,52], dk:[190,62], cl:[125,150], co:[115,125], pe:[120,135], ve:[120,120], tw:[315,100], hk:[305,105],
-};
-
-const LAND_DOTS = "60,45 65,45 70,43 75,43 80,45 85,47 90,48 95,50 100,52 105,55 110,55 115,55 120,55 125,55 130,55 135,53 65,50 70,50 75,50 80,52 85,53 90,54 95,55 100,58 105,60 110,60 115,60 65,55 70,55 75,58 80,60 85,60 90,62 95,62 100,64 105,65 110,65 115,62 90,68 95,70 100,70 105,72 110,72 115,70 95,75 100,78 105,80 110,80 115,82 108,85 112,88 115,92 120,92 125,95 130,98 135,102 140,108 145,115 150,122 148,130 145,138 140,145 135,152 130,158 128,162 130,165 135,165 170,50 175,48 180,50 185,50 190,48 195,48 200,50 205,52 210,55 215,55 220,55 225,58 175,55 180,55 185,55 190,55 195,55 200,55 205,55 210,58 215,60 220,60 225,62 230,62 180,62 185,62 190,62 195,62 200,62 205,62 210,65 215,68 180,68 185,68 190,68 195,70 200,72 205,72 210,75 215,75 190,75 195,78 200,80 205,82 210,82 215,82 220,82 195,85 200,88 205,90 210,92 215,92 220,92 225,92 200,95 205,98 210,102 215,105 220,105 225,108 230,108 235,108 240,105 245,105 200,110 205,112 210,115 215,118 220,118 225,118 200,122 205,125 210,128 215,130 218,135 215,140 212,145 210,148 208,145 205,140 250,60 255,58 260,58 265,58 270,58 275,58 280,58 285,58 290,60 295,60 300,60 305,62 310,65 250,65 255,65 260,65 265,65 270,65 275,65 280,65 285,65 290,65 295,68 300,70 305,70 310,72 315,72 250,72 255,72 260,72 265,75 270,78 275,78 280,78 285,78 290,80 295,82 300,82 305,82 310,85 320,85 325,85 260,82 265,85 270,88 275,88 280,90 285,92 290,92 295,95 300,98 305,100 310,102 315,102 322,88 322,92 328,90 265,95 270,98 275,102 280,105 285,108 290,112 268,108 272,112 275,115 278,118 282,120 298,132 302,132 308,132 295,138 300,138 305,138 310,138 295,155 300,155 305,155 310,155 315,155 320,155 325,155 330,158 335,160 340,162 345,162 325,165 330,165 335,168 340,168 345,170 345,172 348,174 340,140 345,142";
-
-function ccFlag(cc: string): string {
-  if (!cc || cc.length !== 2) return '🌐';
-  return [...cc.toUpperCase()].map((c) => String.fromCodePoint(c.charCodeAt(0) + 127397)).join('');
-}
-
-interface CountryStat { cc: string; count: number; }
-
 /* ── Icons ───────────────────────────────────────── */
 function Ico({ s = 16, children }: { s?: number; children: JSX.Element }) {
   return (
@@ -200,91 +179,8 @@ export default function Welcome({ onLaunch }: Props) {
     window.location.replace(url.toString());
   };
 
-  const [stats, setStats] = useState<{ total: number | null; daily: number | null; active: number | null; countries: CountryStat[]; myCc: string | null; myName: string | null }>({
-    total: null, daily: null, active: null, countries: [], myCc: null, myName: null,
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    const CACHE_KEY = 'neodw_stats_cache';
-    const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-    // Serve from cache if fresh
-    try {
-      const raw = localStorage.getItem(CACHE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.ts && Date.now() - parsed.ts < CACHE_TTL_MS) {
-          setStats(parsed.data);
-        }
-      }
-    } catch {}
-
-    async function loadStats() {
-      const NS = 'neodw-global';
-      let geoCc: string | null = null;
-      let geoName: string | null = null;
-      try {
-        const controller = (AbortSignal as any).timeout ? { signal: (AbortSignal as any).timeout(4000) } : {};
-        const geo = await fetch('https://ipapi.co/json/', controller).then((r) => r.json());
-        geoCc = (geo.country_code || '').toLowerCase() || null;
-        geoName = geo.country_name || geo.country_code || null;
-      } catch {}
-
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const hourKey = new Date().toISOString().slice(0, 13).replace(/[-:T]/g, '');
-      const sessionHit = sessionStorage.getItem('neodw_hit');
-      const op = sessionHit ? 'get' : 'hit';
-      const base = 'https://abacus.jasoncameron.dev';
-
-      const fetchCount = (key: string, operation: string) =>
-        fetch(`${base}/${operation}/${NS}/${key}`)
-          .then((r) => (r.ok ? r.json() : null))
-          .then((j) => (j && typeof j.value === 'number' ? j.value : null))
-          .catch(() => null);
-
-      const [total, daily, active] = await Promise.all([
-        fetchCount('visits', op),
-        fetchCount(`d-${today}`, op),
-        fetchCount(`h-${hourKey}`, op),
-      ]);
-
-      if (!sessionHit) {
-        sessionStorage.setItem('neodw_hit', '1');
-        if (geoCc && geoCc.length === 2) fetch(`${base}/hit/${NS}/c-${geoCc}`).catch(() => {});
-      }
-
-      // Country queries: serial with small delay to avoid rate limits. Skip if recent cache exists.
-      let results: CountryStat[] = [];
-      try {
-        const raw = localStorage.getItem(CACHE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed?.data?.countries && Date.now() - (parsed.ts || 0) < CACHE_TTL_MS) {
-            results = parsed.data.countries;
-          }
-        }
-      } catch {}
-
-      if (results.length === 0) {
-        const ccs = Object.keys(COUNTRY_XY);
-        for (const cc of ccs) {
-          if (cancelled) return;
-          const n = await fetchCount(`c-${cc}`, 'get');
-          results.push({ cc, count: n || 0 });
-          await new Promise((r) => setTimeout(r, 60));
-        }
-      }
-
-      if (cancelled) return;
-      const data = { total, daily, active, countries: results, myCc: geoCc, myName: geoName };
-      setStats(data);
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data })); } catch {}
-    }
-
-    void loadStats();
-    return () => { cancelled = true; };
-  }, []);
+  // Visitor analytics (ipapi geo + abacus counters + world map) removed —
+  // no third-party tracking; the app stays fully local.
 
   // PWA install prompt capture — surface an in-page hint that mirrors the
   // address-bar install icon, and trigger prompt() on click when the browser
@@ -352,8 +248,6 @@ export default function Welcome({ onLaunch }: Props) {
     if (files.length === 0) return;
     onLaunch({ kind: 'ct', panel: null, title: 'mod.ctmr' }, files);
   }
-
-  const topCountries = stats.countries.filter((c) => c.count > 0).sort((a, b) => b.count - a.count).slice(0, 8);
 
   return (
     <div>
@@ -661,84 +555,6 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
           <span>Buraya bırak</span>
         </div>
       )}
-    </div>
-  );
-}
-
-/* ── Global Activity (replaces Recent panel) ─────── */
-function GlobalActivityPanel({ stats }: { stats: any }) {
-  const { t } = useI18n();
-  return (
-    <div className="nd-recent">
-      <div className="nd-recent-head">
-        <div className="cap">{t('panel.activity')}</div>
-        <div style={{ flex: 1 }} />
-        <div className="mono" style={{ fontSize: 10.5, color: 'var(--nd-ink-3)' }}>GLOBAL</div>
-      </div>
-
-      <div style={{ padding: '18px 18px 10px' }}>
-        <div className="nd-visitor-stats">
-          <div>
-            <div className="mono nd-visitor-stat-num">{stats.active ?? '—'}</div>
-            <div className="cap nd-visitor-stat-lbl">{t('sp.active')}</div>
-          </div>
-          <div>
-            <div className="mono nd-visitor-stat-num">{stats.daily ?? '—'}</div>
-            <div className="cap nd-visitor-stat-lbl">{t('sp.today')}</div>
-          </div>
-          <div>
-            <div className="mono nd-visitor-stat-num">{stats.total?.toLocaleString() ?? '—'}</div>
-            <div className="cap nd-visitor-stat-lbl">{t('sp.visits')}</div>
-          </div>
-        </div>
-
-        <div style={{ fontSize: 13, color: 'var(--nd-ink-3)', marginTop: 14 }}>
-          <span>{stats.myCc ? ccFlag(stats.myCc) : '🌐'}</span>{' '}
-          <span>{t('sp.loc')}: {stats.myName ?? '—'}</span>
-        </div>
-      </div>
-
-      <div className="nd-recent-foot">
-        <button className="nd-recent-drop" onClick={async () => {
-          const input = document.createElement('input');
-          input.type = 'file';
-          input.multiple = true;
-          (input as any).webkitdirectory = true;
-          input.click();
-        }}>
-          <IcoUpload s={14}/> {t('panel.drop')}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ── World map ──────────────────────────────────── */
-function WorldMap({ countries, myCc }: { countries: CountryStat[]; myCc: string | null }) {
-  const max = Math.max(1, ...countries.map((d) => d.count));
-  return (
-    <div className="nd-worldmap">
-      <svg viewBox="0 0 360 180" xmlns="http://www.w3.org/2000/svg">
-        <rect width="360" height="180" fill="transparent" />
-        <g fill="var(--nd-ink-3)" opacity="0.28">
-          {LAND_DOTS.split(' ').map((p, i) => {
-            const [x, y] = p.split(',');
-            return <circle key={i} cx={x} cy={y} r={1.3} />;
-          })}
-        </g>
-        <g>
-          {countries.filter((c) => c.count > 0).map((c) => {
-            const xy = COUNTRY_XY[c.cc]; if (!xy) return null;
-            const r = Math.max(2.2, Math.min(7.5, 2.2 + 5 * Math.sqrt(c.count / max)));
-            const isMe = c.cc === myCc;
-            return (
-              <circle key={c.cc} cx={xy[0]} cy={xy[1]} r={r} fill={isMe ? 'var(--nd-crimson)' : 'var(--nd-primary)'} opacity={0.75}>
-                <title>{c.cc.toUpperCase()}: {c.count}</title>
-              </circle>
-            );
-          })}
-        </g>
-      </svg>
     </div>
   );
 }
