@@ -28,8 +28,11 @@ export function getDecoratedMetaDataProvider(defaultProvider: (type: string, ima
     // 2. Logging Transfer Syntax and Pixel Data
     // We log when 'imagePixelModule' is requested, as this happens during the main image loading/caching phase.
     if (type === 'imagePixelModule' && result) {
-      // Try to get transfer syntax from its specific module
-      const tsModule = defaultProvider('transferSyntaxModule', imageId);
+      // Cornerstone v4 metadata key is 'transferSyntax' (no Module suffix —
+      // see @cornerstonejs/dicom-image-loader's wadouri/metaData/metaDataProvider.js
+      // line 27). Asking for 'transferSyntaxModule' returned undefined and
+      // always logged "Unknown Transfer Syntax" even when decode worked.
+      const tsModule = defaultProvider('transferSyntax', imageId);
       const ts = tsModule?.transferSyntaxUID || 'Unknown Transfer Syntax';
       
       const fileName = imageId.split('/').pop()?.split('?')[0] || 'unknown';
