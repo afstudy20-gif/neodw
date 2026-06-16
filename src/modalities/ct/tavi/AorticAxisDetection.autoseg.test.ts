@@ -76,6 +76,22 @@ describe('autoSegmentCrossSectionAtPlane: seeded BFS from crosshair + min-diamet
     expect(seg).toBeNull();
   });
 
+  it('segments a sub-peak / delayed-phase lumen (HU ~120) without an explicit threshold', () => {
+    // Lumen at 120 HU — typical late-arterial or delayed-phase aorta. A static
+    // 150–500 band would exclude every pixel and starve the BFS; the dynamic
+    // seed-anchored band catches it as long as the crosshair is on the lumen.
+    const dimLumen = makeVolume([120, 120, 10], (i, j) => {
+      const d = Math.hypot(i - 60, j - 60);
+      return d <= 13 ? 120 : -50;
+    });
+    const origin: TAVIVector3D = { x: 60, y: 60, z: 5 };
+    const seg = autoSegmentCrossSectionAtPlane(dimLumen, origin, NZ, VY, {
+      gridSize: 200, pixelSpacing: 0.25, maxDiameterMm: 55, minDiameterMm: 15,
+    });
+    expect(seg).not.toBeNull();
+    expect(seg!.contourPoints.length).toBeGreaterThanOrEqual(10);
+  });
+
   it('returns the aorta even if a brighter neighbour exists in the field', () => {
     // Brighter fleck (700 HU) close to the aorta but disconnected from it.
     // A "largest HU" / "brightest blob" strategy would prefer the fleck;

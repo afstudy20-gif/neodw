@@ -2087,8 +2087,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       const minDiameterMm = isSinus ? 18 : isSTJ ? 14 : isAorta ? 15 : 8;
                       const maxDiameterMm = isAorta ? 55 : 50;
 
+                      // Intentionally omit huMin/huMax: let the segmenter derive
+                      // the band from the seed HU at the crosshair. Hard-coding
+                      // 150–500 assumed peak-arterial enhancement and starved the
+                      // BFS in delayed-phase studies where the lumen is 80–180 HU.
                       const seg = autoSegmentCrossSectionAtPlane(volume, origin, normal, viewUp, {
-                        huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
+                        gridSize: 200, pixelSpacing: 0.25,
                         maxDiameterMm,
                         minDiameterMm,
                         searchRadiusMm: 25,

@@ -295,14 +295,32 @@ export function autoSegmentCrossSectionAtPlane(
     }
   }
 
-  // Try segmentation with progressively tighter thresholds
-  // This handles cases where loose thresholds cause flood-fill leakage
-  const thresholdAttempts: [number, number][] = [
-    [options?.huMin ?? 150, options?.huMax ?? 500],
-    [180, 450],
-    [200, 400],
-    [250, 400],
-  ];
+  // Sample HU at the seed pixel (== crosshair) and derive the threshold band
+  // dynamically. A fixed 150–500 band assumes peak-arterial enhancement; in
+  // delayed-phase or sub-optimal contrast studies the actual lumen sits at
+  // 80–180 HU and gets excluded, leaving the BFS without any seed to grow
+  // from. Anchor every attempt to the seed HU instead — what the clinician
+  // points at IS the lumen, by definition, so [seedHU - W, seedHU + W] is
+  // the safest band. Cascade widens from tight to loose so the first attempt
+  // that grows into a sensibly-sized region wins.
+  const centerRow0 = Math.floor(gridSize / 2);
+  const centerCol0 = Math.floor(gridSize / 2);
+  const seedHU = grid[centerRow0 * gridSize + centerCol0];
+  if (!Number.isFinite(seedHU) || seedHU < 30) {
+    console.warn(`[AutoSeg] Seed HU=${seedHU} too low — crosshair appears to be off the contrast-filled lumen`);
+    return null;
+  }
+  const callerHuMin = options?.huMin;
+  const callerHuMax = options?.huMax;
+  const thresholdAttempts: [number, number][] =
+    callerHuMin !== undefined || callerHuMax !== undefined
+      ? [[callerHuMin ?? 150, callerHuMax ?? 500]]
+      : [
+          [seedHU - 60, seedHU + 100],
+          [seedHU - 80, seedHU + 150],
+          [seedHU - 100, seedHU + 200],
+          [seedHU - 40, seedHU + 60],
+        ];
 
   for (const [huMin, huMax] of thresholdAttempts) {
     const result = _segmentWithThreshold(
