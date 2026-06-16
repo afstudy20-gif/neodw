@@ -910,49 +910,6 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 }
 .nd-support-email a:hover { text-decoration: underline; }
 
-.nd-support-card {
-  width: 100%;
-  max-width: 460px;
-  padding: 22px 24px 20px;
-  border: 1px solid var(--nd-line);
-  background: var(--nd-panel);
-  border-radius: 14px;
-  box-shadow: var(--nd-shadow, 0 1px 0 rgba(0,0,0,0.04));
-}
-.nd-support-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--nd-ink);
-  margin-bottom: 8px;
-}
-.nd-support-desc {
-  font-size: 13.5px;
-  color: var(--nd-ink-2);
-  line-height: 1.5;
-  margin-bottom: 16px;
-}
-.nd-support-btns {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-.nd-support-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 16px;
-  border-radius: 8px;
-  font-size: 13.5px;
-  font-weight: 600;
-  text-decoration: none;
-  color: #fff;
-  transition: filter 0.15s;
-}
-.nd-support-btn:hover { filter: brightness(1.08); }
-.nd-support-btn.patreon { background: #E94560; }
-.nd-support-btn.shopier { background: #2BB6F0; }
-
 .nd-support-about {
   background: transparent;
   border: 0;

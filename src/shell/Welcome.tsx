@@ -91,7 +91,7 @@ const MODES: ModeDef[] = [
     desc: 'mod.ctmr.desc',
     icon: <IcoHeart/>,
     key: 'ctmr',
-    tags: ['MPR', '3D VR', 'LA', 'Aorta', 'LAA', 'LV-ADAS', 'Hand-MR'],
+    tags: ['MPR', '3D VR', 'W/L', 'Length', 'Angle', 'Annotate'],
   },
   {
     route: { kind: 'ct', panel: 'tavi', title: 'mod.tavi' },
@@ -101,6 +101,51 @@ const MODES: ModeDef[] = [
     icon: <IcoHeart/>,
     key: 'tavi',
     tags: ['Annulus', 'Per-cusp Ca²⁺', 'Sinus 3×', 'Coronary Ø', 'Fluoro angle', 'SFAR'],
+  },
+  {
+    route: { kind: 'ct', panel: 'la', title: 'mod.la' },
+    group: 'cross',
+    name: 'mod.la',
+    desc: 'mod.la.desc',
+    icon: <IcoHeart/>,
+    key: 'la',
+    tags: ['3D Segment', 'Wall Ø', 'Veins 4×', 'AF Ablation', 'Roof line', 'Mesh export'],
+  },
+  {
+    route: { kind: 'ct', panel: 'laa', title: 'mod.laa' },
+    group: 'cross',
+    name: 'mod.laa',
+    desc: 'mod.laa.desc',
+    icon: <IcoHeart/>,
+    key: 'laa',
+    tags: ['Ostium Ø', 'Landing zone', 'Depth', 'Device size', 'Watchman', 'Lobe axis'],
+  },
+  {
+    route: { kind: 'ct', panel: 'aorta', title: 'mod.aorta' },
+    group: 'cross',
+    name: 'mod.aorta',
+    desc: 'mod.aorta.desc',
+    icon: <IcoActivity/>,
+    key: 'aorta',
+    tags: ['Centerline', 'Ø by segment', 'Sinotubular', 'Aneurysm', 'Tortuosity', 'Arch type'],
+  },
+  {
+    route: { kind: 'ct', panel: 'lv-adas', title: 'mod.lvadas' },
+    group: 'cross',
+    name: 'mod.lvadas',
+    desc: 'mod.lvadas.desc',
+    icon: <IcoHeart/>,
+    key: 'lvadas',
+    tags: ['17-segment', 'Scar core', 'Border zone', 'Bullseye', 'VT substrate', 'Endo / Epi'],
+  },
+  {
+    route: { kind: 'ct', panel: 'hand-mr', title: 'mod.handmr' },
+    group: 'cross',
+    name: 'mod.handmr',
+    desc: 'mod.handmr.desc',
+    icon: <IcoScan/>,
+    key: 'handmr',
+    tags: ['MR MPR', 'W/L preset', 'Length', 'Angle', 'Annotate', 'Thin slab'],
   },
   {
     route: { kind: 'ccta' },
@@ -398,21 +443,6 @@ export default function Welcome({ onLaunch }: Props) {
         <div className="nd-support-wrap">
           <div className="nd-support-email">
             <a href="mailto:adycovs@gmail.com">✉ adycovs@gmail.com</a>
-          </div>
-
-          <div className="nd-support-card">
-            <div className="nd-support-title">{t('sp.supportT')}</div>
-            <div className="nd-support-desc">{t('sp.supportD')}</div>
-            <div className="nd-support-btns">
-              <a className="nd-support-btn patreon" href="https://www.patreon.com/posts/156026494" target="_blank" rel="noreferrer">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M22.957 7.21c-.004-3.078-2.584-5.593-5.638-5.593-3.074 0-5.588 2.456-5.588 5.539 0 3.052 2.478 5.535 5.531 5.535 3.051 0 5.698-2.427 5.695-5.481zM2.83 2.185a.91.91 0 00-.91.91v17.436a.91.91 0 00.91.91h3.391a.91.91 0 00.91-.91V3.095a.91.91 0 00-.91-.91H2.83z"/></svg>
-                {t('btn.patreon')}
-              </a>
-              <a className="nd-support-btn shopier" href="https://www.shopier.com/tools26/46355545" target="_blank" rel="noreferrer">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 7h12l-1.5 11a2 2 0 0 1-2 1.7h-5a2 2 0 0 1-2-1.7L6 7Z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
-                {t('btn.shopier')}
-              </a>
-            </div>
           </div>
 
           <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
