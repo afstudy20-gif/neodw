@@ -1,13 +1,10 @@
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
-// Vite-friendly worker import: the URL form `new Worker(new URL(...,
-// import.meta.url))` that lives INSIDE the @cornerstonejs/dicom-image-loader
-// package doesn't survive Vite's dep optimizer — the worker never registers
-// and every decode rejects with "Worker type 'dicomImageLoader' is not
-// registered." Pulling the worker through Vite's `?worker` suffix here makes
-// it a first-class module Vite emits as its own chunk.
-import DicomImageDecoderWorker from '@cornerstonejs/dicom-image-loader/dist/esm/decodeImageFrameWorker?worker';
+// Vite-emitted worker shim: see ./cornerstoneDecodeWorker.ts. The package's
+// own worker URL doesn't survive Vite, so we re-run its entrypoint here as a
+// proper Vite worker chunk and register it on Cornerstone's worker manager.
+import CornerstoneDecodeWorker from './cornerstoneDecodeWorker?worker';
 import { getDecoratedMetaDataProvider } from '../../shell/dicomMetadataDecorators';
 
 let initialized = false;
@@ -43,23 +40,33 @@ export async function initCornerstone(): Promise<void> {
   cornerstone.Settings.getRuntimeSettings().set('useCursors', false);
 
   // 2. dicom-image-loader: register the wadouri/wadors/dicomfile image
-  // loaders + default metaData provider via the package's own init(). We
-  // pass maxWebWorkers = 0 so init() does NOT try to register the worker
-  // itself — its `new Worker(new URL('./decodeImageFrameWorker.js',
-  // import.meta.url))` doesn't survive Vite's dep optimizer and previously
-  // silently failed ("Worker type 'dicomImageLoader' is not registered.").
-  await dicomImageLoader.init({ maxWebWorkers: 0 });
+  // loaders + default metaData provider via the package's init(). The
+  // worker registration inside init() uses `new Worker(new URL(
+  // './decodeImageFrameWorker.js', import.meta.url))` from inside the
+  // package, which Vite cannot rewrite at build time (the source URL
+  // points into node_modules and the bundled chunk lives elsewhere). We
+  // call init() purely for the loader/metadata side effects, then
+  // register the decode worker ourselves with an absolute, Vite-static-
+  // analyzable URL from OUR module so Vite emits a real worker chunk
+  // bound to the correct base. maxWebWorkers=1 keeps init's own
+  // registration cheap (it can't actually run anyway).
+  await dicomImageLoader.init({ maxWebWorkers: 1 });
 
-  // Register the decode worker ourselves via Vite's `?worker` import, which
-  // does emit a proper worker chunk. This is the line that was missing —
-  // every image-decode RPC was failing because no worker existed.
   const workerManager = cornerstone.getWebWorkerManager();
   const maxWorkerInstances = Math.max(1, Math.floor((navigator.hardwareConcurrency || 4) / 2));
   try {
-    workerManager.registerWorker('dicomImageLoader', () => new DicomImageDecoderWorker(), {
+    // dicomImageLoader.init() already registers a worker under this name
+    // using `new Worker(new URL('./decodeImageFrameWorker.js', import.meta.url))`
+    // — Vite cannot rewrite that source-relative URL (the file lives inside
+    // node_modules; the bundled chunk doesn't), so any task dispatched to it
+    // silently fails to instantiate. We terminate the broken instances and
+    // overwrite the registration with our Vite-emitted worker chunk.
+    (workerManager as any).terminate?.('dicomImageLoader');
+    workerManager.registerWorker('dicomImageLoader', () => new CornerstoneDecodeWorker(), {
       maxWorkerInstances,
-    });
-    console.log('[DICOM] dicomImageLoader worker registered, instances =', maxWorkerInstances);
+      overwrite: true,
+    } as any);
+    console.log('[DICOM] dicomImageLoader worker overridden, instances =', maxWorkerInstances);
   } catch (e) {
     console.error('[DICOM] worker register FAILED:', e);
   }
