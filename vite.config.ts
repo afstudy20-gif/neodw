@@ -86,6 +86,21 @@ export default defineConfig({
       { find: /^webworker-promise$/, replacement: fileURLToPath(new URL('./src/shared/core/webworkerPromiseShim.ts', import.meta.url)) },
       { find: /^webworker-promise\/lib\/register$/, replacement: fileURLToPath(new URL('./src/shared/core/webworkerPromiseRegisterShim.ts', import.meta.url)) },
       { find: /^utif$/, replacement: fileURLToPath(new URL('./src/shared/core/utifShim.ts', import.meta.url)) },
+      // dicom-image-loader's package.json `exports` field does not advertise
+      // the decode worker entrypoint as a subpath, so neither bare-specifier
+      // imports nor Vite's `?worker` sub-rollup can resolve it through normal
+      // package resolution. Alias a private specifier to the actual file path
+      // so the shim under src/shared/core/cornerstoneDecodeWorker.ts can bring
+      // the worker into a Vite-emitted chunk. See that file for the import.
+      {
+        find: /^@cornerstonejs\/dicom-image-loader\/__decodeImageFrameWorker$/,
+        replacement: fileURLToPath(
+          new URL(
+            './node_modules/@cornerstonejs/dicom-image-loader/dist/esm/decodeImageFrameWorker.js',
+            import.meta.url
+          )
+        ),
+      },
     ],
   },
   worker: {

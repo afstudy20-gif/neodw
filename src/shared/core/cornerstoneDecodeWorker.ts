@@ -5,6 +5,10 @@
 // Vite produces a real worker URL valid in both dev and prod — the
 // package's own `new Worker(new URL('./decodeImageFrameWorker.js',
 // import.meta.url))` inside init() resolves to a path Vite never ships.
-// Direct node_modules path bypasses the package's restrictive `exports`
-// field (the file IS shipped, just not advertised via a subpath specifier).
-import '../../../node_modules/@cornerstonejs/dicom-image-loader/dist/esm/decodeImageFrameWorker.js';
+//
+// The import specifier is a private alias defined in vite.config.ts that
+// maps to the actual file inside node_modules — needed because the
+// package's `exports` field does not advertise the worker entry, so neither
+// a bare specifier nor a relative node_modules path resolves through Vite's
+// `?worker` sub-rollup. The alias bypasses package-exports enforcement.
+import '@cornerstonejs/dicom-image-loader/__decodeImageFrameWorker';
