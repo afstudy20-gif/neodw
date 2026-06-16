@@ -247,6 +247,11 @@ export function autoSegmentCrossSectionAtPlane(
     huMin?: number;        // HU lower threshold (default 150)
     huMax?: number;        // HU upper threshold (default 500)
     maxDiameterMm?: number; // reject if equivalent diameter exceeds this (default 55mm)
+    minDiameterMm?: number; // reject if equivalent diameter below this (default 8mm)
+    searchRadiusMm?: number; // only consider components whose centroid sits within this
+                             // radius of the crosshair (default 25mm). Without this,
+                             // tiny nearby contrast (calcium, coronary ostium) wins
+                             // over a slightly off-center aorta.
   }
 ): AutoSegmentResult | null {
   const info = extractVolumeInfo(volume);
@@ -255,6 +260,8 @@ export function autoSegmentCrossSectionAtPlane(
   const gridSize = options?.gridSize ?? 200;
   const pixelSpacing = options?.pixelSpacing ?? 0.3;
   const maxDiameterMm = options?.maxDiameterMm ?? 55; // ascending aorta rarely > 50mm
+  const minDiameterMm = options?.minDiameterMm ?? 8;  // anything tinier is not a great-vessel lumen
+  const searchRadiusMm = options?.searchRadiusMm ?? 25;
 
   // Build orthonormal basis on the plane
   const normal = TAVIGeometry.vectorNormalize(planeNormal);
@@ -299,7 +306,7 @@ export function autoSegmentCrossSectionAtPlane(
 
   for (const [huMin, huMax] of thresholdAttempts) {
     const result = _segmentWithThreshold(
-      grid, gridSize, pixelSpacing, huMin, huMax, maxDiameterMm,
+      grid, gridSize, pixelSpacing, huMin, huMax, maxDiameterMm, minDiameterMm, searchRadiusMm,
       planeOrigin, u, v, halfExtent
     );
     if (result) {
@@ -496,6 +503,8 @@ function _segmentWithThreshold(
   huMin: number,
   huMax: number,
   maxDiameterMm: number,
+  minDiameterMm: number,
+  searchRadiusMm: number,
   planeOrigin: TAVIVector3D,
   u: TAVIVector3D,
   v: TAVIVector3D,
@@ -522,56 +531,64 @@ function _segmentWithThreshold(
     }
   }
 
-  // Flood-fill from center on eroded mask
-  const centerRow = Math.floor(gridSize / 2);
-  const centerCol = Math.floor(gridSize / 2);
+  // ── Connected-component labeling on the eroded mask ──
+  // Old seed-only flood-fill latched onto the first qualifying pixel near the
+  // crosshair, so a small calcified plaque or coronary ostium 5–10 mm away
+  // would beat the actual aorta whenever the crosshair sat off-lumen. Label
+  // every component instead and pick the LARGEST one whose centroid is within
+  // `searchRadiusMm` of the crosshair.
+  const centerRow = gridSize / 2;
+  const centerCol = gridSize / 2;
+  const searchRadiusPx = searchRadiusMm / pixelSpacing;
 
-  let seedRow = centerRow;
-  let seedCol = centerCol;
-  if (eroded[seedRow * gridSize + seedCol] === 0) {
-    let found = false;
-    for (let r = 1; r < gridSize / 4 && !found; r++) {
-      for (let dr = -r; dr <= r && !found; dr++) {
-        for (let dc = -r; dc <= r && !found; dc++) {
-          if (Math.abs(dr) !== r && Math.abs(dc) !== r) continue;
-          const sr = centerRow + dr;
-          const sc = centerCol + dc;
-          if (sr >= 0 && sr < gridSize && sc >= 0 && sc < gridSize && eroded[sr * gridSize + sc] === 1) {
-            seedRow = sr;
-            seedCol = sc;
-            found = true;
-          }
-        }
-      }
-    }
-    if (!found) return null;
-  }
+  const labels = new Int32Array(gridSize * gridSize);
+  let bestLabel = 0;
+  let bestSize = 0;
+  let nextLabel = 1;
 
-  // Flood fill on eroded mask
-  const erodedFilled = new Uint8Array(eroded);
-  const stack1: number[] = [seedRow * gridSize + seedCol];
-  erodedFilled[seedRow * gridSize + seedCol] = 2;
-  let erodedCount = 0;
-
-  while (stack1.length > 0) {
-    const idx = stack1.pop()!;
-    erodedCount++;
-    const r = Math.floor(idx / gridSize);
-    const c = idx % gridSize;
-    for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-      const nr = r + dr;
-      const nc = c + dc;
-      if (nr >= 0 && nr < gridSize && nc >= 0 && nc < gridSize) {
+  for (let i = 0; i < eroded.length; i++) {
+    if (eroded[i] !== 1 || labels[i] !== 0) continue;
+    const label = nextLabel++;
+    const queue: number[] = [i];
+    labels[i] = label;
+    let size = 0;
+    let sumR = 0;
+    let sumC = 0;
+    while (queue.length > 0) {
+      const idx = queue.pop()!;
+      size++;
+      const r = Math.floor(idx / gridSize);
+      const c = idx % gridSize;
+      sumR += r;
+      sumC += c;
+      for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const nr = r + dr;
+        const nc = c + dc;
+        if (nr < 0 || nr >= gridSize || nc < 0 || nc >= gridSize) continue;
         const nIdx = nr * gridSize + nc;
-        if (erodedFilled[nIdx] === 1) {
-          erodedFilled[nIdx] = 2;
-          stack1.push(nIdx);
+        if (eroded[nIdx] === 1 && labels[nIdx] === 0) {
+          labels[nIdx] = label;
+          queue.push(nIdx);
         }
       }
     }
+    const centroidR = sumR / size;
+    const centroidC = sumC / size;
+    const dist = Math.hypot(centroidR - centerRow, centroidC - centerCol);
+    if (dist > searchRadiusPx) continue;
+    if (size > bestSize) {
+      bestSize = size;
+      bestLabel = label;
+    }
   }
 
-  if (erodedCount < 20) return null;
+  if (bestLabel === 0 || bestSize < 20) return null;
+
+  // Materialize the chosen component as the seed mask for the dilation pass.
+  const erodedFilled = new Uint8Array(eroded);
+  for (let i = 0; i < labels.length; i++) {
+    if (labels[i] === bestLabel) erodedFilled[i] = 2;
+  }
 
   // Now dilate back: use the original mask but only pixels that are 4-connected to the eroded fill
   // This recovers the boundary precision lost by erosion
@@ -611,11 +628,16 @@ function _segmentWithThreshold(
 
   if (filledCount < 20) return null;
 
-  // Check area: reject if too large (leakage detected)
+  // Check area: reject if too large (leakage detected) OR too small (latched
+  // onto a calcium fleck / coronary branch instead of a great-vessel lumen).
   const areaMm2 = filledCount * pixelSpacing * pixelSpacing;
   const equivDiameterMm = 2 * Math.sqrt(areaMm2 / Math.PI);
   if (equivDiameterMm > maxDiameterMm) {
     console.warn(`[AutoSeg] Rejected HU ${huMin}-${huMax}: equiv diameter ${equivDiameterMm.toFixed(1)}mm > max ${maxDiameterMm}mm (area=${areaMm2.toFixed(0)}mm²)`);
+    return null;
+  }
+  if (equivDiameterMm < minDiameterMm) {
+    console.warn(`[AutoSeg] Rejected HU ${huMin}-${huMax}: equiv diameter ${equivDiameterMm.toFixed(1)}mm < min ${minDiameterMm}mm (likely calcium/coronary, not lumen)`);
     return null;
   }
 

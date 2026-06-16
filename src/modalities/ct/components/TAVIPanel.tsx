@@ -2077,13 +2077,32 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       const volume = cornerstone.cache.getVolume(volumeId);
                       if (!volume) return;
 
+                      // Per-structure size envelopes prevent the auto-segmenter from
+                      // accepting tiny near-by contrast (calcium plaque, coronary
+                      // ostium) when the crosshair sits off-lumen. Aorta/STJ/sinus
+                      // realistically span 15–55 mm; anything outside is wrong.
+                      const isAorta = structureId === TAVIStructureAscendingAorta;
+                      const isSinus = structureId === TAVIStructureSinus;
+                      const isSTJ = structureId === TAVIStructureSTJ;
+                      const minDiameterMm = isSinus ? 18 : isSTJ ? 14 : isAorta ? 15 : 8;
+                      const maxDiameterMm = isAorta ? 55 : 50;
+
                       const seg = autoSegmentCrossSectionAtPlane(volume, origin, normal, viewUp, {
                         huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
-                        maxDiameterMm: structureId === TAVIStructureAscendingAorta ? 55 : 50,
+                        maxDiameterMm,
+                        minDiameterMm,
+                        searchRadiusMm: 25,
                       });
 
                       if (!seg || seg.contourPoints.length < 10) {
                         console.warn('[TAVI] Auto-segment failed for', structureId);
+                        // Surface failure to the user instead of silently capturing
+                        // nothing. Most common cause: crosshair not inside the lumen.
+                        window.alert(
+                          `Auto-segmentation failed for ${structureId}.\n\n` +
+                          `Place the crosshair INSIDE the contrast-filled lumen at the desired level and try again. ` +
+                          `Acceptable diameter range: ${minDiameterMm}–${maxDiameterMm} mm.`
+                        );
                         return;
                       }
 
