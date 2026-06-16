@@ -2096,12 +2096,15 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
                       if (!seg || seg.contourPoints.length < 10) {
                         console.warn('[TAVI] Auto-segment failed for', structureId);
-                        // Surface failure to the user instead of silently capturing
-                        // nothing. Most common cause: crosshair not inside the lumen.
+                        // Seeded BFS starts at the crosshair voxel. Failure means
+                        // either the crosshair is off the contrast-filled lumen,
+                        // or the connected region grown from it falls outside the
+                        // structure's expected diameter band.
                         window.alert(
                           `Auto-segmentation failed for ${structureId}.\n\n` +
-                          `Place the crosshair INSIDE the contrast-filled lumen at the desired level and try again. ` +
-                          `Acceptable diameter range: ${minDiameterMm}–${maxDiameterMm} mm.`
+                          `Move the crosshair ONTO the contrast-filled lumen pixel and try again. ` +
+                          `The seed pixel must sit inside the lumen — the algorithm grows from where you point. ` +
+                          `Expected diameter range: ${minDiameterMm}–${maxDiameterMm} mm.`
                         );
                         return;
                       }

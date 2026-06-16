@@ -22,12 +22,10 @@ function makeVolume(dims: [number, number, number], fill: (i: number, j: number,
 const NZ: TAVIVector3D = { x: 0, y: 0, z: 1 };
 const VY: TAVIVector3D = { x: 0, y: 1, z: 0 };
 
-describe('autoSegmentCrossSectionAtPlane: largest-component seed + min-diameter floor', () => {
+describe('autoSegmentCrossSectionAtPlane: seeded BFS from crosshair + min-diameter floor', () => {
   // Scene: a big "aortic" lumen (radius 13 mm, ≈26 mm dia, 300 HU)
   // plus a tiny "calcium fleck / coronary ostium" (radius 1.5 mm, ≈3 mm dia, 300 HU)
-  // sitting 8 mm to the side. The crosshair is placed BETWEEN them, closer to the fleck.
-  // Old algorithm: flood-fills the nearest qualifying pixel → grabs the fleck.
-  // New algorithm: labels both, picks the bigger one (the aorta).
+  // sitting 18 mm to the side. The two structures are NOT touching.
   const aortaCenter = { x: 60, y: 60 };
   const fleckCenter = { x: 78, y: 60 }; // 18 mm to the +x of the aorta
   const vol = makeVolume([120, 120, 10], (i, j) => {
@@ -38,56 +36,64 @@ describe('autoSegmentCrossSectionAtPlane: largest-component seed + min-diameter 
     return -50; // soft-tissue / background
   });
 
-  it('picks the aorta even when the crosshair is closer to a small fleck', () => {
-    // Crosshair 2 mm from fleck centre, 16 mm from aorta centre.
-    const origin: TAVIVector3D = { x: 76, y: 60, z: 5 };
-    const seg = autoSegmentCrossSectionAtPlane(vol, origin, NZ, VY, {
-      huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
-      maxDiameterMm: 55, minDiameterMm: 15, searchRadiusMm: 25,
-    });
-    expect(seg).not.toBeNull();
-    // Contour centroid should land on the aorta (x≈60), not the fleck (x≈78).
-    const cx = seg!.contourPoints.reduce((s, p) => s + p.x, 0) / seg!.contourPoints.length;
-    expect(cx).toBeGreaterThan(55);
-    expect(cx).toBeLessThan(65);
-  });
-
-  it('rejects when only a tiny structure is in range (no big lumen near crosshair)', () => {
-    // Volume with only the fleck — no aorta.
-    const tinyOnly = makeVolume([120, 120, 10], (i, j) => {
-      const d = Math.hypot(i - fleckCenter.x, j - fleckCenter.y);
-      return d <= 1.5 ? 300 : -50;
-    });
-    const origin: TAVIVector3D = { x: 78, y: 60, z: 5 };
-    const seg = autoSegmentCrossSectionAtPlane(tinyOnly, origin, NZ, VY, {
-      huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
-      maxDiameterMm: 55, minDiameterMm: 15, searchRadiusMm: 25,
-    });
-    // 3 mm fleck is below 15 mm floor → reject. Old code would have returned it.
-    expect(seg).toBeNull();
-  });
-
-  it('returns a valid contour when crosshair is correctly inside the aorta', () => {
+  it('segments the aorta when the crosshair sits on the aorta lumen', () => {
     const origin: TAVIVector3D = { x: 60, y: 60, z: 5 };
     const seg = autoSegmentCrossSectionAtPlane(vol, origin, NZ, VY, {
       huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
-      maxDiameterMm: 55, minDiameterMm: 15, searchRadiusMm: 25,
+      maxDiameterMm: 55, minDiameterMm: 15,
     });
     expect(seg).not.toBeNull();
     expect(seg!.contourPoints.length).toBeGreaterThanOrEqual(10);
+    // Contour centred near the aorta.
+    const cx = seg!.contourPoints.reduce((s, p) => s + p.x, 0) / seg!.contourPoints.length;
+    const cy = seg!.contourPoints.reduce((s, p) => s + p.y, 0) / seg!.contourPoints.length;
+    expect(cx).toBeGreaterThan(55);
+    expect(cx).toBeLessThan(65);
+    expect(cy).toBeGreaterThan(55);
+    expect(cy).toBeLessThan(65);
   });
 
-  it('rejects components whose centroid is outside the search radius', () => {
-    // Big lumen 40 mm away from the crosshair, no other contrast near it.
-    const farVol = makeVolume([200, 200, 10], (i, j) => {
-      const d = Math.hypot(i - 30, j - 30); // aorta centred at (30,30)
-      return d <= 13 ? 300 : -50;
-    });
-    const origin: TAVIVector3D = { x: 100, y: 100, z: 5 }; // ~99 mm away
-    const seg = autoSegmentCrossSectionAtPlane(farVol, origin, NZ, VY, {
+  it('rejects when the crosshair sits on a sub-lumen fleck (min-diameter floor)', () => {
+    // Crosshair on the fleck. Seeded BFS isolates the fleck (it can't reach the
+    // aorta — they're disconnected). minDiameterMm rejects it as too small.
+    const origin: TAVIVector3D = { x: 78, y: 60, z: 5 };
+    const seg = autoSegmentCrossSectionAtPlane(vol, origin, NZ, VY, {
       huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
-      maxDiameterMm: 55, minDiameterMm: 15, searchRadiusMm: 25,
+      maxDiameterMm: 55, minDiameterMm: 15,
     });
     expect(seg).toBeNull();
+  });
+
+  it('rejects when the crosshair is OFF every contrast structure', () => {
+    // Crosshair in background (HU = -50, outside the 150–500 band). Seed pixel
+    // not in any mask → null. Old "biggest within radius" code would have
+    // grabbed the aorta from a few mm away; seeded BFS requires user alignment.
+    const origin: TAVIVector3D = { x: 0, y: 0, z: 5 };
+    const seg = autoSegmentCrossSectionAtPlane(vol, origin, NZ, VY, {
+      huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
+      maxDiameterMm: 55, minDiameterMm: 15,
+    });
+    expect(seg).toBeNull();
+  });
+
+  it('returns the aorta even if a brighter neighbour exists in the field', () => {
+    // Brighter fleck (700 HU) close to the aorta but disconnected from it.
+    // A "largest HU" / "brightest blob" strategy would prefer the fleck;
+    // seeded BFS from the crosshair on the lumen segments the lumen.
+    const mixedVol = makeVolume([120, 120, 10], (i, j) => {
+      const dA = Math.hypot(i - aortaCenter.x, j - aortaCenter.y);
+      if (dA <= 13) return 250;
+      const dF = Math.hypot(i - fleckCenter.x, j - fleckCenter.y);
+      if (dF <= 1.5) return 700;
+      return -50;
+    });
+    const origin: TAVIVector3D = { x: 60, y: 60, z: 5 };
+    const seg = autoSegmentCrossSectionAtPlane(mixedVol, origin, NZ, VY, {
+      huMin: 150, huMax: 500, gridSize: 200, pixelSpacing: 0.25,
+      maxDiameterMm: 55, minDiameterMm: 15,
+    });
+    expect(seg).not.toBeNull();
+    const cx = seg!.contourPoints.reduce((s, p) => s + p.x, 0) / seg!.contourPoints.length;
+    expect(cx).toBeLessThan(70); // not the fleck at x≈78
   });
 });

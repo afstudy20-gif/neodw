@@ -531,64 +531,45 @@ function _segmentWithThreshold(
     }
   }
 
-  // ── Connected-component labeling on the eroded mask ──
-  // Old seed-only flood-fill latched onto the first qualifying pixel near the
-  // crosshair, so a small calcified plaque or coronary ostium 5–10 mm away
-  // would beat the actual aorta whenever the crosshair sat off-lumen. Label
-  // every component instead and pick the LARGEST one whose centroid is within
-  // `searchRadiusMm` of the crosshair.
-  const centerRow = gridSize / 2;
-  const centerCol = gridSize / 2;
-  const searchRadiusPx = searchRadiusMm / pixelSpacing;
+  // ── Seeded flood-fill from the crosshair ──
+  // The crosshair sits at the grid centre by construction. We BFS from there
+  // and grow into the eroded mask. This is the LA-segmentation pattern: the
+  // user has already aligned the crosshair to the structure of interest, so
+  // we segment exactly what they clicked — never a nearby brighter object,
+  // never a distant larger blob. If the seed pixel itself isn't in the mask
+  // (crosshair off-lumen or HU threshold too tight), we fall back to the
+  // pre-erosion mask once, then give up. `searchRadiusMm` is no longer used
+  // for component selection — kept on the signature for backward compatibility.
+  void searchRadiusMm;
 
-  const labels = new Int32Array(gridSize * gridSize);
-  let bestLabel = 0;
-  let bestSize = 0;
-  let nextLabel = 1;
+  const centerRow = Math.floor(gridSize / 2);
+  const centerCol = Math.floor(gridSize / 2);
+  const seedIdx = centerRow * gridSize + centerCol;
+  const seedSource = eroded[seedIdx] === 1 ? eroded : (mask[seedIdx] === 1 ? mask : null);
+  if (!seedSource) return null;
 
-  for (let i = 0; i < eroded.length; i++) {
-    if (eroded[i] !== 1 || labels[i] !== 0) continue;
-    const label = nextLabel++;
-    const queue: number[] = [i];
-    labels[i] = label;
-    let size = 0;
-    let sumR = 0;
-    let sumC = 0;
-    while (queue.length > 0) {
-      const idx = queue.pop()!;
-      size++;
-      const r = Math.floor(idx / gridSize);
-      const c = idx % gridSize;
-      sumR += r;
-      sumC += c;
-      for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-        const nr = r + dr;
-        const nc = c + dc;
-        if (nr < 0 || nr >= gridSize || nc < 0 || nc >= gridSize) continue;
-        const nIdx = nr * gridSize + nc;
-        if (eroded[nIdx] === 1 && labels[nIdx] === 0) {
-          labels[nIdx] = label;
-          queue.push(nIdx);
-        }
+  const erodedFilled = new Uint8Array(eroded);
+  const seedStack: number[] = [seedIdx];
+  erodedFilled[seedIdx] = 2;
+  let seedCount = 0;
+  while (seedStack.length > 0) {
+    const idx = seedStack.pop()!;
+    seedCount++;
+    const r = Math.floor(idx / gridSize);
+    const c = idx % gridSize;
+    for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= gridSize || nc < 0 || nc >= gridSize) continue;
+      const nIdx = nr * gridSize + nc;
+      if (erodedFilled[nIdx] !== 2 && seedSource[nIdx] === 1) {
+        erodedFilled[nIdx] = 2;
+        seedStack.push(nIdx);
       }
     }
-    const centroidR = sumR / size;
-    const centroidC = sumC / size;
-    const dist = Math.hypot(centroidR - centerRow, centroidC - centerCol);
-    if (dist > searchRadiusPx) continue;
-    if (size > bestSize) {
-      bestSize = size;
-      bestLabel = label;
-    }
   }
 
-  if (bestLabel === 0 || bestSize < 20) return null;
-
-  // Materialize the chosen component as the seed mask for the dilation pass.
-  const erodedFilled = new Uint8Array(eroded);
-  for (let i = 0; i < labels.length; i++) {
-    if (labels[i] === bestLabel) erodedFilled[i] = 2;
-  }
+  if (seedCount < 20) return null;
 
   // Now dilate back: use the original mask but only pixels that are 4-connected to the eroded fill
   // This recovers the boundary precision lost by erosion
