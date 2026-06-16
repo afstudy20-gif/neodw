@@ -35,21 +35,21 @@ export async function initCornerstone(): Promise<void> {
   await cornerstone.init();
   cornerstone.Settings.getRuntimeSettings().set('useCursors', false);
 
-  // 2. Loaders & Metadata
-  cornerstone.registerImageLoader('wadouri', dicomImageLoader.wadouri.loadImage);
-  cornerstone.registerImageLoader('dicomfile', dicomImageLoader.wadouri.loadImage);
-  
+  // 2. dicom-image-loader init — registers the wadouri/wadors/dicomfile image
+  // loaders, registers the default metaData provider, AND registers the correct
+  // 'dicomImageLoader' Web Worker (the one inside the package, with the full
+  // RPC API Cornerstone3D expects). Doing this manually with a homegrown
+  // decodeWorker.ts left the worker speaking the wrong protocol — decode tasks
+  // never resolved, every image stalled at "Unknown Transfer Syntax", and the
+  // panel hung at 0/990 forever.
+  await dicomImageLoader.init({
+    maxWebWorkers: Math.max(1, Math.floor((navigator.hardwareConcurrency || 4) / 2)),
+  });
+
+  // Our metadata decorator (e.g. patient-name patching) must wrap the default
+  // provider registered by dicomImageLoader.init() above.
   const decoratedProvider = getDecoratedMetaDataProvider(dicomImageLoader.wadouri.metaData.metaDataProvider);
   cornerstone.metaData.addProvider(decoratedProvider);
-
-  // 3. Web Worker Registration
-  const workerFn = () =>
-    new Worker(new URL('./decodeWorker.ts', import.meta.url), { type: 'module' });
-
-  const workerManager = cornerstone.getWebWorkerManager();
-  workerManager.registerWorker('dicomImageLoader', workerFn, {
-    maxWorkerInstances: Math.max(1, Math.floor((navigator.hardwareConcurrency || 4) / 2)),
-  });
 
   // 4. Volume Loaders
   cornerstone.volumeLoader.registerVolumeLoader(
