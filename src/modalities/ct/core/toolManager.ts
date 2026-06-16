@@ -27,7 +27,12 @@ export function setupToolGroups(renderingEngineId: string): void {
 
   mprGroup.addTool(names.WindowLevel);
   mprGroup.addTool(names.Pan);
-  mprGroup.addTool(names.Zoom);
+  // zoomToCenter keeps the focal point fixed while zooming. Default
+  // anchor-zoom shifts the focal point toward the cursor, which on a
+  // CrosshairsTool + ZoomPanSynchronizer setup desyncs the linked viewports:
+  // only parallelScale is propagated, so A's focal point drifts while B/C stay
+  // put and the crosshair lines no longer intersect at the same world point.
+  mprGroup.addTool(names.Zoom, { configuration: { zoomToCenter: true } });
   mprGroup.addTool(names.StackScroll);
   mprGroup.addTool(names.Length);
   mprGroup.addTool(names.Angle);
