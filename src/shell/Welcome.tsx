@@ -91,7 +91,16 @@ const MODES: ModeDef[] = [
     desc: 'mod.ctmr.desc',
     icon: <IcoHeart/>,
     key: 'ctmr',
-    tags: ['MPR', '3D VR', 'TAVI', 'LA', 'Aorta', 'LAA', 'LV-ADAS', 'Hand-MR'],
+    tags: ['MPR', '3D VR', 'LA', 'Aorta', 'LAA', 'LV-ADAS', 'Hand-MR'],
+  },
+  {
+    route: { kind: 'ct', panel: 'tavi', title: 'mod.tavi' },
+    group: 'cross',
+    name: 'mod.tavi',
+    desc: 'mod.tavi.desc',
+    icon: <IcoHeart/>,
+    key: 'tavi',
+    tags: ['Annulus', 'Per-cusp Ca²⁺', 'Sinus 3×', 'Coronary Ø', 'Fluoro angle', 'SFAR'],
   },
   {
     route: { kind: 'ccta' },
