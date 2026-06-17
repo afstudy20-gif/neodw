@@ -1362,8 +1362,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     controllerRef.current?.unlockScrolling();
     setWorkflowPhase('legacy');
     setActiveTab('report');
+    onReportToggle?.(true);
     forceUpdate();
-  }, []);
+  }, [onReportToggle]);
 
   // Cleanup controller + overlays on unmount
   useEffect(() => {

@@ -579,6 +579,40 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     });
   }, []);
 
+  const resizeViewportsPreservingMprCameras = useCallback((delayMs = 180) => {
+    const engine = renderingEngineRef.current;
+    const savedCameras: Record<string, cornerstone.Types.ICamera> = {};
+    if (engine) {
+      for (const vpId of MPR_VIEWPORT_IDS) {
+        const vp = engine.getViewport(vpId);
+        if (vp) savedCameras[vpId] = vp.getCamera();
+      }
+    }
+
+    setTimeout(() => {
+      const nextEngine = renderingEngineRef.current;
+      if (!nextEngine) return;
+      nextEngine.resize(true, false);
+      for (const vpId of MPR_VIEWPORT_IDS) {
+        const vp = nextEngine.getViewport(vpId);
+        const cam = savedCameras[vpId];
+        if (!vp || !cam) continue;
+        vp.setCamera(cam);
+        vp.render();
+      }
+    }, delayMs);
+  }, []);
+
+  const setTaviReportMode = useCallback((expanded: boolean) => {
+    resizeViewportsPreservingMprCameras();
+    setReportExpanded(expanded);
+    if (expanded) {
+      taviPanelRef.current?.showReport();
+    } else {
+      taviPanelRef.current?.showCapture();
+    }
+  }, [resizeViewportsPreservingMprCameras]);
+
   const resizeViewports = useCallback((options: { resetCrosshairs?: boolean } = {}) => {
     // Allow CSS layout to settle, then resize Cornerstone canvases + reset crosshairs
     setTimeout(() => {
@@ -983,8 +1017,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           {rightPanel === 'tavi' && (
             <div className={`side-panel ${reportExpanded ? 'side-panel--report-expanded' : ''}`} style={{ width: reportExpanded ? undefined : '360px' }}>
               <div className="side-panel-tabs">
-                <button className={`side-panel-tab ${!reportExpanded ? 'active' : ''}`} onClick={() => { setReportExpanded(false); taviPanelRef.current?.showCapture(); }}>TAVI</button>
-                <button className={`side-panel-tab ${reportExpanded ? 'active' : ''}`} onClick={() => { setReportExpanded(true); taviPanelRef.current?.showReport(); }}>Report</button>
+                <button className={`side-panel-tab ${!reportExpanded ? 'active' : ''}`} onClick={() => setTaviReportMode(false)}>TAVI</button>
+                <button className={`side-panel-tab ${reportExpanded ? 'active' : ''}`} onClick={() => setTaviReportMode(true)}>Report</button>
                 <button className="side-panel-reset" onClick={() => { taviPanelRef.current?.resetAll(); setReportExpanded(false); }} title="Reset all TAVI measurements">Reset</button>
                 <button className="side-panel-close" onClick={() => { setRightPanel(null); setReportExpanded(false); setViewportMode('standard'); exitDoubleObliqueMode(RENDERING_ENGINE_ID); resizeViewports(); }}>×</button>
               </div>
@@ -996,7 +1030,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                   viewportMode={viewportMode}
                   onViewportModeChange={handleTaviModeChange}
                   panelRef={taviPanelRef}
-                  onReportToggle={setReportExpanded}
+                  onReportToggle={setTaviReportMode}
                 />
               </div>
             </div>
