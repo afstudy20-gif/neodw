@@ -8,9 +8,16 @@ export interface ReportRow {
   unit?: string;
 }
 
+export interface ReportImage {
+  title: string;
+  dataUrl: string;
+  caption?: string;
+}
+
 export interface ReportSection {
   title: string;
   rows: ReportRow[];
+  images?: ReportImage[];
 }
 
 export interface PdfReportInput {
@@ -80,6 +87,43 @@ export async function buildPdfReport(input: PdfReportInput): Promise<Uint8Array>
       doc.text(labelText, MARGIN, y);
       doc.text(valueText, MARGIN + 220, y);
       y += 14;
+    }
+
+    if (section.images?.length) {
+      y += 6;
+      const gap = 12;
+      const colW = (W - MARGIN * 2 - gap) / 2;
+      const imgH = colW * 0.72;
+      let col = 0;
+      for (const image of section.images) {
+        if (y + imgH + 28 > 780) {
+          doc.addPage();
+          y = MARGIN;
+          col = 0;
+        }
+        const x = MARGIN + col * (colW + gap);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.text(image.title, x, y);
+        try {
+          doc.addImage(image.dataUrl, 'PNG', x, y + 6, colW, imgH);
+        } catch {
+          doc.setFont('helvetica', 'normal');
+          doc.text('Image unavailable', x, y + 24);
+        }
+        if (image.caption) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.text(image.caption, x, y + imgH + 18, { maxWidth: colW });
+        }
+        if (col === 0) {
+          col = 1;
+        } else {
+          col = 0;
+          y += imgH + 34;
+        }
+      }
+      if (col === 1) y += imgH + 34;
     }
     y += 8;
   }

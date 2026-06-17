@@ -76,3 +76,29 @@ describe('TAVIMeasurementSession.csvReport', () => {
     expect(r.find((row) => row[0] === 'RCA Height')).toEqual(['RCA Height', '15.6', 'mm']);
   });
 });
+
+describe('TAVIMeasurementSession.annulusPointsCsvReport', () => {
+  it('exports cusps, ostia, raw annulus points, and interpolated annulus points', () => {
+    const s = new TAVIMeasurementSession();
+    s.cuspLCC = { x: 1, y: 2, z: 3 };
+    s.leftOstiumSnapshot = { worldPoint: { x: 4, y: 5, z: 6 } };
+    s.leftCoronaryHeightMm = 12.25;
+    s.annulusRawContourPoints = [
+      { x: 10, y: 11, z: 12 },
+      { x: 13, y: 14, z: 15 },
+    ];
+    s.annulusSnapshot = {
+      worldPoints: [{ x: 20, y: 21, z: 22 }],
+      pixelPoints: [],
+      planeOrigin: { x: 10, y: 11, z: 12 },
+      planeNormal: { x: 0, y: 0, z: 1 },
+    };
+
+    const r = rows(s.annulusPointsCsvReport());
+    expect(r[0]).toEqual(['Group', 'Label', 'Index', 'X', 'Y', 'Z', 'Note']);
+    expect(r).toContainEqual(['Cusp', 'LCC', '', '1.000', '2.000', '3.000', '']);
+    expect(r).toContainEqual(['Ostium', 'LCA', '', '4.000', '5.000', '6.000', 'height 12.3 mm']);
+    expect(r).toContainEqual(['Annulus raw contour', 'Raw', '1', '13.000', '14.000', '15.000', '']);
+    expect(r).toContainEqual(['Annulus interpolated contour', 'Interpolated', '0', '20.000', '21.000', '22.000', '']);
+  });
+});

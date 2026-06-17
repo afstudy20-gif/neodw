@@ -22,7 +22,6 @@ import { MetadataPanel } from './components/MetadataPanel';
 import { SegmentationPanel } from './components/SegmentationPanel';
 import { VolumeStats } from './components/VolumeStats';
 import { RenderModeSelector } from './components/RenderModeSelector';
-import { SlabProjection } from './components/SlabProjection';
 import { SeriesPanel } from './components/SeriesPanel';
 import { TAVIPanel, TAVIPanelHandle } from './components/TAVIPanel';
 import { ViewAnglePresets } from './components/ViewAnglePresets';
@@ -580,14 +579,16 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     });
   }, []);
 
-  const resizeViewports = useCallback(() => {
+  const resizeViewports = useCallback((options: { resetCrosshairs?: boolean } = {}) => {
     // Allow CSS layout to settle, then resize Cornerstone canvases + reset crosshairs
     setTimeout(() => {
       const engine = renderingEngineRef.current;
       if (engine) {
         engine.resize(true, false);
       }
-      resetCrosshairsToCenter(RENDERING_ENGINE_ID);
+      if (options.resetCrosshairs !== false) {
+        resetCrosshairsToCenter(RENDERING_ENGINE_ID);
+      }
     }, 150);
   }, []);
 
@@ -650,8 +651,11 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     if (mode === 'standard' || mode === 'tavi-crosshair') {
       exitDoubleObliqueMode(RENDERING_ENGINE_ID);
     }
-    resizeViewports();
+    resizeViewports({ resetCrosshairs: mode !== 'tavi-oblique' });
   }, [resizeViewports]);
+
+  const showSegmentationHeaderActions = rightPanel !== 'tavi';
+  const showWorkflowSwitcher = rightPanel !== 'tavi';
 
   return (
     <div className="app">
@@ -674,135 +678,139 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           </div>
         )}
         <div className="header-actions">
-          <button
-            className="open-btn"
-            onClick={() => {
-              if (leftAtriumPanelRef.current) {
-                leftAtriumPanelRef.current.saveSession();
-              } else {
-                setPendingLAAction('save');
-                setRightPanel('la');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-            }}
-            disabled={isLoading || !activeSeries}
-            title="Save LA segmentation as JSON (filename: patient_studyDate)"
-          >Save LA</button>
-          <button
-            className="open-btn"
-            onClick={() => laFileInputRef.current?.click()}
-            disabled={isLoading || !activeSeries}
-            title="Open a saved LA session JSON"
-          >Open LA</button>
-          <input
-            ref={laFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              if (leftAtriumPanelRef.current) {
-                void leftAtriumPanelRef.current.loadSessionFile(f);
-              } else {
-                setPendingLAAction({ load: f });
-                setRightPanel('la');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-              e.target.value = '';
-            }}
-          />
-          <button
-            className="open-btn"
-            onClick={() => {
-              if (aortaPanelRef.current) {
-                aortaPanelRef.current.saveSession();
-              } else {
-                setPendingAortaAction('save');
-                setRightPanel('aorta');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-            }}
-            disabled={isLoading || !activeSeries}
-            title="Save aorta segmentation as JSON"
-          >Save Ao</button>
-          <button
-            className="open-btn"
-            onClick={() => aortaFileInputRef.current?.click()}
-            disabled={isLoading || !activeSeries}
-            title="Open a saved aorta session JSON"
-          >Open Ao</button>
-          <input
-            ref={aortaFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              if (aortaPanelRef.current) {
-                void aortaPanelRef.current.loadSessionFile(f);
-              } else {
-                setPendingAortaAction({ load: f });
-                setRightPanel('aorta');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-              e.target.value = '';
-            }}
-          />
-          <button
-            className="open-btn"
-            onClick={() => {
-              if (laaPanelRef.current) {
-                laaPanelRef.current.saveSession();
-              } else {
-                setPendingLAAAction('save');
-                setRightPanel('laa');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-            }}
-            disabled={isLoading || !activeSeries}
-            title="Save LAA segmentation as JSON"
-          >Save LAA</button>
-          <button
-            className="open-btn"
-            onClick={() => laaFileInputRef.current?.click()}
-            disabled={isLoading || !activeSeries}
-            title="Open a saved LAA session JSON"
-          >Open LAA</button>
-          <input
-            ref={laaFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              if (laaPanelRef.current) {
-                void laaPanelRef.current.loadSessionFile(f);
-              } else {
-                setPendingLAAAction({ load: f });
-                setRightPanel('laa');
-                if (viewportMode !== 'standard') setViewportMode('standard');
-                resizeViewports();
-              }
-              e.target.value = '';
-            }}
-          />
-          {activeSeries && (
-            <button
-              type="button"
-              className="pcct-trigger-btn"
-              onClick={() => setPseudoPcctOpen(true)}
-              title="Pseudo-PCCT filter karşılaştırması (deneysel, klinik değil)"
-            >
-              Pseudo-PCCT
-            </button>
+          {showSegmentationHeaderActions && (
+            <>
+              <button
+                className="open-btn"
+                onClick={() => {
+                  if (leftAtriumPanelRef.current) {
+                    leftAtriumPanelRef.current.saveSession();
+                  } else {
+                    setPendingLAAction('save');
+                    setRightPanel('la');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                }}
+                disabled={isLoading || !activeSeries}
+                title="Save LA segmentation as JSON (filename: patient_studyDate)"
+              >Save LA</button>
+              <button
+                className="open-btn"
+                onClick={() => laFileInputRef.current?.click()}
+                disabled={isLoading || !activeSeries}
+                title="Open a saved LA session JSON"
+              >Open LA</button>
+              <input
+                ref={laFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  if (leftAtriumPanelRef.current) {
+                    void leftAtriumPanelRef.current.loadSessionFile(f);
+                  } else {
+                    setPendingLAAction({ load: f });
+                    setRightPanel('la');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                  e.target.value = '';
+                }}
+              />
+              <button
+                className="open-btn"
+                onClick={() => {
+                  if (aortaPanelRef.current) {
+                    aortaPanelRef.current.saveSession();
+                  } else {
+                    setPendingAortaAction('save');
+                    setRightPanel('aorta');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                }}
+                disabled={isLoading || !activeSeries}
+                title="Save aorta segmentation as JSON"
+              >Save Ao</button>
+              <button
+                className="open-btn"
+                onClick={() => aortaFileInputRef.current?.click()}
+                disabled={isLoading || !activeSeries}
+                title="Open a saved aorta session JSON"
+              >Open Ao</button>
+              <input
+                ref={aortaFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  if (aortaPanelRef.current) {
+                    void aortaPanelRef.current.loadSessionFile(f);
+                  } else {
+                    setPendingAortaAction({ load: f });
+                    setRightPanel('aorta');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                  e.target.value = '';
+                }}
+              />
+              <button
+                className="open-btn"
+                onClick={() => {
+                  if (laaPanelRef.current) {
+                    laaPanelRef.current.saveSession();
+                  } else {
+                    setPendingLAAAction('save');
+                    setRightPanel('laa');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                }}
+                disabled={isLoading || !activeSeries}
+                title="Save LAA segmentation as JSON"
+              >Save LAA</button>
+              <button
+                className="open-btn"
+                onClick={() => laaFileInputRef.current?.click()}
+                disabled={isLoading || !activeSeries}
+                title="Open a saved LAA session JSON"
+              >Open LAA</button>
+              <input
+                ref={laaFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  if (laaPanelRef.current) {
+                    void laaPanelRef.current.loadSessionFile(f);
+                  } else {
+                    setPendingLAAAction({ load: f });
+                    setRightPanel('laa');
+                    if (viewportMode !== 'standard') setViewportMode('standard');
+                    resizeViewports();
+                  }
+                  e.target.value = '';
+                }}
+              />
+              {activeSeries && (
+                <button
+                  type="button"
+                  className="pcct-trigger-btn"
+                  onClick={() => setPseudoPcctOpen(true)}
+                  title="Pseudo-PCCT filter karşılaştırması (deneysel, klinik değil)"
+                >
+                  Pseudo-PCCT
+                </button>
+              )}
+            </>
           )}
           {activeSeries && (
             <PatientNameEditor filesRef={loadedFilesRef} modalityLabel="ct" />
@@ -852,68 +860,72 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
               <div className="toolbar-divider" />
             </>
           )}
-          <div style={{ flexBasis: '100%', height: 0 }} />
-          <button className={`toolbar-btn ${viewportMode === 'volume-3d' ? 'active' : ''}`} onClick={() => {
-            if (viewportMode === 'volume-3d') {
-              // Toggle off — go back to standard
-              setViewportMode('standard');
-              setRightPanel(null);
-              setReportExpanded(false);
-              resizeViewports();
-            } else {
-              // Toggle on — fullscreen 3D mode
-              setViewportMode('volume-3d');
-              setRightPanel('3d');
-              setReportExpanded(false);
-              resizeViewports();
-            }
-          }}>3D</button>
-          <button className={`toolbar-btn ${rightPanel === 'tavi' ? 'active' : ''}`} onClick={() => toggleRightPanel('tavi')}>TAVI</button>
-          <button className={`toolbar-btn ${rightPanel === 'hand-mr' ? 'active' : ''}`} onClick={() => toggleRightPanel('hand-mr')}>Hand MR</button>
-          <button className={`toolbar-btn ${rightPanel === 'la' ? 'active' : ''}`} onClick={() => {
-            setRightPanel((prev) => {
-              const next = prev === 'la' ? null : 'la';
-              if (next === 'la' && viewportMode !== 'standard') {
-                setViewportMode('standard');
-                exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-              }
-              resizeViewports();
-              return next;
-            });
-          }}>LA 3D</button>
-          <button className={`toolbar-btn ${rightPanel === 'aorta' ? 'active' : ''}`} onClick={() => {
-            setRightPanel((prev) => {
-              const next = prev === 'aorta' ? null : 'aorta';
-              if (next === 'aorta' && viewportMode !== 'standard') {
-                setViewportMode('standard');
-                exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-              }
-              resizeViewports();
-              return next;
-            });
-          }}>Aorta 3D</button>
-          <button className={`toolbar-btn ${rightPanel === 'laa' ? 'active' : ''}`} onClick={() => {
-            setRightPanel((prev) => {
-              const next = prev === 'laa' ? null : 'laa';
-              if (next === 'laa' && viewportMode !== 'standard') {
-                setViewportMode('standard');
-                exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-              }
-              resizeViewports();
-              return next;
-            });
-          }}>LAA 3D</button>
-          <button className={`toolbar-btn ${rightPanel === 'lv-adas' ? 'active' : ''}`} onClick={() => {
-            setRightPanel((prev) => {
-              const next = prev === 'lv-adas' ? null : 'lv-adas';
-              if (next === 'lv-adas' && viewportMode !== 'standard') {
-                setViewportMode('standard');
-                exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-              }
-              resizeViewports();
-              return next;
-            });
-          }}>LV-ADAS</button>
+          {showWorkflowSwitcher && (
+            <>
+              <div style={{ flexBasis: '100%', height: 0 }} />
+              <button className={`toolbar-btn ${viewportMode === 'volume-3d' ? 'active' : ''}`} onClick={() => {
+                if (viewportMode === 'volume-3d') {
+                  // Toggle off — go back to standard
+                  setViewportMode('standard');
+                  setRightPanel(null);
+                  setReportExpanded(false);
+                  resizeViewports();
+                } else {
+                  // Toggle on — fullscreen 3D mode
+                  setViewportMode('volume-3d');
+                  setRightPanel('3d');
+                  setReportExpanded(false);
+                  resizeViewports();
+                }
+              }}>3D</button>
+              <button className="toolbar-btn" onClick={() => toggleRightPanel('tavi')}>TAVI</button>
+              <button className={`toolbar-btn ${rightPanel === 'hand-mr' ? 'active' : ''}`} onClick={() => toggleRightPanel('hand-mr')}>Hand MR</button>
+              <button className={`toolbar-btn ${rightPanel === 'la' ? 'active' : ''}`} onClick={() => {
+                setRightPanel((prev) => {
+                  const next = prev === 'la' ? null : 'la';
+                  if (next === 'la' && viewportMode !== 'standard') {
+                    setViewportMode('standard');
+                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
+                  }
+                  resizeViewports();
+                  return next;
+                });
+              }}>LA 3D</button>
+              <button className={`toolbar-btn ${rightPanel === 'aorta' ? 'active' : ''}`} onClick={() => {
+                setRightPanel((prev) => {
+                  const next = prev === 'aorta' ? null : 'aorta';
+                  if (next === 'aorta' && viewportMode !== 'standard') {
+                    setViewportMode('standard');
+                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
+                  }
+                  resizeViewports();
+                  return next;
+                });
+              }}>Aorta 3D</button>
+              <button className={`toolbar-btn ${rightPanel === 'laa' ? 'active' : ''}`} onClick={() => {
+                setRightPanel((prev) => {
+                  const next = prev === 'laa' ? null : 'laa';
+                  if (next === 'laa' && viewportMode !== 'standard') {
+                    setViewportMode('standard');
+                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
+                  }
+                  resizeViewports();
+                  return next;
+                });
+              }}>LAA 3D</button>
+              <button className={`toolbar-btn ${rightPanel === 'lv-adas' ? 'active' : ''}`} onClick={() => {
+                setRightPanel((prev) => {
+                  const next = prev === 'lv-adas' ? null : 'lv-adas';
+                  if (next === 'lv-adas' && viewportMode !== 'standard') {
+                    setViewportMode('standard');
+                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
+                  }
+                  resizeViewports();
+                  return next;
+                });
+              }}>LV-ADAS</button>
+            </>
+          )}
         </div>
       )}
 
@@ -938,16 +950,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             {viewportMode === 'volume-3d' && (
               <div className="vol3d-overlay-controls">
                 <RenderModeSelector renderingEngineId={RENDERING_ENGINE_ID} volumeId={VOLUME_ID} />
-              </div>
-            )}
-
-            {/* MPR modes: slab projection floating panel */}
-            {viewportMode !== 'volume-3d' && activeSeries && (
-              <div className="slab-overlay-controls">
-                <SlabProjection
-                  renderingEngineId={RENDERING_ENGINE_ID}
-                  viewportIds={MPR_VIEWPORT_IDS}
-                />
               </div>
             )}
 
@@ -983,6 +985,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
               <div className="side-panel-tabs">
                 <button className={`side-panel-tab ${!reportExpanded ? 'active' : ''}`} onClick={() => { setReportExpanded(false); taviPanelRef.current?.showCapture(); }}>TAVI</button>
                 <button className={`side-panel-tab ${reportExpanded ? 'active' : ''}`} onClick={() => { setReportExpanded(true); taviPanelRef.current?.showReport(); }}>Report</button>
+                <button className="side-panel-reset" onClick={() => { taviPanelRef.current?.resetAll(); setReportExpanded(false); }} title="Reset all TAVI measurements">Reset</button>
                 <button className="side-panel-close" onClick={() => { setRightPanel(null); setReportExpanded(false); setViewportMode('standard'); exitDoubleObliqueMode(RENDERING_ENGINE_ID); resizeViewports(); }}>×</button>
               </div>
 

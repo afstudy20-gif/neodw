@@ -134,6 +134,26 @@ export class DoubleObliqueController {
     return TAVIGeometry.vectorNormalize({ x: -vpn[0], y: -vpn[1], z: -vpn[2] });
   }
 
+  /** Re-center the double-oblique views without changing the current plane orientation or zoom. */
+  centerOnWorldPoint(point?: TAVIVector3D): void {
+    if (this.disposed) return;
+
+    const target = point ? { ...point } : { ...this.state.axisPoint };
+    const projected = TAVIGeometry.projectPointOntoPlane(
+      target,
+      this.state.axisPoint,
+      this.getWorkingPlaneNormal()
+    );
+
+    this.state.axisPoint = projected;
+    this.baseAxisPoint = { ...projected };
+    this.initialSetup = false;
+    this.updateCameras();
+    requestAnimationFrame(() => {
+      if (!this.disposed) this.updateCameras();
+    });
+  }
+
   // ── Live perpendicularity (deviation of the working view from the annulus plane) ──
   private annulusReferenceNormal: TAVIVector3D | null = null;
   private annulusDiscRadiusMm = 0;
@@ -488,6 +508,14 @@ export class DoubleObliqueController {
       origin,
       TAVIGeometry.vectorScale(this.state.axisDirection, distanceMm)
     );
+    this.updateCameras();
+  }
+
+  /** Navigate the working slice through an arbitrary world point while preserving orientation/zoom. */
+  showPlaneThroughWorldPoint(point: TAVIVector3D): void {
+    this.state.axisPoint = { ...point };
+    this.baseAxisPoint = { ...point };
+    this.initialSetup = false;
     this.updateCameras();
   }
 

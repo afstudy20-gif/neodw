@@ -13,8 +13,64 @@ let vol3dToolGroup: cornerstoneTools.Types.IToolGroup | undefined;
 let voiSync: cornerstoneTools.Synchronizer | undefined;
 let zoomPanSync: cornerstoneTools.Synchronizer | undefined;
 let isDoubleObliqueActive = false;
+let doubleObliqueCenterHandler: (() => boolean) | null = null;
 
 const MPR_VIEWPORT_IDS = ['axial', 'sagittal', 'coronal'];
+
+export function setDoubleObliqueCenterHandler(handler: (() => boolean) | null): void {
+  doubleObliqueCenterHandler = handler;
+}
+
+function stabilizeCrosshairRotation(crosshairsTool: any): void {
+  if (!crosshairsTool || crosshairsTool.__neoDwRotationStabilized) return;
+
+  const originalDrag = crosshairsTool._dragCallback?.bind(crosshairsTool);
+  const originalEnd = crosshairsTool._endCallback?.bind(crosshairsTool);
+
+  if (!originalDrag) return;
+
+  // Cornerstone's default Crosshairs ROTATE operation rotates the linked MPR
+  // triad. Keep that behavior, but avoid forcibly changing focalPoint during
+  // rotation: that turns every drag tick into an implicit "center" command and
+  // makes zoomed/panned images jump around inside their panels.
+  const renderLinkedMprViewports = (evt: any) => {
+    const enabledElement = cornerstone.getEnabledElement(evt?.detail?.element);
+    const renderingEngine = enabledElement?.renderingEngine;
+    if (!renderingEngine) return;
+
+    try {
+      crosshairsTool._recomputeToolCenterFromAbsoluteCameras?.({
+        emitEvent: true,
+        updateViewportCameras: false,
+      });
+    } catch {
+      // Best-effort sync; rendering below still refreshes visible lines.
+    }
+    renderingEngine.renderViewports(MPR_VIEWPORT_IDS);
+  };
+
+  crosshairsTool._dragCallback = (evt: any) => {
+    const isRotation = crosshairsTool.editData?.annotation?.data?.handles?.activeOperation === 2;
+    try {
+      return originalDrag(evt);
+    } finally {
+      if (isRotation) renderLinkedMprViewports(evt);
+    }
+  };
+
+  if (originalEnd) {
+    crosshairsTool._endCallback = (evt: any) => {
+      const isRotation = crosshairsTool.editData?.annotation?.data?.handles?.activeOperation === 2;
+      try {
+        return originalEnd(evt);
+      } finally {
+        if (isRotation) renderLinkedMprViewports(evt);
+      }
+    };
+  }
+
+  crosshairsTool.__neoDwRotationStabilized = true;
+}
 
 export function setupToolGroups(renderingEngineId: string): void {
   if (mprToolGroup) return;
@@ -54,6 +110,7 @@ export function setupToolGroups(renderingEngineId: string): void {
     getReferenceLineDraggableRotatable: () => true,
     getReferenceLineSlabThicknessControlsOn: () => false,
   });
+  stabilizeCrosshairRotation(mprGroup.getToolInstance(names.Crosshairs) as any);
 
   // IMPORTANT: Add viewports BEFORE setting tools active.
   // CrosshairsTool.onSetToolActive() calls _computeToolCenter(this._getViewportsInfo())
@@ -151,9 +208,11 @@ export function setActiveTool(name: ToolName): void {
   }
 
   // Deactivate ALL tools before re-assigning primary binding.
-  // Drawing tools (PlanarFreehandROI, Probe) need Crosshairs fully disabled
-  // because Passive crosshairs can intercept clicks near existing annotations.
-  const isDrawingTool = name === 'PlanarFreehandROI' || name === 'Probe' || name === 'Angle' || name === 'CobbAngle' || name === 'ArrowAnnotate' || name === 'Bidirectional';
+  // Most drawing tools need Crosshairs fully disabled because passive
+  // crosshairs can intercept clicks near existing annotations. Probe is the
+  // exception: TAVI point picking still needs the crosshair visible as an
+  // orientation reference, so keep it enabled (render-only).
+  const hidesCrosshairs = name === 'PlanarFreehandROI' || name === 'Angle' || name === 'CobbAngle' || name === 'ArrowAnnotate' || name === 'Bidirectional';
   const allPrimaryTools = [
     names.WindowLevel, names.Length, names.Angle, names.CobbAngle,
     names.ArrowAnnotate, names.Bidirectional, names.Crosshairs,
@@ -163,7 +222,7 @@ export function setActiveTool(name: ToolName): void {
     if (t === names.Crosshairs && name !== 'Crosshairs') {
       // For drawing tools: disable crosshairs entirely so they can't intercept.
       // For navigation tools: keep crosshairs enabled (visible but non-interactive).
-      if (isDrawingTool) {
+      if (hidesCrosshairs) {
         mprToolGroup.setToolDisabled(t);
       } else {
         mprToolGroup.setToolEnabled(t);
@@ -233,6 +292,7 @@ export function addViewportToToolGroup(_viewportId: string, _renderingEngineId: 
 // Reset crosshairs to volume center and sync all viewports
 export function resetCrosshairsToCenter(renderingEngineId: string): void {
   if (!mprToolGroup) return;
+  if (isDoubleObliqueActive) return;
 
   const engine = cornerstone.getRenderingEngine(renderingEngineId);
   if (!engine) return;
@@ -407,22 +467,21 @@ export function exitDoubleObliqueMode(renderingEngineId: string): void {
   resetCrosshairsToCenter(renderingEngineId);
 }
 
-/** Enable probe tool for point picking (used during cusp/coronary clicking in TAVI mode).
- *  Deactivates ALL other tools from primary button (Pan, W/L, Crosshairs, etc.) */
+/** Enable probe tool for point picking (used during cusp/coronary clicking in TAVI mode). */
 export function enableProbeTool(): void {
   if (!mprToolGroup) return;
   const names = getToolNames();
 
-  // Deactivate all tools from primary binding (same logic as setActiveTool)
+  // Deactivate all tools from primary binding while keeping crosshairs visible
+  // as a render-only reference in standard/TAVI crosshair mode.
   const allPrimaryTools = [
     names.WindowLevel, names.Length, names.Crosshairs,
     names.PlanarFreehandROI, names.Pan, names.Zoom,
   ];
   for (const t of allPrimaryTools) {
     if (t === names.Crosshairs) {
-      // Fully disable crosshairs so they can't intercept probe clicks
       if (!isDoubleObliqueActive) {
-        mprToolGroup.setToolDisabled(t);
+        mprToolGroup.setToolEnabled(t);
       }
     } else {
       mprToolGroup.setToolPassive(t);
@@ -459,9 +518,105 @@ export function disableProbeTool(): void {
   }
 }
 
+/**
+ * Center every MPR viewport on the crosshair and divide parallelScale by
+ * `zoomFactor`. Same crosshair-locate logic as `centerViewportsOnCrosshairs`,
+ * just with an extra zoom step so a single button click can punch into the
+ * structure under the cursor (e.g. the aortic root) without manual zooming.
+ */
+export function zoomMPRToCrosshair(renderingEngineId: string, zoomFactor: number): void {
+  if (!mprToolGroup) return;
+  const engine = cornerstone.getRenderingEngine(renderingEngineId);
+  if (!engine) return;
+
+  if (isDoubleObliqueActive) {
+    for (const vpId of MPR_VIEWPORT_IDS) {
+      const vp = engine.getViewport(vpId);
+      if (!vp) continue;
+      const cam = vp.getCamera();
+      if (typeof cam.parallelScale !== 'number') continue;
+      vp.setCamera({ ...cam, parallelScale: cam.parallelScale / zoomFactor });
+      vp.render();
+    }
+    return;
+  }
+
+  const names = getToolNames();
+  let center: cornerstone.Types.Point3 | null = null;
+  const csTool = mprToolGroup.getToolInstance(names.Crosshairs) as any;
+  if (csTool?.toolCenter) center = csTool.toolCenter as cornerstone.Types.Point3;
+  if (!center) {
+    for (const vpId of MPR_VIEWPORT_IDS) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const anns = cornerstoneTools.annotation.state.getAnnotations(names.Crosshairs, vp.element);
+      if (anns?.length > 0) {
+        const tc = anns[0].data?.handles?.toolCenter;
+        if (tc) { center = tc as cornerstone.Types.Point3; break; }
+      }
+    }
+  }
+  if (!center) return;
+
+  // Snapshot every viewport's CURRENT camera state BEFORE we mutate any of
+  // them. ZoomPanSynchronizer auto-propagates parallelScale across the MPR
+  // group, so reading cam.parallelScale from viewport B AFTER viewport A's
+  // setCamera fires returns the already-divided value — the original loop
+  // ended up dividing /6 once per viewport (≈216× total instead of 6×).
+  const snapshots: Array<{
+    vp: cornerstone.Types.IViewport;
+    vpn: cornerstone.Types.Point3;
+    dist: number;
+    targetScale: number | undefined;
+  }> = [];
+  for (const vpId of MPR_VIEWPORT_IDS) {
+    const vp = engine.getViewport(vpId);
+    if (!vp) continue;
+    const cam = vp.getCamera();
+    if (!cam.viewPlaneNormal || !cam.focalPoint) continue;
+    const dist = cam.position && cam.focalPoint
+      ? Math.sqrt(
+          (cam.position[0] - cam.focalPoint[0]) ** 2 +
+          (cam.position[1] - cam.focalPoint[1]) ** 2 +
+          (cam.position[2] - cam.focalPoint[2]) ** 2
+        )
+      : 1000;
+    snapshots.push({
+      vp,
+      vpn: cam.viewPlaneNormal as cornerstone.Types.Point3,
+      dist,
+      targetScale: typeof cam.parallelScale === 'number'
+        ? cam.parallelScale / zoomFactor
+        : undefined,
+    });
+  }
+
+  for (const { vp, vpn, dist, targetScale } of snapshots) {
+    vp.setCamera({
+      focalPoint: center,
+      position: [
+        center[0] + vpn[0] * dist,
+        center[1] + vpn[1] * dist,
+        center[2] + vpn[2] * dist,
+      ] as cornerstone.Types.Point3,
+      ...(targetScale !== undefined ? { parallelScale: targetScale } : {}),
+    });
+    vp.render();
+  }
+}
+
 /** Center all MPR viewports on the current crosshair intersection point */
 export function centerViewportsOnCrosshairs(renderingEngineId: string): void {
   if (!mprToolGroup) return;
+  if (isDoubleObliqueActive) {
+    try {
+      if (doubleObliqueCenterHandler?.()) return;
+    } catch (error) {
+      console.warn('[DoubleOblique] Center handler failed', error);
+    }
+    return;
+  }
+
   const engine = cornerstone.getRenderingEngine(renderingEngineId);
   if (!engine) return;
 
@@ -521,6 +676,7 @@ export function centerViewportsOnCrosshairs(renderingEngineId: string): void {
 
 export function destroyToolGroups(): void {
   isDoubleObliqueActive = false;
+  doubleObliqueCenterHandler = null;
   // Must use SynchronizerManager.destroySynchronizer to remove from registry,
   // not just synchronizer.destroy() which only cleans up listeners
   if (zoomPanSync) {

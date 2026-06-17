@@ -312,14 +312,19 @@ export function autoSegmentCrossSectionAtPlane(
   }
   const callerHuMin = options?.huMin;
   const callerHuMax = options?.huMax;
+  // Tight first attempt: lumen pixels cluster within ±40 HU of the seed; the
+  // wider [seed-100, seed+200] band catches the partial-volume transition
+  // ring (HU drops from ~250 lumen to ~50 soft-tissue over 1–2 pixels) and
+  // the boundary ends up 1–2 mm OUTSIDE the actual wall. Start tight; widen
+  // only if the tight band yields no qualifying region under the seed.
   const thresholdAttempts: [number, number][] =
     callerHuMin !== undefined || callerHuMax !== undefined
       ? [[callerHuMin ?? 150, callerHuMax ?? 500]]
       : [
+          [seedHU - 40, seedHU + 60],
           [seedHU - 60, seedHU + 100],
           [seedHU - 80, seedHU + 150],
           [seedHU - 100, seedHU + 200],
-          [seedHU - 40, seedHU + 60],
         ];
 
   for (const [huMin, huMax] of thresholdAttempts) {
@@ -335,6 +340,267 @@ export function autoSegmentCrossSectionAtPlane(
 
   console.warn('[AutoSeg] All threshold attempts failed');
   return null;
+}
+
+function percentile(values: number[], q: number): number {
+  if (values.length === 0) return NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * q)));
+  return sorted[idx];
+}
+
+function median(values: number[]): number {
+  return percentile(values, 0.5);
+}
+
+function circularMedian(values: number[], index: number, radius: number): number {
+  const window: number[] = [];
+  const n = values.length;
+  for (let offset = -radius; offset <= radius; offset++) {
+    window.push(values[(index + offset + n) % n]);
+  }
+  return median(window);
+}
+
+function suppressLocalizedOuterSpikes(radii: number[], globalMedian: number): number[] {
+  if (radii.length < 16 || !Number.isFinite(globalMedian)) return radii;
+
+  const spikeClampMm = Math.max(1.2, globalMedian * 0.08);
+  return radii.map((r, idx) => {
+    const broadLocalMedian = circularMedian(radii, idx, 8);
+    const narrowLocalMedian = circularMedian(radii, idx, 3);
+    const localReference = Math.min(broadLocalMedian, narrowLocalMedian);
+
+    // Narrow external attachments/calcific partial-volume streaks can be
+    // brighter than the annulus boundary and create a small lobe outside the
+    // valve ring. Clamp only abrupt OUTER spikes; broad, smooth eccentricity is
+    // preserved because its local median rises with the true contour.
+    if (r > localReference + spikeClampMm) {
+      return localReference + spikeClampMm * 0.35;
+    }
+    return r;
+  });
+}
+
+/**
+ * Annulus-specific auto tracing.
+ *
+ * The aortic-root annulus is a poor fit for seed-threshold BFS because the
+ * annular centroid often lands on leaflet/coaptation tissue rather than
+ * contrast-filled lumen. This traces the bright-blood → lower-HU boundary
+ * radially from the cusp-derived annulus centre. It is deliberately edge-based
+ * rather than seed-based, so it can catch the contrast interface even when the
+ * centre pixel is not contrast.
+ */
+export function autoTraceAnnulusContrastEdgeAtPlane(
+  volume: any,
+  planeOrigin: TAVIVector3D,
+  planeNormal: TAVIVector3D,
+  viewUp?: TAVIVector3D,
+  options?: {
+    radialCount?: number;
+    radialStepMm?: number;
+    minRadiusMm?: number;
+    maxRadiusMm?: number;
+    minDiameterMm?: number;
+    maxDiameterMm?: number;
+  }
+): AutoSegmentResult | null {
+  const info = extractVolumeInfo(volume);
+  if (!info) return null;
+
+  const radialCount = options?.radialCount ?? 96;
+  const radialStepMm = options?.radialStepMm ?? 0.35;
+  const minRadiusMm = options?.minRadiusMm ?? 5.5;
+  const maxRadiusMm = options?.maxRadiusMm ?? 22;
+  const minDiameterMm = options?.minDiameterMm ?? 12;
+  const maxDiameterMm = options?.maxDiameterMm ?? 38;
+
+  const normal = TAVIGeometry.vectorNormalize(planeNormal);
+  let up = viewUp ? TAVIGeometry.vectorNormalize(viewUp) : { x: 0, y: 1, z: 0 };
+  if (Math.abs(TAVIGeometry.vectorDot(up, normal)) > 0.99) up = { x: 1, y: 0, z: 0 };
+  const uRaw = TAVIGeometry.vectorSubtract(up, TAVIGeometry.vectorScale(normal, TAVIGeometry.vectorDot(up, normal)));
+  const u = TAVIGeometry.vectorNormalize(uRaw);
+  const v = TAVIGeometry.vectorCross(normal, u);
+
+  const sampleAt = (du: number, dv: number): number =>
+    sampleVolumeNearest(
+      planeOrigin.x + u.x * du + v.x * dv,
+      planeOrigin.y + u.y * du + v.y * dv,
+      planeOrigin.z + u.z * du + v.z * dv,
+      info
+    );
+
+  const centralSamples: number[] = [];
+  for (let rr = 1; rr <= 12; rr += 1.0) {
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+      const hu = sampleAt(Math.cos(a) * rr, Math.sin(a) * rr);
+      if (Number.isFinite(hu) && hu > -200 && hu < 900) centralSamples.push(hu);
+    }
+  }
+  if (centralSamples.length < 16) return null;
+
+  const lumenHU = percentile(centralSamples.filter(v => v < 650), 0.82);
+  const tissueHU = percentile(centralSamples, 0.18);
+  if (!Number.isFinite(lumenHU) || lumenHU < 55) return null;
+
+  const boundaryThreshold = Math.max(45, Math.min(lumenHU - 35, tissueHU + (lumenHU - tissueHU) * 0.55));
+  const radii: number[] = [];
+  const points: TAVIVector3D[] = [];
+
+  for (let i = 0; i < radialCount; i++) {
+    const angle = (i / radialCount) * Math.PI * 2;
+    const dirU = Math.cos(angle);
+    const dirV = Math.sin(angle);
+    const profile: { r: number; hu: number }[] = [];
+
+    for (let r = radialStepMm; r <= maxRadiusMm; r += radialStepMm) {
+      const hu = sampleAt(dirU * r, dirV * r);
+      profile.push({ r, hu: Number.isFinite(hu) ? hu : -1000 });
+    }
+    if (profile.length < 8) continue;
+
+    const smooth = profile.map((p, idx) => {
+      const prev = profile[Math.max(0, idx - 1)].hu;
+      const next = profile[Math.min(profile.length - 1, idx + 1)].hu;
+      return { r: p.r, hu: (prev + p.hu * 2 + next) / 4 };
+    });
+
+    let peakIdx = -1;
+    let peakHU = -Infinity;
+    for (let j = 0; j < smooth.length; j++) {
+      const r = smooth[j].r;
+      const hu = smooth[j].hu;
+      if (r < 2 || r > Math.min(maxRadiusMm - 2, 16)) continue;
+      if (hu > peakHU && hu < 750) {
+        peakHU = hu;
+        peakIdx = j;
+      }
+    }
+    if (peakIdx < 0 || peakHU < boundaryThreshold + 15) continue;
+
+    let edgeR: number | null = null;
+    let bestDropScore = -Infinity;
+    let bestDropR: number | null = null;
+    const startIdx = Math.max(peakIdx, Math.floor(minRadiusMm / radialStepMm));
+
+    // Prefer the OUTERMOST bright-blood -> lower-HU transition. Leaflet tissue
+    // and calcium can create a strong inner edge; scanning outward from the
+    // brightest peak stops too early and leaves the annulus contour inside the
+    // visible lumen boundary. Starting from the outside catches the actual
+    // contrast-to-background boundary when it is present.
+    for (let j = smooth.length - 4; j >= startIdx; j--) {
+      const r = smooth[j].r;
+      if (r < minRadiusMm || r > maxRadiusMm) continue;
+      const before = (smooth[Math.max(0, j - 2)].hu + smooth[Math.max(0, j - 1)].hu + smooth[j].hu) / 3;
+      const after = (smooth[j + 1].hu + smooth[j + 2].hu + smooth[j + 3].hu) / 3;
+      const drop = before - after;
+      if (before >= boundaryThreshold && after < boundaryThreshold && drop > 8) {
+        edgeR = r + radialStepMm * 0.5;
+        break;
+      }
+      if (drop > 0 && before > boundaryThreshold) {
+        // A slightly smaller drop farther out is usually preferable to a very
+        // sharp leaflet/coaptation edge closer to the center.
+        const score = drop + r * 1.5;
+        if (score > bestDropScore) {
+          bestDropScore = score;
+          bestDropR = r + radialStepMm * 0.5;
+        }
+      }
+    }
+
+    if (edgeR == null && bestDropR != null && bestDropScore > 25) edgeR = bestDropR;
+    if (edgeR == null) {
+      // Last sustained bright sample is the most conservative outer boundary
+      // fallback when the outside remains partly enhanced/noisy.
+      for (let j = smooth.length - 1; j >= startIdx; j--) {
+        const prev = smooth[Math.max(0, j - 1)].hu;
+        const hu = smooth[j].hu;
+        if (smooth[j].r >= minRadiusMm && Math.max(prev, hu) >= boundaryThreshold) {
+          edgeR = smooth[j].r;
+          break;
+        }
+      }
+    }
+
+    if (edgeR == null) {
+      // Final fallback: keep the legacy inward scan, but only if there is no
+      // outer-edge evidence. This preserves behavior on low-contrast studies.
+      let bestDrop = 0;
+      for (let j = startIdx; j < smooth.length - 2; j++) {
+        const r = smooth[j].r;
+        if (r < minRadiusMm || r > maxRadiusMm) continue;
+        const before = (smooth[Math.max(0, j - 2)].hu + smooth[Math.max(0, j - 1)].hu + smooth[j].hu) / 3;
+        const after = (smooth[j + 1].hu + smooth[j + 2].hu) / 2;
+        const drop = before - after;
+        if (before >= boundaryThreshold && after < boundaryThreshold && drop > 10) {
+          edgeR = r + radialStepMm * 0.5;
+          break;
+        }
+        if (drop > bestDrop && before > boundaryThreshold) {
+          bestDrop = drop;
+          bestDropR = r + radialStepMm * 0.5;
+        }
+      }
+      if (edgeR == null && bestDropR != null && bestDrop > 25) edgeR = bestDropR;
+    }
+
+    if (edgeR == null) {
+      for (let j = smooth.length - 1; j >= 0; j--) {
+        if (smooth[j].r >= minRadiusMm && smooth[j].hu >= boundaryThreshold) {
+          edgeR = smooth[j].r;
+          break;
+        }
+      }
+    }
+    if (edgeR == null) continue;
+
+    edgeR = Math.max(minRadiusMm, Math.min(maxRadiusMm, edgeR));
+    radii.push(edgeR);
+    points.push({
+      x: planeOrigin.x + u.x * dirU * edgeR + v.x * dirV * edgeR,
+      y: planeOrigin.y + u.y * dirU * edgeR + v.y * dirV * edgeR,
+      z: planeOrigin.z + u.z * dirU * edgeR + v.z * dirV * edgeR,
+    });
+  }
+
+  if (points.length < Math.max(24, radialCount * 0.45)) return null;
+
+  const medR = median(radii);
+  if (!Number.isFinite(medR)) return null;
+
+  const clippedRadii = radii.map(r => Math.max(medR * 0.65, Math.min(medR * 1.35, r)));
+  let smoothedRadii = suppressLocalizedOuterSpikes(clippedRadii, medR);
+  smoothedRadii = suppressLocalizedOuterSpikes(smoothedRadii, medR);
+  for (let pass = 0; pass < 2; pass++) {
+    smoothedRadii = smoothedRadii.map((_, idx) => {
+      const med = circularMedian(smoothedRadii, idx, 2);
+      const prev = smoothedRadii[(idx - 1 + smoothedRadii.length) % smoothedRadii.length];
+      const next = smoothedRadii[(idx + 1) % smoothedRadii.length];
+      return med * 0.5 + (prev + next) * 0.25;
+    });
+  }
+
+  const contourPoints = smoothedRadii.map((r, idx) => {
+    const angle = (idx / smoothedRadii.length) * Math.PI * 2;
+    const dirU = Math.cos(angle);
+    const dirV = Math.sin(angle);
+    return {
+      x: planeOrigin.x + u.x * dirU * r + v.x * dirV * r,
+      y: planeOrigin.y + u.y * dirU * r + v.y * dirV * r,
+      z: planeOrigin.z + u.z * dirU * r + v.z * dirV * r,
+    };
+  });
+
+  const geo = TAVIGeometry.geometryForWorldContour(contourPoints, normal);
+  if (!geo) return null;
+  if (geo.equivalentDiameterMm < minDiameterMm || geo.equivalentDiameterMm > maxDiameterMm) {
+    console.warn(`[AnnulusEdgeTrace] Rejected equiv diameter ${geo.equivalentDiameterMm.toFixed(1)}mm`);
+    return null;
+  }
+
+  return { contourPoints, centerWorld: geo.centroid, maskSize: radialCount };
 }
 
 export interface ContourPixelSample {
@@ -620,6 +886,79 @@ function _segmentWithThreshold(
     }
   }
 
+  // ── Fill SMALL interior holes (calcium plaque, micro non-contrast pixels) ──
+  // The HU band excludes calcium (>>seedHU + 100) and any sub-threshold pixel
+  // inside the lumen, creating internal "holes" the boundary tracer would
+  // otherwise wrap around — indenting into the lumen at every calcified spot.
+  //
+  // The fill is SIZE-CAPPED so it stays safe for asymmetric lumens (sinus
+  // Valsalva, horseshoe-shaped aortic root cross-sections). When the lumen
+  // partially encircles a non-contrast pocket — peri-valvular fat, the gap
+  // between aorta and pulmonary artery — that pocket appears as a "hole" too,
+  // and unconditionally filling it bulges the contour outward into mediastinum.
+  // A 25 mm² cap (~5.6 mm equivalent diameter) keeps calcium plaque in but
+  // leaves real anatomical pockets out.
+  const holeAreaCapMm2 = 25;
+  const holeMaxPx = Math.max(4, Math.floor(holeAreaCapMm2 / (pixelSpacing * pixelSpacing)));
+
+  const exterior = new Uint8Array(gridSize * gridSize);
+  const exteriorStack: number[] = [];
+  for (let c = 0; c < gridSize; c++) {
+    if (filled[c] !== 2) { exterior[c] = 1; exteriorStack.push(c); }
+    const bottom = (gridSize - 1) * gridSize + c;
+    if (filled[bottom] !== 2) { exterior[bottom] = 1; exteriorStack.push(bottom); }
+  }
+  for (let r = 0; r < gridSize; r++) {
+    const left = r * gridSize;
+    if (filled[left] !== 2) { exterior[left] = 1; exteriorStack.push(left); }
+    const right = left + gridSize - 1;
+    if (filled[right] !== 2) { exterior[right] = 1; exteriorStack.push(right); }
+  }
+  while (exteriorStack.length > 0) {
+    const idx = exteriorStack.pop()!;
+    const r = Math.floor(idx / gridSize);
+    const c = idx % gridSize;
+    for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= gridSize || nc < 0 || nc >= gridSize) continue;
+      const nIdx = nr * gridSize + nc;
+      if (exterior[nIdx] === 0 && filled[nIdx] !== 2) {
+        exterior[nIdx] = 1;
+        exteriorStack.push(nIdx);
+      }
+    }
+  }
+
+  // Group remaining non-filled, non-exterior pixels into connected interior
+  // holes. Fill only the holes whose area stays under holeMaxPx.
+  const holeLabel = new Int32Array(gridSize * gridSize);
+  for (let i = 0; i < filled.length; i++) {
+    if (filled[i] === 2 || exterior[i] === 1 || holeLabel[i] !== 0) continue;
+    const cluster: number[] = [];
+    const stack: number[] = [i];
+    holeLabel[i] = 1;
+    while (stack.length > 0) {
+      const idx = stack.pop()!;
+      cluster.push(idx);
+      const r = Math.floor(idx / gridSize);
+      const c = idx % gridSize;
+      for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const nr = r + dr;
+        const nc = c + dc;
+        if (nr < 0 || nr >= gridSize || nc < 0 || nc >= gridSize) continue;
+        const nIdx = nr * gridSize + nc;
+        if (holeLabel[nIdx] === 0 && filled[nIdx] !== 2 && exterior[nIdx] === 0) {
+          holeLabel[nIdx] = 1;
+          stack.push(nIdx);
+        }
+      }
+    }
+    if (cluster.length <= holeMaxPx) {
+      for (const idx of cluster) filled[idx] = 2;
+    }
+  }
+
   let filledCount = 0;
   for (let i = 0; i < filled.length; i++) {
     if (filled[i] === 2) filledCount++;
@@ -676,9 +1015,15 @@ function _segmentWithThreshold(
     return angleA - angleB;
   });
 
-  // For each angular bin, keep only the point closest to the median radius.
-  // This eliminates the zigzag artifacts from multiple boundary pixels at the same angle.
-  const numBins = 72; // 5-degree bins
+  // For each angular bin, keep the OUTERMOST point in that bin (75th-percentile
+  // radius, not median). The lumen-soft-tissue HU contrast is sharp, so the
+  // outermost boundary pixel in each angle slot is the real edge; median
+  // pulled the contour inward whenever the boundary had any inward jaggedness
+  // from contrast speckle, leaving a visible gap between the contour and the
+  // true lumen wall. Use 75th percentile (not strict max) to suppress single-
+  // pixel outliers from noise. Higher angular resolution (120 bins ≈ 3°)
+  // preserves fine boundary detail.
+  const numBins = 120;
   const binned: [number, number][] = [];
   const binSize = boundary.length / numBins;
 
@@ -687,7 +1032,6 @@ function _segmentWithThreshold(
     const end = Math.floor((b + 1) * binSize);
     if (start >= end) continue;
 
-    // Compute median radius in this bin
     const radii: { r: number; c: number; dist: number }[] = [];
     for (let i = start; i < end; i++) {
       const [pr, pc] = boundary[i];
@@ -695,12 +1039,13 @@ function _segmentWithThreshold(
       radii.push({ r: pr, c: pc, dist });
     }
     radii.sort((a, b) => a.dist - b.dist);
-    const median = radii[Math.floor(radii.length / 2)];
-    binned.push([median.r, median.c]);
+    const q75Idx = Math.min(radii.length - 1, Math.floor(radii.length * 0.75));
+    const pick = radii[q75Idx];
+    binned.push([pick.r, pick.c]);
   }
 
-  // Subsample to ~60 points
-  const maxPoints = 60;
+  // Subsample to ~80 points (was 60 — keep more detail with the finer bins).
+  const maxPoints = 80;
   let ordered: [number, number][];
   if (binned.length > maxPoints) {
     ordered = [];
@@ -712,8 +1057,11 @@ function _segmentWithThreshold(
     ordered = binned;
   }
 
-  // Smooth: weighted average with neighbors (3 passes)
-  for (let pass = 0; pass < 3; pass++) {
+  // Light smoothing: ONE pass with low-weight neighbours [0.15, 0.7, 0.15].
+  // The previous 3-pass / [0.2, 0.6, 0.2] kernel was effectively a Gaussian
+  // blur with sigma ≈ 1.5 bins (~5° on the circumference) — enough to round
+  // off cusp pockets and pull the contour inward by ~1–2 mm.
+  for (let pass = 0; pass < 1; pass++) {
     const smoothed: [number, number][] = [];
     const n = ordered.length;
     for (let i = 0; i < n; i++) {
@@ -721,8 +1069,8 @@ function _segmentWithThreshold(
       const curr = ordered[i];
       const next = ordered[(i + 1) % n];
       smoothed.push([
-        prev[0] * 0.2 + curr[0] * 0.6 + next[0] * 0.2,
-        prev[1] * 0.2 + curr[1] * 0.6 + next[1] * 0.2,
+        prev[0] * 0.15 + curr[0] * 0.7 + next[0] * 0.15,
+        prev[1] * 0.15 + curr[1] * 0.7 + next[1] * 0.15,
       ]);
     }
     ordered = smoothed;

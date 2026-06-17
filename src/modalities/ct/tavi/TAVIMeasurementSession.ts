@@ -838,6 +838,50 @@ export class TAVIMeasurementSession {
     return rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
   }
 
+  /** Export world-coordinate landmarks and annulus contours for QA/debug/research review. */
+  public annulusPointsCsvReport(): string {
+    const rows: string[][] = [];
+    const addPoint = (group: string, label: string, index: number | string, p?: TAVIVector3D | null, note = '') => {
+      if (!p) return;
+      rows.push([
+        group,
+        label,
+        String(index),
+        p.x.toFixed(3),
+        p.y.toFixed(3),
+        p.z.toFixed(3),
+        note,
+      ]);
+    };
+
+    rows.push(['Group', 'Label', 'Index', 'X', 'Y', 'Z', 'Note']);
+
+    addPoint('Cusp', 'LCC', '', this.cuspLCC);
+    addPoint('Cusp', 'RCC', '', this.cuspRCC);
+    addPoint('Cusp', 'NCC', '', this.cuspNCC);
+    addPoint('Ostium', 'LCA', '', this.leftOstiumSnapshot?.worldPoint, this.leftCoronaryHeightMm != null ? `height ${this.leftCoronaryHeightMm.toFixed(1)} mm` : '');
+    addPoint('Ostium', 'RCA', '', this.rightOstiumSnapshot?.worldPoint, this.rightCoronaryHeightMm != null ? `height ${this.rightCoronaryHeightMm.toFixed(1)} mm` : '');
+    addPoint('Plane', 'Annulus centroid', '', this.annulusPlaneCentroid);
+    addPoint('Plane', 'Annulus normal', '', this.annulusPlaneNormal);
+
+    this.annulusRawContourPoints.forEach((p, index) => {
+      addPoint('Annulus raw contour', 'Raw', index, p);
+    });
+    this.annulusSnapshot?.worldPoints.forEach((p, index) => {
+      addPoint('Annulus interpolated contour', 'Interpolated', index, p);
+    });
+
+    for (const label of ['LCS', 'RCS', 'NCS'] as SinusLabel[]) {
+      const pair = this.sinusDiameterPoints[label];
+      addPoint('Sinus width', `${label} A`, '', pair?.a);
+      addPoint('Sinus width', `${label} B`, '', pair?.b);
+      addPoint('Sinus floor', label, '', this.sinusFloorPoints[label]);
+    }
+
+    const escapeCell = (cell: string) => `"${cell.split('"').join('""')}"`;
+    return rows.map(row => row.map(escapeCell).join(',')).join('\n');
+  }
+
   public workflowChecklistSummary(): string {
     const arr = [
       `[${this.aorticAxisPointSnapshots.length >= 2 ? 'x' : ' '}] 0 Aortic axis estimation`,

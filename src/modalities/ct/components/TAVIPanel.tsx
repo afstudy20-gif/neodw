@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useImperativeHandle } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
-import { setActiveTool, enableProbeTool, disableProbeTool, enterDoubleObliqueMode } from '../core/toolManager';
+import { setActiveTool, enableProbeTool, disableProbeTool, enterDoubleObliqueMode, setDoubleObliqueCenterHandler } from '../core/toolManager';
 import {
   TAVIMeasurementSession,
   TAVIStructureAorticAxis,
@@ -20,7 +20,7 @@ import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRi
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
-import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, samplePixelValuesInWorldContour, snapPointToLumenCentroid, snapPointToAxialMinimum } from '../tavi/AorticAxisDetection';
+import { detectAorticAxis, detectAorticAxisLocal, AorticAxisResult, autoSegmentCrossSectionAtPlane, autoTraceAnnulusContrastEdgeAtPlane, samplePixelValuesInWorldContour, snapPointToLumenCentroid, snapPointToAxialMinimum } from '../tavi/AorticAxisDetection';
 import { DoubleObliqueController } from '../tavi/DoubleObliqueController';
 import { ConstrainedContourTool } from '../tavi/ConstrainedContourTool';
 import { CenterlineOverlay } from '../tavi/CenterlineOverlay';
@@ -72,8 +72,53 @@ function ecc(geo: TAVIGeometryResult): number {
 function dPerim(p: number): number { return p / Math.PI; }
 function dArea(a: number): number { return 2 * Math.sqrt(a / Math.PI); }
 
+function centroidOfWorldPoints(points: TAVIVector3D[]): TAVIVector3D | null {
+  const valid = points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+  if (valid.length === 0) return null;
+  return {
+    x: valid.reduce((sum, p) => sum + p.x, 0) / valid.length,
+    y: valid.reduce((sum, p) => sum + p.y, 0) / valid.length,
+    z: valid.reduce((sum, p) => sum + p.z, 0) / valid.length,
+  };
+}
+
 function angleStr(a: TAVIFluoroAngleResult): string {
   return `${a.laoRaoLabel} ${fmt(a.laoRaoDegrees, 0)}° / ${a.cranialCaudalLabel} ${fmt(a.cranialCaudalDegrees, 0)}°`;
+}
+
+function resampleClosedContourByCount(points: TAVIVector3D[], targetCount: number): TAVIVector3D[] {
+  if (points.length <= targetCount) return points.map(p => ({ ...p }));
+
+  const segments: number[] = [];
+  let perimeter = 0;
+  for (let i = 0; i < points.length; i++) {
+    const len = TAVIGeometry.vectorDistance(points[i], points[(i + 1) % points.length]);
+    segments.push(len);
+    perimeter += len;
+  }
+  if (perimeter <= 0) return points.slice(0, targetCount).map(p => ({ ...p }));
+
+  const resampled: TAVIVector3D[] = [];
+  for (let i = 0; i < targetCount; i++) {
+    const targetDistance = (i / targetCount) * perimeter;
+    let walked = 0;
+    let segmentIndex = 0;
+    while (segmentIndex < segments.length - 1 && walked + segments[segmentIndex] < targetDistance) {
+      walked += segments[segmentIndex];
+      segmentIndex++;
+    }
+
+    const a = points[segmentIndex];
+    const b = points[(segmentIndex + 1) % points.length];
+    const local = segments[segmentIndex] > 0 ? (targetDistance - walked) / segments[segmentIndex] : 0;
+    resampled.push({
+      x: a.x + (b.x - a.x) * local,
+      y: a.y + (b.y - a.y) * local,
+      z: a.z + (b.z - a.z) * local,
+    });
+  }
+
+  return resampled;
 }
 
 function riskBadge(level: 'low' | 'moderate' | 'high'): string {
@@ -81,6 +126,47 @@ function riskBadge(level: 'low' | 'moderate' | 'high'): string {
   if (level === 'moderate') return '🟡';
   return '🟢';
 }
+
+// ── Reusable subcomponents (hoisted OUTSIDE the parent render) ──
+//
+// Both PlaceRow and Section used to be declared inside the TAVIPanel render
+// closure. Every render produced a brand-new function reference, which React
+// treated as a different component type and remounted every instance —
+// destroying the DOM nodes for every button, which collapsed focus to <body>
+// and scrolled the panel to the top on every Confirm / Place click. Hoisting
+// them gives each a stable identity across renders so React keeps the DOM.
+
+const PlaceRow = ({ label, captured, onPlace, onConfirm, onUndo }: {
+  label: string;
+  captured: boolean;
+  onPlace: () => void;
+  onConfirm: () => void;
+  onUndo: () => void;
+}) => (
+  <div className="tavi-place-row">
+    <button type="button" onClick={onPlace}
+      className={`tavi-button tavi-place-main ${captured ? 'tavi-button-captured' : ''}`}>
+      {captured ? `✓ ${label}` : `Place ${label}`}
+    </button>
+    {!captured && (
+      <button type="button" onClick={onConfirm}
+        className="tavi-button tavi-button-capture tavi-place-confirm">Confirm</button>
+    )}
+    {captured && (
+      <button type="button" onClick={onUndo}
+        className="tavi-button tavi-button-cancel tavi-place-undo">↻</button>
+    )}
+  </div>
+);
+
+const Section = ({ num, title, children }: { num: string; title: string; children: React.ReactNode }) => (
+  <div style={{ margin: '0 0 6px', padding: '6px 8px', background: 'color-mix(in oklch, var(--nd-ink) 6%, transparent)', borderRadius: 6, border: '1px solid rgba(255,255,255,0.08)' }}>
+    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+      {num}. {title}
+    </div>
+    {children}
+  </div>
+);
 
 // ── Component ──
 
@@ -101,6 +187,7 @@ interface TAVIPanelProps {
 }
 
 type TAVIWorkflowPhase = 'legacy' | 'axis-detection' | 'axis-validation' | 'centerline-review' | 'cusp-definition' | 'annulus-tracing' | 'coronary-heights' | 'report';
+type TAVISubtitle = 'valve' | 'as-aort' | 'periph';
 
 export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   renderingEngineId,
@@ -116,6 +203,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [drawingActive, setDrawingActive] = useState(false);
   const [multiPoints, setMultiPoints] = useState<TAVIPointSnapshot[]>([]);
   const [activeTab, setActiveTab] = useState<'capture' | 'report'>('capture');
+  const [activeSubtitle, setActiveSubtitle] = useState<TAVISubtitle>('valve');
   const [deploymentRatio, setDeploymentRatio] = useState<'80/20' | '90/10'>('80/20');
   const [livePerp, setLivePerp] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
@@ -153,6 +241,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [cuspRotating, setCuspRotating] = useState(false);
   // Two-step cusp capture: 'idle' → user clicks Place → 'placed' → user clicks Confirm → saves
   const [cuspPlaced, setCuspPlaced] = useState(false);
+  const [activeCuspUpdate, setActiveCuspUpdate] = useState<'lcc' | 'ncc' | 'rcc' | null>(null);
 
   // Save controller state before cusp definition so we can restore on reset
   const preCuspStateRef = useRef<{ axisPoint: TAVIVector3D; axisDirection: TAVIVector3D; rotationAngle: number; tiltAngle: number } | null>(null);
@@ -202,6 +291,15 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
   // NC cusp guide: 3 points on axial defining the NC region (visual guide only, not stored in session)
   const [ncGuidePoints, setNcGuidePoints] = useState<TAVIVector3D[]>([]);
+  // Explicit gate for the NC-cusp probe poller. Without this, the poller in
+  // `useEffect` below would consume ANY probe annotation placed during the
+  // axis-validation phase — including ones meant for Per-sinus width, RCO/LCO,
+  // or cusp hinge capture — and silently advance step 4 instead of letting the
+  // intended Confirm handler fire.
+  const [ncMarkingActive, setNcMarkingActive] = useState(false);
+  const [activeSinusWidthLabel, setActiveSinusWidthLabel] = useState<SinusLabel | null>(null);
+  const [sinusWidthProbeCount, setSinusWidthProbeCount] = useState(0);
+  const [sinusWidthMessage, setSinusWidthMessage] = useState<string | null>(null);
 
   // Overlay refs (3mensio-style)
   const centerlineRef = useRef<CenterlineOverlay | null>(null);
@@ -214,6 +312,135 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const getEngine = () => {
     return cornerstone.getRenderingEngine(renderingEngineId) ?? undefined;
   };
+
+  const getCurrentAnnulusPlaneFromWorkingView = useCallback((): {
+    centroid: TAVIVector3D;
+    normal: TAVIVector3D;
+    viewUp?: TAVIVector3D;
+  } | null => {
+    const engine = cornerstone.getRenderingEngine(renderingEngineId);
+    const workingVp = engine?.getViewport('coronal');
+    const cam = workingVp?.getCamera();
+    if (!cam?.focalPoint || !cam.viewPlaneNormal) return null;
+
+    return {
+      centroid: { x: cam.focalPoint[0], y: cam.focalPoint[1], z: cam.focalPoint[2] },
+      normal: TAVIGeometry.vectorNormalize({
+        x: -cam.viewPlaneNormal[0],
+        y: -cam.viewPlaneNormal[1],
+        z: -cam.viewPlaneNormal[2],
+      }),
+      viewUp: cam.viewUp
+        ? { x: cam.viewUp[0], y: cam.viewUp[1], z: cam.viewUp[2] }
+        : undefined,
+    };
+  }, [renderingEngineId]);
+
+  const syncAnnulusPlaneFromWorkingView = useCallback(() => {
+    const plane = getCurrentAnnulusPlaneFromWorkingView();
+    if (!plane) return null;
+    session.annulusPlaneCentroid = plane.centroid;
+    session.annulusPlaneNormal = plane.normal;
+    session.recompute();
+    return plane;
+  }, [getCurrentAnnulusPlaneFromWorkingView, session]);
+
+  const centerDoubleObliqueView = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) return false;
+
+    const liveContourCenter = centroidOfWorldPoints(contourToolRef.current?.getWorldPoints() ?? []);
+    const savedContourCenter = centroidOfWorldPoints(session.annulusRawContourPoints);
+    const target =
+      liveContourCenter ??
+      savedContourCenter ??
+      session.activeAnnulusGeometry()?.centroid ??
+      session.annulusPlaneCentroid ??
+      controller.getAxisPoint();
+
+    controller.centerOnWorldPoint(target);
+    return true;
+  }, [session]);
+
+  useEffect(() => {
+    setDoubleObliqueCenterHandler(centerDoubleObliqueView);
+    return () => setDoubleObliqueCenterHandler(null);
+  }, [centerDoubleObliqueView]);
+
+  const collectProbeAnnotations = useCallback(() => {
+    const engine = getEngine();
+    if (!engine) return [];
+    const probes: any[] = [];
+    const seen = new Set<string>();
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      for (const probe of ps ?? []) {
+        const key = probe.annotationUID ?? `${vpId}-${probes.length}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        probes.push(probe);
+      }
+    }
+    return probes;
+  }, [renderingEngineId]);
+
+  const clearProbeAnnotations = useCallback(() => {
+    const engine = getEngine();
+    if (!engine) return;
+    for (const vpId of ['coronal', 'sagittal', 'axial']) {
+      const vp = engine.getViewport(vpId);
+      if (!vp?.element) continue;
+      const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
+      if (!probes) continue;
+      for (const probe of [...probes]) {
+        if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
+      }
+      vp.render();
+    }
+  }, [renderingEngineId]);
+
+  const trimProbeAnnotations = useCallback((maxCount: number) => {
+    const probes = collectProbeAnnotations();
+    const removeCount = Math.max(0, probes.length - maxCount);
+    for (const probe of probes.slice(0, removeCount)) {
+      if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
+    }
+    const engine = getEngine();
+    if (removeCount > 0 && engine) {
+      for (const vpId of ['coronal', 'sagittal', 'axial']) {
+        engine.getViewport(vpId)?.render();
+      }
+    }
+    return probes.slice(removeCount);
+  }, [collectProbeAnnotations, renderingEngineId]);
+
+  const startSingleProbePlacement = useCallback(() => {
+    clearProbeAnnotations();
+    setActiveCuspUpdate(null);
+    setNcMarkingActive(false);
+    setActiveSinusWidthLabel(null);
+    setSinusWidthProbeCount(0);
+    setSinusWidthMessage(null);
+    enableProbeTool();
+  }, [clearProbeAnnotations]);
+
+  const startSinusWidthPlacement = useCallback((label: SinusLabel) => {
+    clearProbeAnnotations();
+    setActiveSinusWidthLabel(label);
+    setSinusWidthProbeCount(0);
+    setSinusWidthMessage(`${label}: place 2 probes, then Confirm.`);
+    enableProbeTool();
+  }, [clearProbeAnnotations]);
+
+  useEffect(() => {
+    if (!activeSinusWidthLabel) return;
+    const interval = window.setInterval(() => {
+      setSinusWidthProbeCount(Math.min(trimProbeAnnotations(2).length, 2));
+    }, 150);
+    return () => window.clearInterval(interval);
+  }, [activeSinusWidthLabel, trimProbeAnnotations]);
 
   // ── Sync captured points as visual markers on viewports ──
   const markerOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -375,6 +602,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         // Initialize the double-oblique controller
         setTimeout(() => {
           enterDoubleObliqueMode(renderingEngineId);
+          controllerRef.current?.dispose();
+          controllerRef.current = null;
           const controller = new DoubleObliqueController(
             renderingEngineId,
             'axial',     // LEFT = reference plane
@@ -393,7 +622,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             tiltAngle: state.tiltAngle,
           };
           controller.prepareForCuspDefinition();
-          enableProbeTool();
+          startSingleProbePlacement();
 
           setWorkflowPhase('cusp-definition');
           setCuspStep('lcc');
@@ -405,7 +634,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         setAxisDetecting(false);
       }
     });
-  }, [renderingEngineId, volumeId, onViewportModeChange]);
+  }, [renderingEngineId, volumeId, onViewportModeChange, startSingleProbePlacement]);
 
   const validateAxis = useCallback(() => {
     const controller = controllerRef.current;
@@ -438,12 +667,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       tiltAngle: state.tiltAngle,
     };
     controller.prepareForCuspDefinition();
-    enableProbeTool();
+    startSingleProbePlacement();
     setWorkflowPhase('cusp-definition');
     setCuspStep('lcc');
     setCuspPoints({});
     forceUpdate();
-  }, [session]);
+  }, [session, startSingleProbePlacement]);
 
   const exitTaviOblique = useCallback(() => {
     controllerRef.current?.dispose();
@@ -473,12 +702,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
 
     // Enable probe tool for cusp clicking
-    enableProbeTool();
+    startSingleProbePlacement();
     setWorkflowPhase('cusp-definition');
     setCuspStep('lcc');
     setCuspPoints({});
     forceUpdate();
-  }, []);
+  }, [startSingleProbePlacement]);
 
   // ── Cusp Definition (Phase 2) ──
 
@@ -516,8 +745,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     const rawCusp: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
     const worldPoint: TAVIVector3D = snapCuspNadir(rawCusp);
 
-    // Remove the annotation after capturing
-    cornerstoneTools.annotation.state.removeAnnotation(ann.annotationUID);
+    // Remove all transient probe annotations after capturing. Extra clicks
+    // before Confirm should not leave HU probe labels on the view.
+    clearProbeAnnotations();
 
     const controller = controllerRef.current;
 
@@ -560,7 +790,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
 
     forceUpdate();
-  }, [cuspStep, cuspPoints, session, snapEnabled, volumeId]);
+  }, [cuspStep, cuspPoints, session, snapEnabled, volumeId, clearProbeAnnotations]);
 
   /** Go back to annulus tracing with existing points loaded for editing */
   const editAnnulus = useCallback(() => {
@@ -586,8 +816,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const confirmAnnulusPlane = useCallback(() => {
     disableProbeTool();
     setWorkflowPhase('annulus-tracing');
-    // Lock scrolling so user can't leave the plane during tracing
-    controllerRef.current?.lockScrolling();
+    controllerRef.current?.unlockScrolling();
     forceUpdate();
   }, []);
 
@@ -609,16 +838,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }
 
     // Re-enable probe tool for clicking
-    enableProbeTool();
+    startSingleProbePlacement();
     forceUpdate();
-  }, [session]);
+  }, [session, startSingleProbePlacement]);
 
   // ── Constrained Contour Tracing (Phase 3) ──
 
   /** Initialize the constrained contour tool on the working viewport */
   const initContourTool = useCallback(() => {
+    const plane = syncAnnulusPlaneFromWorkingView();
     const engine = getEngine();
-    if (!engine || !session.annulusPlaneNormal || !session.annulusPlaneCentroid) return;
+    if (!engine || !plane) return;
 
     // Working viewport is 'coronal' in tavi-oblique mode
     const workingVp = engine.getViewport('coronal');
@@ -629,14 +859,14 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     const tool = new ConstrainedContourTool(
       workingVp,
-      session.annulusPlaneNormal,
-      session.annulusPlaneCentroid
+      plane.normal,
+      plane.centroid
     );
     tool.enable();
     contourToolRef.current = tool;
     setContourPointCount(0);
     setContourClosed(false);
-  }, [session, renderingEngineId]);
+  }, [renderingEngineId, syncAnnulusPlaneFromWorkingView]);
 
   /** Poll for Probe annotations during cusp definition — auto-detect when user places a point */
   useEffect(() => {
@@ -646,23 +876,31 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!engine) return;
 
     const interval = setInterval(() => {
-      for (const vpId of ['axial', 'coronal', 'sagittal']) {
-        const vp = engine.getViewport(vpId);
-        if (!vp?.element) continue;
-        const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-        if (probes && probes.length > 0) {
-          setCuspPlaced(true);
-          break;
-        }
+      const probes = trimProbeAnnotations(1);
+      if (probes.length > 0) {
+        setCuspPlaced(true);
+        disableProbeTool();
       }
     }, 200);
 
     return () => clearInterval(interval);
-  }, [workflowPhase, cuspPlaced, renderingEngineId]);
+  }, [workflowPhase, cuspPlaced, renderingEngineId, trimProbeAnnotations]);
+
+  useEffect(() => {
+    if (workflowPhase !== 'annulus-tracing') return;
+    if (contourStarted || contourClosed) return;
+    const interval = window.setInterval(() => {
+      trimProbeAnnotations(1);
+    }, 150);
+    return () => window.clearInterval(interval);
+  }, [workflowPhase, contourStarted, contourClosed, trimProbeAnnotations]);
 
   /** Poll the contour tool for point count updates */
   useEffect(() => {
     if (workflowPhase !== 'annulus-tracing') return;
+    const shouldEnableContourTool =
+      contourStarted || contourClosed || session.annulusRawContourPoints.length > 0;
+    if (!shouldEnableContourTool) return;
 
     // Initialize the contour tool when entering this phase
     initContourTool();
@@ -700,7 +938,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       contourToolRef.current?.disable();
       contourToolRef.current = null;
     };
-  }, [workflowPhase, initContourTool]);
+  }, [workflowPhase, initContourTool, contourStarted, contourClosed, session.annulusRawContourPoints.length]);
 
   /** Close the contour ring */
   const closeContour = useCallback(() => {
@@ -716,11 +954,95 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
   /** Clear all contour points */
   const clearContour = useCallback(() => {
-    contourToolRef.current?.clearPoints();
+    contourToolRef.current?.disable();
+    contourToolRef.current = null;
+    session.annulusSnapshot = undefined;
+    session.annulusRawContourPoints = [];
+    session.assistedAnnulusGeometry = null;
+    session.useAssistedAnnulusForPlanning = false;
+    session.recompute();
+    controllerRef.current?.unlockScrolling();
     setContourPointCount(0);
     setContourClosed(false);
     setContourStarted(false);
-  }, []);
+    forceUpdate();
+  }, [session]);
+
+  const finishAnnulusCapture = useCallback(() => {
+    contourToolRef.current?.disable();
+    contourToolRef.current = null;
+    controllerRef.current?.unlockScrolling();
+
+    if (session.leftOstiumSnapshot && session.rightOstiumSnapshot) {
+      setWorkflowPhase('coronary-heights');
+      setCoronaryStep('multi-level');
+    } else {
+      setWorkflowPhase('coronary-heights');
+    }
+    forceUpdate();
+  }, [session]);
+
+  const autoTraceAnnulus = useCallback(() => {
+    const plane = syncAnnulusPlaneFromWorkingView();
+    if (!plane) return;
+
+    const volume = cornerstone.cache.getVolume(volumeId);
+    if (!volume) return;
+
+    contourToolRef.current?.disable();
+    contourToolRef.current = null;
+
+    const seg =
+      autoTraceAnnulusContrastEdgeAtPlane(
+        volume,
+        plane.centroid,
+        plane.normal,
+        plane.viewUp,
+        {
+          radialCount: 128,
+          radialStepMm: 0.25,
+          minRadiusMm: 5.5,
+          maxRadiusMm: 23,
+          minDiameterMm: 12,
+          maxDiameterMm: 38,
+        }
+      ) ??
+      autoSegmentCrossSectionAtPlane(
+        volume,
+        plane.centroid,
+        plane.normal,
+        plane.viewUp,
+        {
+          gridSize: 240,
+          pixelSpacing: 0.2,
+          minDiameterMm: 12,
+          maxDiameterMm: 42,
+          searchRadiusMm: 18,
+        }
+      );
+
+    if (!seg || seg.contourPoints.length < 10) {
+      window.alert(
+        'Auto annulus tracing failed.\n\n' +
+        'The contrast edge could not be isolated on this annulus plane. Fine-tune the cusp plane/crosshair and try Auto Trace again. Manual tracing is still available.'
+      );
+      return;
+    }
+
+    const editablePoints = resampleClosedContourByCount(seg.contourPoints, 24);
+    initContourTool();
+    const tool = contourToolRef.current as ConstrainedContourTool | null;
+    if (!tool) return;
+    tool.loadPoints(editablePoints);
+
+    session.captureConstrainedAnnulusContour(editablePoints, plane.normal, true);
+    setContourStarted(false);
+    setContourClosed(true);
+    setContourPointCount(editablePoints.length);
+    setContourVersion(v => v + 1);
+    controllerRef.current?.lockScrolling();
+    forceUpdate();
+  }, [session, volumeId, initContourTool, syncAnnulusPlaneFromWorkingView]);
 
   /** Confirm annulus contour and compute geometry */
   const confirmAnnulusContour = useCallback(() => {
@@ -736,22 +1058,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       true // smooth via spline
     );
 
-    // Clean up contour tool
-    tool.disable();
-    contourToolRef.current = null;
-
-    // Unlock scrolling
-    controllerRef.current?.unlockScrolling();
-
-    // If coronary ostia were already captured (before cusp definition), skip coronary phase
-    if (session.leftOstiumSnapshot && session.rightOstiumSnapshot) {
-      setWorkflowPhase('coronary-heights');
-      setCoronaryStep('multi-level');
-    } else {
-      setWorkflowPhase('coronary-heights');
-    }
-    forceUpdate();
-  }, [session]);
+    finishAnnulusCapture();
+  }, [session, finishAnnulusCapture]);
 
   // ── Coronary Heights + Multi-Level (Phase 4) ──
 
@@ -767,12 +1075,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (!controller || !centroid) return;
 
     // Enable probe tool for clicking
-    enableProbeTool();
+    startSingleProbePlacement();
 
     // Navigate to estimated LCA position
     controller.navigateToEstimatedCoronaryPosition('left', centroid);
     setCoronaryStep('capture-lca');
-  }, [workflowPhase, session]);
+  }, [workflowPhase, session, startSingleProbePlacement]);
 
   /** Capture coronary ostium from the working viewport */
   const captureCoronaryPoint = useCallback((side: 'left' | 'right') => {
@@ -802,17 +1110,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     const snapped = snapVolume ? snapPointToLumenCentroid(snapVolume, rawPoint) : null;
     const worldPoint: TAVIVector3D = snapped ?? rawPoint;
 
-    // Remove ALL probe annotations from ALL viewports (clean up duplicates)
-    for (const vpId of ['coronal', 'sagittal', 'axial']) {
-      const vp = engine.getViewport(vpId);
-      if (!vp?.element) continue;
-      const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-      if (probes) {
-        for (const probe of [...probes]) {
-          if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
-        }
-      }
-    }
+    // Remove all transient Probe/HU annotations after capture.
+    clearProbeAnnotations();
 
     const identifier = side === 'left' ? TAVIStructureLeftOstium : TAVIStructureRightOstium;
     session.capturePointSnapshot({ worldPoint }, identifier);
@@ -828,20 +1127,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     } else if (side === 'right') {
       setCoronaryStep('multi-level');
     }
-  }, [session, renderingEngineId, snapEnabled, volumeId]);
+  }, [session, renderingEngineId, snapEnabled, volumeId, clearProbeAnnotations]);
 
   // Capture a single sinus width from the two most-recent Probe annotations.
   const captureSinusWidth = useCallback((label: SinusLabel) => {
-    const engine = getEngine();
-    if (!engine) return;
-    let probes: any[] = [];
-    for (const vpId of ['coronal', 'sagittal', 'axial']) {
-      const vp = engine.getViewport(vpId);
-      if (!vp?.element) continue;
-      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-      if (ps?.length) probes = ps;
+    const probes = collectProbeAnnotations();
+    const count = Math.min(probes.length, 2);
+    setActiveSinusWidthLabel(label);
+    setSinusWidthProbeCount(count);
+    if (probes.length < 2) {
+      setSinusWidthMessage(`${label}: need 2 probes before Confirm (${count}/2).`);
+      startSingleProbePlacement();
+      return;
     }
-    if (probes.length < 2) return; // need two points across the sinus belly
     const a = probes[probes.length - 2].data.handles.points[0];
     const b = probes[probes.length - 1].data.handles.points[0];
     session.captureSinusDiameter(
@@ -850,18 +1148,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       { x: b[0], y: b[1], z: b[2] }
     );
     // Clean up probe annotations across viewports (mirror captureCoronaryPoint).
-    for (const vpId of ['coronal', 'sagittal', 'axial']) {
-      const vp = engine.getViewport(vpId);
-      if (!vp?.element) continue;
-      const ps = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-      if (ps) {
-        for (const probe of [...ps]) {
-          if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
-        }
-      }
-    }
+    clearProbeAnnotations();
+    disableProbeTool();
+    setActiveSinusWidthLabel(null);
+    setSinusWidthProbeCount(0);
+    setSinusWidthMessage(null);
     forceUpdate();
-  }, [session, renderingEngineId]);
+  }, [session, collectProbeAnnotations, clearProbeAnnotations, startSingleProbePlacement]);
 
   // ── Ilio-femoral access vessel measurement ──
   // Snapshots the active centerline path, samples perpendicular cross-sections
@@ -941,9 +1234,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   }, [session, volumeId]);
 
   /** Capture a cusp hinge point from standard MPR views (before double-oblique mode) */
-  const captureCuspFromMPR = useCallback((cusp: 'lcc' | 'ncc' | 'rcc') => {
+  const captureCuspFromMPR = useCallback((cusp: 'lcc' | 'ncc' | 'rcc'): boolean => {
     const engine = getEngine();
-    if (!engine) return;
+    if (!engine) return false;
 
     // Find most recent probe annotation
     let ann: any = null;
@@ -956,22 +1249,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         break;
       }
     }
-    if (!ann) return;
+    if (!ann) return false;
 
     const p = ann.data.handles.points[0];
     const worldPoint: TAVIVector3D = snapCuspNadir({ x: p[0], y: p[1], z: p[2] });
 
-    // Remove ALL probe annotations
-    for (const vpId of ['coronal', 'sagittal', 'axial']) {
-      const vp = engine.getViewport(vpId);
-      if (!vp?.element) continue;
-      const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-      if (probes) {
-        for (const probe of [...probes]) {
-          if (probe.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(probe.annotationUID);
-        }
-      }
-    }
+    clearProbeAnnotations();
 
     // Save to session and local state
     if (cusp === 'lcc') { session.cuspLCC = worldPoint; setCuspPoints(prev => ({ ...prev, lcc: worldPoint })); }
@@ -979,8 +1262,34 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     if (cusp === 'rcc') { session.cuspRCC = worldPoint; setCuspPoints(prev => ({ ...prev, rcc: worldPoint })); }
 
     session.recompute();
+    setActiveCuspUpdate(null);
     forceUpdate();
-  }, [session, snapEnabled, volumeId]);
+    return true;
+  }, [session, snapEnabled, volumeId, clearProbeAnnotations]);
+
+  const startCuspUpdate = useCallback((cusp: 'lcc' | 'ncc' | 'rcc') => {
+    clearProbeAnnotations();
+    setNcMarkingActive(false);
+    setActiveSinusWidthLabel(null);
+    setSinusWidthProbeCount(0);
+    setSinusWidthMessage(`Click the corrected ${cusp.toUpperCase()} point on the image.`);
+    setActiveCuspUpdate(cusp);
+    enableProbeTool();
+  }, [clearProbeAnnotations]);
+
+  useEffect(() => {
+    if (!activeCuspUpdate) return;
+    if (workflowPhase !== 'axis-validation') return;
+
+    const interval = window.setInterval(() => {
+      if (captureCuspFromMPR(activeCuspUpdate)) {
+        setSinusWidthMessage(null);
+        disableProbeTool();
+      }
+    }, 150);
+
+    return () => window.clearInterval(interval);
+  }, [activeCuspUpdate, workflowPhase, captureCuspFromMPR]);
 
   /** Auto-capture NC guide points: poll for Probe annotations when NC guide is active */
   const ncGuidePointsRef = useRef<TAVIVector3D[]>([]);
@@ -988,6 +1297,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
   useEffect(() => {
     if (workflowPhase !== 'axis-validation') return;
+    if (!ncMarkingActive) return;
     if (ncGuidePointsRef.current.length >= 3) return;
 
     const engine = getEngine();
@@ -1006,18 +1316,19 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           if (!p) continue;
           const wp: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
 
-          // Remove all probes
-          for (const vid of ['axial', 'coronal', 'sagittal']) {
-            const v = engine.getViewport(vid);
-            if (!v?.element) continue;
-            const prs = cornerstoneTools.annotation.state.getAnnotations('Probe', v.element);
-            if (prs) prs.forEach((pr: any) => { if (pr.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(pr.annotationUID); });
-          }
+          clearProbeAnnotations();
 
+          const willComplete = ncGuidePointsRef.current.length + 1 >= 3;
           setNcGuidePoints(prev => {
             if (prev.length >= 3) return prev;
             return [...prev, wp];
           });
+          // Auto-close the marking session once the 3rd point lands so the
+          // next probe click flows to whichever UI the user picks next.
+          if (willComplete) {
+            setNcMarkingActive(false);
+            disableProbeTool();
+          }
           forceUpdate();
           break;
         }
@@ -1025,7 +1336,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     }, 200);
 
     return () => clearInterval(interval);
-  }, [workflowPhase, ncGuidePoints.length]);
+  }, [workflowPhase, ncGuidePoints.length, ncMarkingActive, clearProbeAnnotations]);
 
   /** Generate multi-level cross-section thumbnails */
   const generateMultiLevel = useCallback(async () => {
@@ -1446,6 +1757,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     enterDoubleObliqueMode(renderingEngineId);
 
     setTimeout(() => {
+      controllerRef.current?.dispose();
+      controllerRef.current = null;
       const controller = new DoubleObliqueController(
         renderingEngineId,
         'axial',    // LEFT = reference (longitudinal)
@@ -1463,13 +1776,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
         tiltAngle: state.tiltAngle,
       };
       controller.prepareForCuspDefinition();
-      enableProbeTool();
+      startSingleProbePlacement();
       setWorkflowPhase('cusp-definition');
       setCuspStep('lcc');
       setCuspPoints({});
       forceUpdate();
     }, 250);
-  }, [session, renderingEngineId, volumeId, onViewportModeChange]);
+  }, [session, renderingEngineId, volumeId, onViewportModeChange, startSingleProbePlacement]);
 
   // ── Reset all TAVI measurements ──
 
@@ -1484,6 +1797,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       onViewportModeChange('standard');
     }
     setWorkflowPhase('axis-validation');
+    setActiveSubtitle('valve');
     setCuspStep('lcc');
     setCuspPoints({});
     setContourPointCount(0);
@@ -1673,6 +1987,48 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     isSelfExpanding: false, // default; ideally based on selected valve
   });
 
+  const navigateToPlanningPlane = useCallback((distanceMm: number) => {
+    const controller = controllerRef.current;
+    const origin = session.annulusPlaneCentroid ?? annulus?.centroid;
+    if (!controller || !origin) return;
+    controller.showPlaneAtDistanceFromOrigin(origin, distanceMm);
+    if (distanceMm === 0) controller.centerOnWorldPoint(annulus?.centroid ?? origin);
+  }, [annulus, session]);
+
+  const navigateToLandmark = useCallback((point?: TAVIVector3D) => {
+    if (!point) return;
+    controllerRef.current?.showPlaneThroughWorldPoint(point);
+  }, []);
+
+  const ensureReportSnapshots = useCallback(async (distances: number[] = [0, 5, 10, 15]) => {
+    const merged = new Map(session.multiLevelThumbnails);
+    for (const [dist, thumb] of multiLevelThumbnails) merged.set(dist, thumb);
+
+    const missing = distances.filter((dist) => !merged.has(dist));
+    const controller = controllerRef.current;
+    const centroid = session.annulusPlaneCentroid ?? annulus?.centroid;
+    if (missing.length > 0 && controller && centroid) {
+      const generated = await controller.generateMultiLevelThumbnails(centroid, missing);
+      for (const [dist, thumb] of generated) merged.set(dist, thumb);
+      session.multiLevelThumbnails = merged;
+      setMultiLevelThumbnails(new Map(merged));
+      forceUpdate();
+    }
+
+    return merged;
+  }, [annulus, multiLevelThumbnails, session]);
+
+  const exportAnnulusPointsCsv = useCallback(() => {
+    const csv = session.annulusPointsCsvReport();
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `TAVR_Annulus_Points_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [session]);
+
   // Export report as text
   const exportReport = useCallback(() => {
     const lines: string[] = [];
@@ -1844,6 +2200,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     const { buildPdfReport, downloadPdf } = await import('../../../shared/dicom/pdfReport');
     const { downloadEncapsulatedPdf } = await import('../../../shared/dicom/encapsulatedPdf');
     const sections: import('../../../shared/dicom/pdfReport').ReportSection[] = [];
+    const planningSnapshots = await ensureReportSnapshots([0, 5, 10, 15]);
 
     if (annulus) {
       sections.push({
@@ -1855,6 +2212,25 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           { label: 'Min × Max', value: `${fmt(annulus.minimumDiameterMm)} × ${fmt(annulus.maximumDiameterMm)}`, unit: 'mm' },
           { label: 'Virtual Valve', value: fmt(session.virtualValveDiameterMm), unit: 'mm' },
         ],
+      });
+    }
+
+    const snapshotImages = [
+      { dist: 0, title: 'Annulus Plane', caption: 'Valve annulus plane' },
+      { dist: 5, title: 'Aortic Valve +5 mm', caption: '5 mm above annulus' },
+      { dist: 10, title: 'Aortic Valve +10 mm', caption: '10 mm above annulus' },
+      { dist: 15, title: 'Aortic Valve +15 mm', caption: '15 mm above annulus' },
+    ]
+      .map(({ dist, title, caption }) => {
+        const dataUrl = planningSnapshots.get(dist);
+        return dataUrl ? { title, caption, dataUrl } : null;
+      })
+      .filter((img): img is { title: string; caption: string; dataUrl: string } => !!img);
+    if (snapshotImages.length > 0) {
+      sections.push({
+        title: 'Planning Snapshots',
+        rows: [],
+        images: snapshotImages,
       });
     }
 
@@ -1963,66 +2339,184 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     } else {
       downloadPdf(pdf, `TAVR_Report_${stamp}.pdf`);
     }
-  }, [session, annulus, risks]);
+  }, [session, annulus, risks, ensureReportSnapshots]);
+
+  const renderPlanningNavigation = () => {
+    const canUseAnnulusPlane = !!(session.annulusPlaneCentroid ?? annulus?.centroid);
+    return (
+      <div className="tavi-card">
+        <h3 className="tavi-card-title">Planning Navigation</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6 }}>
+          <button className="tavi-button" disabled={!canUseAnnulusPlane} onClick={() => navigateToPlanningPlane(0)}>
+            Go Annulus
+          </button>
+          <button className="tavi-button" disabled={!session.leftOstiumSnapshot} onClick={() => navigateToLandmark(session.leftOstiumSnapshot?.worldPoint)}>
+            Go LCA
+          </button>
+          <button className="tavi-button" disabled={!session.rightOstiumSnapshot} onClick={() => navigateToLandmark(session.rightOstiumSnapshot?.worldPoint)}>
+            Go RCA
+          </button>
+          {[5, 10, 15].map((dist) => (
+            <button key={dist} className="tavi-button" disabled={!canUseAnnulusPlane} onClick={() => navigateToPlanningPlane(dist)}>
+              +{dist} mm
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlanningSnapshots = () => {
+    const snapshots = new Map(session.multiLevelThumbnails);
+    for (const [dist, thumb] of multiLevelThumbnails) snapshots.set(dist, thumb);
+    const distances = [0, 5, 10, 15];
+    const hasSnapshots = distances.some((dist) => snapshots.has(dist));
+    return (
+      <div className="tavi-card">
+        <h3 className="tavi-card-title">Planning Snapshots</h3>
+        {!hasSnapshots ? (
+          <button
+            className="tavi-button tavi-button-capture"
+            style={{ width: '100%' }}
+            onClick={() => void ensureReportSnapshots(distances)}
+            disabled={multiLevelGenerating}
+          >
+            Generate Annulus / +5 / +10 / +15
+          </button>
+        ) : (
+          <div className="tavi-multilevel-grid">
+            {distances.map((dist) => {
+              const thumb = snapshots.get(dist);
+              return (
+                <div key={dist} className="tavi-multilevel-item" onClick={() => navigateToPlanningPlane(dist)}>
+                  {thumb && <img src={thumb} alt={dist === 0 ? 'Annulus plane' : `+${dist}mm`} className="tavi-multilevel-thumb" />}
+                  <span className="tavi-multilevel-label">{dist === 0 ? 'Annulus' : `+${dist} mm`}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderPeripheralCards = () => (
+    <>
+      {/* ── Peripheral Access Route Planning ── */}
+      <div className="tavi-card">
+        <h3 className="tavi-card-title">Peripheral Access Planning</h3>
+        <div className="tavi-report-grid">
+          <div className="tavi-row">
+            <span className="tavi-row-label">Planned Access</span>
+            <span className="tavi-row-value">
+              <select
+                className="tavi-inline-select"
+                value={session.plannedAccess}
+                onChange={(e) => { session.plannedAccess = e.target.value as any; forceUpdate(); }}
+              >
+                {ACCESS_ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </span>
+          </div>
+          <div className="tavi-row">
+            <span className="tavi-row-label">Pigtail Access</span>
+            <span className="tavi-row-value">
+              <select
+                className="tavi-inline-select"
+                value={session.plannedPigtailAccess}
+                onChange={(e) => { session.plannedPigtailAccess = e.target.value as any; forceUpdate(); }}
+              >
+                {PIGTAIL_ACCESS_ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Access Vessels (ilio-femoral runoff) ── */}
+      <div className="tavi-card">
+        <h3 className="tavi-card-title">Peripheral Vessels</h3>
+        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+          Draw a vessel path with the centerline tool, then Measure. Min lumen = narrowest perpendicular diameter.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+          {([
+            ['thoracic-aorta', 'Thoracic Aorta'],
+            ['abdominal-aorta', 'Abdominal Aorta'],
+            ['iliac-left', 'Iliac L'],
+            ['iliac-right', 'Iliac R'],
+          ] as [AccessVesselId, string][]).map(([id, label]) => (
+            <button
+              key={id}
+              className="tavi-button tavi-button-capture"
+              style={{ fontSize: '0.7rem', padding: '4px' }}
+              disabled={accessBusy != null}
+              onClick={() => measureAccessVessel(id)}
+            >
+              {accessBusy === id ? '…' : `Measure ${label}`}
+            </button>
+          ))}
+        </div>
+        <div className="tavi-report-grid">
+          {([
+            ['thoracic-aorta', 'Thoracic Aorta'],
+            ['abdominal-aorta', 'Abdominal Aorta'],
+            ['iliac-left', 'Iliac (L)'],
+            ['iliac-right', 'Iliac (R)'],
+          ] as [AccessVesselId, string][]).map(([id, label]) => {
+            const v = session.accessVessels.get(id);
+            return v ? (
+              <Row
+                key={id}
+                label={label}
+                value={`min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}°`}
+                warn={v.tortuosityIndex > 1.5 || v.cumulativeAngulationDeg > 90}
+              />
+            ) : null;
+          })}
+          {accessMinLumen != null && (
+            <Row label="Min Ilio-femoral Lumen" value={`${fmt(accessMinLumen)} mm`} />
+          )}
+          {sheathOD != null && (
+            <Row label="Selected Sheath OD" value={`${fmt(sheathOD)} mm`} />
+          )}
+          {sheathFit && (
+            <>
+              <Row label="Margin" value={`${fmt(sheathFit.marginMm)} mm`} warn={sheathFit.feasibility !== 'feasible'} />
+              <Row label="SFAR" value={fmt(sheathFit.sfar, 2)} warn={sheathFit.sfar > 1.0} highlight={sheathFit.feasibility === 'feasible'} />
+              <Row label="Access Feasibility" value={sheathFit.feasibility} warn={sheathFit.feasibility === 'unfavorable'} highlight={sheathFit.feasibility === 'feasible'} />
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  );
 
   return (
     <div className="tavi-panel">
-      {/* Tab bar */}
-      <div className="tavi-tabs">
-        <button className={`tavi-tab ${activeTab === 'capture' ? 'active' : ''}`} onClick={() => { setActiveTab('capture'); onReportToggle?.(false); }}>
-          Capture ({capturedCount}/{steps.length})
-        </button>
-        <button className={`tavi-tab ${activeTab === 'report' ? 'active' : ''}`} onClick={() => { setActiveTab('report'); onReportToggle?.(true); }}>
-          Report
-        </button>
-        <button
-          className="tavi-tab"
-          onClick={resetAllMeasurements}
-          title="Reset all TAVI measurements"
-          style={{ flex: 'none', padding: '6px 10px', color: 'var(--accent-red)' }}
-        >
-          Reset
-        </button>
-      </div>
-
       <div className="tavi-panel-content">
 
         {activeTab === 'capture' && (
           <>
-            {/* ── Workflow Mode Selector ── */}
-            <div className="tavi-card">
-              <h3 className="tavi-card-title">Workflow Mode</h3>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <div className="tavi-subtabs" role="tablist" aria-label="TAVI planning sections">
+              {([
+                ['valve', 'VALVE'],
+                ['as-aort', 'AS.AORT'],
+                ['periph', 'PERIPH'],
+              ] as [TAVISubtitle, string][]).map(([id, label]) => (
                 <button
-                  className={`tavi-button ${workflowPhase === 'legacy' ? 'tavi-button-capture' : ''}`}
-                  onClick={() => {
-                    if (viewportMode !== 'standard') {
-                      onViewportModeChange('standard');
-                    }
-                    controllerRef.current?.dispose();
-                    controllerRef.current = null;
-                    setWorkflowPhase('legacy');
-                  }}
-                  style={{ flex: 1, fontSize: '0.75rem' }}
+                  key={id}
+                  type="button"
+                  className={`tavi-subtab ${activeSubtitle === id ? 'active' : ''}`}
+                  onClick={() => setActiveSubtitle(id)}
                 >
-                  Manual (4-view)
+                  {label}
                 </button>
-                <button
-                  className={`tavi-button ${workflowPhase !== 'legacy' ? 'tavi-button-capture' : ''}`}
-                  onClick={() => {
-                    if (viewportMode === 'standard') {
-                      onViewportModeChange('tavi-crosshair');
-                    }
-                    if (workflowPhase === 'legacy') {
-                      setWorkflowPhase('axis-validation');
-                    }
-                  }}
-                  style={{ flex: 1, fontSize: '0.75rem' }}
-                >
-                  Guided (double-oblique)
-                </button>
-              </div>
+              ))}
+            </div>
 
+            {activeSubtitle !== 'periph' && (
+            <div className="tavi-card">
               {/* Axis Detection Status */}
               {axisError && (
                 <div className="tavi-calcium-note" style={{ marginBottom: 8 }}>
@@ -2035,29 +2529,6 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <div style={{ marginBottom: 8 }}>
                   {(() => {
                     // Helper to render a Place/Confirm/↻ row
-                    const PlaceRow = ({ label, captured, onPlace, onConfirm, onUndo }: {
-                      label: string; captured: boolean;
-                      onPlace: () => void; onConfirm: () => void; onUndo: () => void;
-                    }) => (
-                      <div style={{ display: 'flex', gap: 4, marginBottom: 3, alignItems: 'center' }}>
-                        <button onClick={onPlace}
-                          className={`tavi-button ${captured ? 'tavi-button-captured' : ''}`}
-                          style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}>
-                          {captured ? `✓ ${label}` : `Place ${label}`}
-                        </button>
-                        {!captured && (
-                          <button onClick={onConfirm}
-                            className="tavi-button tavi-button-capture"
-                            style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 8px' }}>Confirm</button>
-                        )}
-                        {captured && (
-                          <button onClick={onUndo}
-                            className="tavi-button tavi-button-cancel"
-                            style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 6px' }}>↻</button>
-                        )}
-                      </div>
-                    );
-
                     // Capture geometry at current axial crosshair level using auto-segmentation
                     const captureLevel = (structureId: string) => {
                       const engine = getEngine();
@@ -2135,18 +2606,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       console.log(`[TAVI] Captured ${structureId}: min=${geo.minimumDiameterMm.toFixed(1)}mm, max=${geo.maximumDiameterMm.toFixed(1)}mm, area=${geo.areaMm2.toFixed(0)}mm²`);
                     };
 
-                    // Section wrapper
-                    const Section = ({ num, title, children }: { num: string; title: string; children: React.ReactNode }) => (
-                      <div style={{ margin: '0 0 6px', padding: '6px 8px', background: 'color-mix(in oklch, var(--nd-ink) 6%, transparent)', borderRadius: 6, border: '1px solid rgba(255,255,255,0.08)' }}>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                          {num}. {title}
-                        </div>
-                        {children}
-                      </div>
-                    );
-
                     return (
                       <div className="tavi-checklist">
+                        {activeSubtitle === 'as-aort' && (
+                          <>
                         {/* ── 1. Ascending Aorta ── */}
                         <Section num="1" title="Ascending Aorta">
                           {session.ascendingAortaGeometry ? (
@@ -2248,37 +2711,56 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               </button>
                             </div>
                           )}
-                          {/* Per-sinus diameters (LCS / RCS / NCS) — two Probe clicks each */}
-                          <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-                            Per-sinus width — place 2 probes across each sinus, then Confirm.
+                        </Section>
+                          </>
+                        )}
+
+                        {activeSubtitle === 'valve' && (
+                          <>
+                        {/* ── 1. Valve alignment hint ── */}
+                        <Section num="1" title="Valve Alignment">
+                          <div className="tavi-valve-hint">
+                            <img
+                              src="/tavi/valve-crosshair-hint.png"
+                              alt="Aortic valve crosshair alignment"
+                              className="tavi-valve-hint-image"
+                            />
+                            <div className="tavi-valve-hint-text">
+                              Place the crosshair on the aortic valve, align to the aorta, then press the 6x Center button.
+                            </div>
                           </div>
-                          {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
-                            const d = session.sinusDiameters[lbl];
-                            return (
-                              <PlaceRow
-                                key={lbl}
-                                label={`${lbl}${d ? ` ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)}` : ''}` : ''}`}
-                                captured={!!d}
-                                onPlace={() => enableProbeTool()}
-                                onConfirm={() => captureSinusWidth(lbl)}
-                                onUndo={() => { session.clearSinusDiameter(lbl); enableProbeTool(); forceUpdate(); }}
-                              />
-                            );
-                          })}
                         </Section>
 
-                        {/* ── 4. NC Cusp Guide ── */}
-                        <Section num="4" title="NC Cusp Region">
+                        {/* ── 2. NC Cusp Guide ── */}
+                        <Section num="2" title="NC Cusp Region">
                           {ncGuidePoints.length < 3 ? (
                             <div>
                               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
-                                Axial görüntüde NC bölgesinin 3 köşesine tıklayın. ({ncGuidePoints.length}/3)
+                                {ncMarkingActive
+                                  ? `Click the 3 corners of the NC region in the axial view. (${ncGuidePoints.length}/3)`
+                                  : 'Mark the NC region. Starting this step does not affect other measurements.'}
                               </div>
-                              <button onClick={() => enableProbeTool()}
+                              <button onClick={() => {
+                                setActiveSinusWidthLabel(null);
+                                setSinusWidthProbeCount(0);
+                                setSinusWidthMessage(null);
+                                clearProbeAnnotations();
+                                setNcMarkingActive(true);
+                                enableProbeTool();
+                              }}
                                 className="tavi-button tavi-button-capture"
                                 style={{ width: '100%', fontSize: '0.72rem', padding: '5px 8px' }}>
-                                {ncGuidePoints.length === 0 ? 'Start Marking NC' : `Next Point (${ncGuidePoints.length}/3)`}
+                                {ncMarkingActive
+                                  ? (ncGuidePoints.length === 0 ? 'Marking… click axial' : `Next Point (${ncGuidePoints.length}/3)`)
+                                  : 'Start Marking NC'}
                               </button>
+                              {ncMarkingActive && (
+                                <button onClick={() => { setNcMarkingActive(false); disableProbeTool(); }}
+                                  className="tavi-button tavi-button-cancel"
+                                  style={{ width: '100%', fontSize: '0.68rem', padding: '3px', marginTop: 4 }}>
+                                  Pause Marking
+                                </button>
+                              )}
                             </div>
                           ) : (
                             <div style={{ fontSize: '0.7rem', color: '#eab308', fontWeight: 600, padding: '2px 0' }}>
@@ -2286,7 +2768,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             </div>
                           )}
                           {ncGuidePoints.length > 0 && (
-                            <button onClick={() => { setNcGuidePoints([]); forceUpdate(); }}
+                            <button onClick={() => { setNcGuidePoints([]); setNcMarkingActive(false); disableProbeTool(); forceUpdate(); }}
                               className="tavi-button tavi-button-cancel"
                               style={{ width: '100%', fontSize: '0.68rem', padding: '3px', marginTop: 4 }}>
                               ↻ Clear
@@ -2294,35 +2776,35 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                           )}
                         </Section>
 
-                        {/* ── 5. Coronary Ostia ── */}
-                        <Section num="5" title="Coronary Ostia">
+                        {/* ── 3. Coronary Ostia ── */}
+                        <Section num="3" title="Coronary Ostia">
                           <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
                             <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
                             Snap to anatomy (lumen centroid / cusp nadir)
                           </label>
-                          <PlaceRow label="RCO" captured={!!session.rightOstiumSnapshot}
-                            onPlace={() => enableProbeTool()}
-                            onConfirm={() => captureCoronaryPoint('right')}
-                            onUndo={() => { session.rightOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
                           <PlaceRow label="LCO" captured={!!session.leftOstiumSnapshot}
-                            onPlace={() => enableProbeTool()}
+                            onPlace={startSingleProbePlacement}
                             onConfirm={() => captureCoronaryPoint('left')}
-                            onUndo={() => { session.leftOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
+                            onUndo={() => { session.leftOstiumSnapshot = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
+                          <PlaceRow label="RCO" captured={!!session.rightOstiumSnapshot}
+                            onPlace={startSingleProbePlacement}
+                            onConfirm={() => captureCoronaryPoint('right')}
+                            onUndo={() => { session.rightOstiumSnapshot = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
                           {livePerp != null && (
                             <Row label="View ⟂ to annulus" value={`${livePerp.toFixed(1)}° off`} warn={livePerp > 15} highlight={livePerp <= 5} />
                           )}
                         </Section>
 
-                        {/* ── 6. Cusp Hinge Points ── */}
-                        <Section num="6" title="Cusp Hinge Points">
+                        {/* ── 4. Cusp Hinge Points ── */}
+                        <Section num="4" title="Cusp Hinge Points">
                           <PlaceRow label="LCH" captured={!!cuspPoints.lcc}
-                            onPlace={() => enableProbeTool()}
+                            onPlace={() => cuspPoints.lcc ? startCuspUpdate('lcc') : startSingleProbePlacement()}
                             onConfirm={() => captureCuspFromMPR('lcc')}
-                            onUndo={() => { setCuspPoints(p => ({ ...p, lcc: undefined })); session.cuspLCC = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
+                            onUndo={() => { setCuspPoints(p => ({ ...p, lcc: undefined })); session.cuspLCC = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
                           <PlaceRow label="RCH" captured={!!cuspPoints.rcc}
-                            onPlace={() => enableProbeTool()}
+                            onPlace={() => cuspPoints.rcc ? startCuspUpdate('rcc') : startSingleProbePlacement()}
                             onConfirm={() => captureCuspFromMPR('rcc')}
-                            onUndo={() => { setCuspPoints(p => ({ ...p, rcc: undefined })); session.cuspRCC = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }} />
+                            onUndo={() => { setCuspPoints(p => ({ ...p, rcc: undefined })); session.cuspRCC = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
 
                           {/* NCH — auto-estimated from LCH+RCH */}
                           {cuspPoints.lcc && cuspPoints.rcc && !cuspPoints.ncc && (
@@ -2339,7 +2821,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               const nccEst = { x: mid.x+perp.x*perpDist, y: mid.y+perp.y*perpDist, z: mid.z+perp.z*perpDist };
                               session.cuspNCC = nccEst;
                               setCuspPoints(prev => ({ ...prev, ncc: nccEst }));
-                              session.recompute(); enableProbeTool(); forceUpdate();
+                              session.recompute(); startSingleProbePlacement(); forceUpdate();
                             }}
                               className="tavi-button tavi-button-capture"
                               style={{ width: '100%', fontSize: '0.72rem', padding: '4px 8px', marginBottom: 3 }}>
@@ -2348,10 +2830,14 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                           )}
                           {cuspPoints.ncc && (
                             <div style={{ display: 'flex', gap: 4, marginBottom: 3 }}>
-                              <button onClick={() => enableProbeTool()}
+                              <button onClick={() => startCuspUpdate('ncc')}
                                 className="tavi-button tavi-button-captured"
-                                style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}>✓ NCH</button>
-                              <button onClick={() => captureCuspFromMPR('ncc')}
+                                style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}>
+                                {activeCuspUpdate === 'ncc' ? 'Click new NCH' : '✓ NCH'}
+                              </button>
+                              <button onClick={() => {
+                                if (!captureCuspFromMPR('ncc')) startCuspUpdate('ncc');
+                              }}
                                 className="tavi-button tavi-button-capture"
                                 style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 8px' }}>Update</button>
                               <button onClick={() => { setCuspPoints(p => ({ ...p, ncc: undefined })); session.cuspNCC = undefined; session.recompute(); forceUpdate(); }}
@@ -2363,8 +2849,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                           )}
                         </Section>
 
-                        {/* ── 6. Proceed to Oblique Annulus Tracing ── */}
-                        <Section num="6" title="Annulus Tracing">
+                        {/* ── 5. Proceed to Oblique Annulus Tracing ── */}
+                        <Section num="5" title="Annulus Tracing">
                           {cuspPoints.lcc && cuspPoints.rcc && cuspPoints.ncc ? (
                             <button
                               onClick={() => {
@@ -2383,18 +2869,26 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                                 onViewportModeChange('tavi-oblique');
                                 enterDoubleObliqueMode(renderingEngineId);
                                 setTimeout(() => {
-                                  const ctrl = new DoubleObliqueController(renderingEngineId, 'axial', 'coronal');
-                                  ctrl.initialize(center, axisDir);
-                                  controllerRef.current = ctrl;
+                                  let ctrl = controllerRef.current;
+                                  if (!ctrl) {
+                                    ctrl = new DoubleObliqueController(renderingEngineId, 'axial', 'coronal');
+                                    ctrl.initialize(center, axisDir);
+                                    controllerRef.current = ctrl;
+                                  }
                                   ctrl.alignToPlane(session.annulusPlaneNormal!, session.annulusPlaneCentroid!);
+                                  ctrl.unlockScrolling();
                                   disableProbeTool();
                                   setWorkflowPhase('annulus-tracing');
+                                  setContourStarted(false);
+                                  setContourClosed(false);
+                                  setContourPointCount(0);
                                   forceUpdate();
+                                  window.setTimeout(() => autoTraceAnnulus(), 100);
                                 }, 200);
                               }}
                               className="tavi-button tavi-button-capture"
                               style={{ width: '100%', padding: '8px', fontSize: '0.78rem', fontWeight: 600 }}>
-                              Proceed to Annulus Tracing →
+                              Auto Trace Annulus →
                             </button>
                           ) : (
                             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', padding: '2px 0' }}>
@@ -2402,6 +2896,34 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             </div>
                           )}
                         </Section>
+
+                        {/* Per-sinus diameters (LCS / RCS / NCS) — optional two-Probe measurement */}
+                        <Section num="6" title="Per-sinus Width">
+                          <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            Place 2 probes across a sinus only when individual LCS/RCS/NCS width is needed.
+                          </div>
+                          {sinusWidthMessage && (
+                            <div style={{ fontSize: '0.68rem', color: sinusWidthProbeCount >= 2 ? 'var(--accent-green)' : '#eab308', margin: '3px 0 5px' }}>
+                              {sinusWidthMessage} {activeSinusWidthLabel ? `(${sinusWidthProbeCount}/2)` : ''}
+                            </div>
+                          )}
+                          {(['LCS', 'RCS', 'NCS'] as SinusLabel[]).map((lbl) => {
+                            const d = session.sinusDiameters[lbl];
+                            const isActiveSinus = activeSinusWidthLabel === lbl;
+                            return (
+                              <PlaceRow
+                                key={lbl}
+                                label={`${lbl}${d ? ` ${fmt(d.diameterMm)} mm${d.heightMm != null ? ` · h ${fmt(d.heightMm)}` : ''}` : isActiveSinus ? ` ${sinusWidthProbeCount}/2` : ''}`}
+                                captured={!!d}
+                                onPlace={() => startSinusWidthPlacement(lbl)}
+                                onConfirm={() => captureSinusWidth(lbl)}
+                                onUndo={() => { session.clearSinusDiameter(lbl); startSinusWidthPlacement(lbl); forceUpdate(); }}
+                              />
+                            );
+                          })}
+                        </Section>
+                          </>
+                        )}
                       </div>
                     );
                   })()}
@@ -2425,10 +2947,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 4 }}>
                       Coronary Ostia (scroll right panel to ostium level, click to mark)
                     </div>
-                    <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                      <button
-                        onClick={() => { enableProbeTool(); }}
-                        className={`tavi-button ${session.leftOstiumSnapshot ? 'tavi-button-captured' : ''}`}
+	                    <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+	                      <button
+	                        onClick={startSingleProbePlacement}
+	                        className={`tavi-button ${session.leftOstiumSnapshot ? 'tavi-button-captured' : ''}`}
                         style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}
                       >
                         {session.leftOstiumSnapshot ? '✓ LCO' : 'Place LCO'}
@@ -2448,10 +2970,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       {session.leftOstiumSnapshot && (
                         <button
                           onClick={() => {
-                            session.leftOstiumSnapshot = undefined;
-                            session.recompute();
-                            enableProbeTool();
-                            forceUpdate();
+	                            session.leftOstiumSnapshot = undefined;
+	                            session.recompute();
+	                            startSingleProbePlacement();
+	                            forceUpdate();
                           }}
                           className="tavi-button tavi-button-cancel"
                           style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 6px' }}
@@ -2460,10 +2982,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                         </button>
                       )}
                     </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button
-                        onClick={() => { enableProbeTool(); }}
-                        className={`tavi-button ${session.rightOstiumSnapshot ? 'tavi-button-captured' : ''}`}
+	                    <div style={{ display: 'flex', gap: 4 }}>
+	                      <button
+	                        onClick={startSingleProbePlacement}
+	                        className={`tavi-button ${session.rightOstiumSnapshot ? 'tavi-button-captured' : ''}`}
                         style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}
                       >
                         {session.rightOstiumSnapshot ? '✓ RCO' : 'Place RCO'}
@@ -2483,10 +3005,10 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       {session.rightOstiumSnapshot && (
                         <button
                           onClick={() => {
-                            session.rightOstiumSnapshot = undefined;
-                            session.recompute();
-                            enableProbeTool();
-                            forceUpdate();
+	                            session.rightOstiumSnapshot = undefined;
+	                            session.recompute();
+	                            startSingleProbePlacement();
+	                            forceUpdate();
                           }}
                           className="tavi-button tavi-button-cancel"
                           style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 6px' }}
@@ -2522,7 +3044,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       Coronary Ostia
                     </div>
                     <div style={{ display: 'flex', gap: 4, marginBottom: 3 }}>
-                      <button onClick={() => enableProbeTool()}
+                      <button onClick={startSingleProbePlacement}
                         className={`tavi-button ${session.leftOstiumSnapshot ? 'tavi-button-captured' : ''}`}
                         style={{ flex: 1, fontSize: '0.7rem', padding: '3px 6px' }}>
                         {session.leftOstiumSnapshot ? '✓ LCO' : 'Place LCO'}
@@ -2532,12 +3054,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                         style={{ flex: 'none', fontSize: '0.7rem', padding: '3px 6px' }}
                         disabled={!!session.leftOstiumSnapshot}>Confirm</button>
                       {session.leftOstiumSnapshot && (
-                        <button onClick={() => { session.leftOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }}
+                        <button onClick={() => { session.leftOstiumSnapshot = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }}
                           className="tavi-button tavi-button-cancel" style={{ flex: 'none', fontSize: '0.7rem', padding: '3px 5px' }}>↻</button>
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: 4 }}>
-                      <button onClick={() => enableProbeTool()}
+                      <button onClick={startSingleProbePlacement}
                         className={`tavi-button ${session.rightOstiumSnapshot ? 'tavi-button-captured' : ''}`}
                         style={{ flex: 1, fontSize: '0.7rem', padding: '3px 6px' }}>
                         {session.rightOstiumSnapshot ? '✓ RCO' : 'Place RCO'}
@@ -2547,7 +3069,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                         style={{ flex: 'none', fontSize: '0.7rem', padding: '3px 6px' }}
                         disabled={!!session.rightOstiumSnapshot}>Confirm</button>
                       {session.rightOstiumSnapshot && (
-                        <button onClick={() => { session.rightOstiumSnapshot = undefined; session.recompute(); enableProbeTool(); forceUpdate(); }}
+                        <button onClick={() => { session.rightOstiumSnapshot = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }}
                           className="tavi-button tavi-button-cancel" style={{ flex: 'none', fontSize: '0.7rem', padding: '3px 5px' }}>↻</button>
                       )}
                     </div>
@@ -2566,7 +3088,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       <span className="tavi-checklist-label" style={{ flex: 1 }}>Left Cusp Hinge (LCH)</span>
                       {cuspPoints.lcc && cuspStep !== 'lcc' && (
                         <button
-                          onClick={() => { setCuspPoints(p => ({ ...p, lcc: undefined })); setCuspStep('lcc'); setCuspPlaced(false); enableProbeTool(); }}
+                          onClick={() => { setCuspPoints(p => ({ ...p, lcc: undefined })); setCuspStep('lcc'); setCuspPlaced(false); startSingleProbePlacement(); }}
                           className="tavi-button"
                           style={{ fontSize: '0.65rem', padding: '2px 6px', color: '#f0883e', flex: 'none' }}
                         >Re-place</button>
@@ -2579,7 +3101,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       <span className="tavi-checklist-label" style={{ flex: 1 }}>Non-Coronary Hinge (NCH)</span>
                       {cuspPoints.ncc && cuspStep !== 'ncc' && (
                         <button
-                          onClick={() => { setCuspPoints(p => ({ ...p, ncc: undefined })); setCuspStep('ncc'); setCuspPlaced(false); enableProbeTool(); }}
+                          onClick={() => { setCuspPoints(p => ({ ...p, ncc: undefined })); setCuspStep('ncc'); setCuspPlaced(false); startSingleProbePlacement(); }}
                           className="tavi-button"
                           style={{ fontSize: '0.65rem', padding: '2px 6px', color: '#f0883e', flex: 'none' }}
                         >Re-place</button>
@@ -2592,7 +3114,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       <span className="tavi-checklist-label" style={{ flex: 1 }}>Right Cusp Hinge (RCH)</span>
                       {cuspPoints.rcc && cuspStep !== 'rcc' && (
                         <button
-                          onClick={() => { setCuspPoints(p => ({ ...p, rcc: undefined })); setCuspStep('rcc'); setCuspPlaced(false); enableProbeTool(); }}
+                          onClick={() => { setCuspPoints(p => ({ ...p, rcc: undefined })); setCuspStep('rcc'); setCuspPlaced(false); startSingleProbePlacement(); }}
                           className="tavi-button"
                           style={{ fontSize: '0.65rem', padding: '2px 6px', color: '#f0883e', flex: 'none' }}
                         >Re-place</button>
@@ -2615,11 +3137,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       </p>
                       <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                         {!cuspPlaced ? (
-                          <button
-                            onClick={() => {
-                              enableProbeTool();
-                              setCuspPlaced(false);
-                            }}
+	                          <button
+	                            onClick={() => {
+	                              startSingleProbePlacement();
+	                              setCuspPlaced(false);
+	                            }}
                             className="tavi-button"
                             style={{ flex: 1 }}
                           >
@@ -2637,23 +3159,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             >
                               Confirm {cuspStep.toUpperCase()}
                             </button>
-                            <button
-                              onClick={() => {
-                                // Remove last probe annotation without capturing
-                                const engine = getEngine();
-                                if (engine) {
-                                  for (const vpId of ['axial', 'coronal', 'sagittal']) {
-                                    const vp = engine.getViewport(vpId);
-                                    if (!vp?.element) continue;
-                                    const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-                                    if (probes && probes.length > 0) {
-                                      const uid = probes[probes.length - 1].annotationUID;
-                                      if (uid) cornerstoneTools.annotation.state.removeAnnotation(uid);
-                                    }
-                                  }
-                                }
-                                setCuspPlaced(false);
-                              }}
+	                            <button
+	                              onClick={() => {
+	                                clearProbeAnnotations();
+	                                setCuspPlaced(false);
+	                              }}
                               className="tavi-button tavi-button-cancel"
                               style={{ flex: 'none', padding: '0 10px' }}
                             >
@@ -2732,7 +3242,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                     <>
                       <p className="tavi-step-hint">
                         Verify cusp positions on the working view (right). Use <strong>Probe</strong> to re-place any cusp, then click Update.
-                        Scroll to fine-tune the plane. When ready, click <strong>Start Contour</strong>.
+                        Scroll to fine-tune the plane. Auto Trace will segment the annulus on this plane.
                       </p>
 
                       {/* Cusp adjustment from oblique views */}
@@ -2748,7 +3258,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               <span style={{ fontSize: '0.72rem', fontWeight: 600, color: pt ? '#3fb950' : '#f85149', width: 28, flexShrink: 0 }}>
                                 {pt ? '✓' : '○'} {label}
                               </span>
-                              <button onClick={() => enableProbeTool()}
+	                              <button onClick={startSingleProbePlacement}
                                 className="tavi-button"
                                 style={{ flex: 1, fontSize: '0.68rem', padding: '3px 6px' }}>
                                 {pt ? 'Re-place' : 'Place'}
@@ -2767,13 +3277,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                                 if (!ann) return;
                                 const p = ann.data.handles.points[0];
                                 const wp: TAVIVector3D = { x: p[0], y: p[1], z: p[2] };
-                                // Clean up probes
-                                for (const vpId of ['coronal', 'axial', 'sagittal']) {
-                                  const vp = engine.getViewport(vpId);
-                                  if (!vp?.element) continue;
-                                  const probes = cornerstoneTools.annotation.state.getAnnotations('Probe', vp.element);
-                                  if (probes) probes.forEach((pr: any) => { if (pr.annotationUID) cornerstoneTools.annotation.state.removeAnnotation(pr.annotationUID); });
-                                }
+	                                clearProbeAnnotations();
                                 if (cusp === 'lcc') { session.cuspLCC = wp; setCuspPoints(prev => ({ ...prev, lcc: wp })); }
                                 if (cusp === 'rcc') { session.cuspRCC = wp; setCuspPoints(prev => ({ ...prev, rcc: wp })); }
                                 if (cusp === 'ncc') { session.cuspNCC = wp; setCuspPoints(prev => ({ ...prev, ncc: wp })); }
@@ -2800,14 +3304,25 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       </div>
 
                       <button
-                        onClick={() => {
-                          setContourStarted(true);
-                          // Initialize contour tool here
-                          controllerRef.current?.lockScrolling();
-                        }}
+                        onClick={autoTraceAnnulus}
                         className="tavi-button tavi-button-capture"
                         style={{ width: '100%', padding: '8px', fontSize: '0.78rem', fontWeight: 600 }}>
-                        Start Contour Tracing
+                        Auto Trace Annulus
+                      </button>
+                      <button
+                        onClick={() => {
+                          contourToolRef.current?.disable();
+                          contourToolRef.current = null;
+                          syncAnnulusPlaneFromWorkingView();
+                          setContourStarted(true);
+                          setContourClosed(false);
+                          setContourPointCount(0);
+                          window.setTimeout(() => initContourTool(), 0);
+                          controllerRef.current?.lockScrolling();
+                        }}
+                        className="tavi-button tavi-button-cancel"
+                        style={{ width: '100%', padding: '5px 8px', fontSize: '0.72rem', marginTop: 6 }}>
+                        Manual Contour Fallback
                       </button>
                     </>
                   )}
@@ -2922,6 +3437,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                   <h4 style={{ margin: '0 0 8px', fontSize: '0.85rem', color: 'var(--text-primary)' }}>
                     Coronary Heights & Cross-Sections
                   </h4>
+
+                  {renderPlanningNavigation()}
 
                   {/* Annulus summary */}
                   {annulus && (
@@ -3077,108 +3594,115 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 </div>
               )}
             </div>
+            )}
 
-            {/* ── Guided Workflow (legacy/manual steps) ── */}
-            <div className="tavi-card">
-              <h3 className="tavi-card-title">Guided Reporting</h3>
-              <div className="tavi-checklist">
-                {steps.map(step => (
-                  <button
-                    key={step.id}
-                    className={`tavi-checklist-item ${activeStep === step.id ? 'active' : ''} ${isStepCaptured(step.id) ? 'captured' : ''}`}
-                    onClick={() => { setActiveStep(step.id); setDrawingActive(false); setMultiPoints([]); }}
-                  >
-                    <span className={`tavi-check-icon ${isStepCaptured(step.id) ? 'done' : ''}`}>
-                      {isStepCaptured(step.id) ? '✓' : step.num}
-                    </span>
-                    <span className="tavi-checklist-label">
-                      {step.label}
-                      {step.optional && <span className="tavi-optional">opt</span>}
-                    </span>
-                    <span className="tavi-checklist-type">{step.type === 'contour' ? '◯' : step.type === 'point' ? '·' : '···'}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Draw Controls ── */}
-            <div className="tavi-card">
-              <h3 className="tavi-card-title">{currentStep.label}</h3>
-              {!drawingActive ? (
-                <>
-                  <p className="tavi-step-hint">{currentStep.hint}</p>
-                  {activeStep === TAVIStructureAnnulus && (
-                    <div className="tavi-calcium-note">
-                      <strong>Calcium Paradox:</strong> When tracing through calcium nodules, bisect the chunks — tracing inside gives larger perimeter but smaller area; tracing outside gives larger area. Take the average approach for representative dimensions.
-                    </div>
-                  )}
-                  {currentStep.type === 'contour' ? (
-                    <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            {activeSubtitle === 'valve' && (
+              <>
+                {workflowPhase === 'legacy' && (
+                  <>
+                    {/* ── Legacy Manual Fallback ── */}
+                    <div className="tavi-card">
+                  <h3 className="tavi-card-title">Manual Fallback</h3>
+                  <div className="tavi-checklist">
+                    {steps.map(step => (
                       <button
-                        onClick={handleAutoDetect}
-                        className="tavi-button tavi-button-capture"
-                        style={{ flex: 1 }}
-                        disabled={autoDetecting}
+                        key={step.id}
+                        className={`tavi-checklist-item ${activeStep === step.id ? 'active' : ''} ${isStepCaptured(step.id) ? 'captured' : ''}`}
+                        onClick={() => { setActiveStep(step.id); setDrawingActive(false); setMultiPoints([]); }}
                       >
-                        {autoDetecting ? 'Detecting...' : 'Auto-Detect'}
+                        <span className={`tavi-check-icon ${isStepCaptured(step.id) ? 'done' : ''}`}>
+                          {isStepCaptured(step.id) ? '✓' : step.num}
+                        </span>
+                        <span className="tavi-checklist-label">
+                          {step.label}
+                          {step.optional && <span className="tavi-optional">opt</span>}
+                        </span>
+                        <span className="tavi-checklist-type">{step.type === 'contour' ? '◯' : step.type === 'point' ? '·' : '···'}</span>
                       </button>
-                      <button onClick={handleStartDrawing} className="tavi-button" style={{ flex: 1 }}>
-                        Manual Draw
-                      </button>
-                    </div>
-                  ) : activeStep === TAVIStructureAorticAxis ? (
-                    <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                      <button
-                        onClick={captureAxisFromCrosshairs}
-                        className="tavi-button tavi-button-capture"
-                        style={{ flex: 1 }}
-                      >
-                        From Crosshairs
-                      </button>
-                      <button onClick={handleStartDrawing} className="tavi-button" style={{ flex: 1 }}>
-                        Place 2 Points
-                      </button>
-                    </div>
-                  ) : (
-                    <button onClick={handleStartDrawing} className="tavi-button" style={{ marginTop: 8 }}>
-                      {currentStep.type === 'point' ? 'Place Point' : `Place Points (${(currentStep.id === TAVIStructureMembranousSeptum) ? '2' : '3+'})`}
-                    </button>
-                  )}
-                  {autoDetectError && (
-                    <div className="tavi-calcium-note" style={{ marginTop: 6 }}>
-                      {autoDetectError}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="tavi-draw-active">
-                  <p className="tavi-draw-hint">
-                    {currentStep.type === 'multi-point'
-                      ? `Points collected: ${multiPoints.length} / ${(activeStep === TAVIStructureMembranousSeptum || activeStep === TAVIStructureAorticAxis) ? 2 : 3}+`
-                      : currentStep.type === 'point'
-                        ? 'Click on the viewport to place point'
-                        : 'Draw a closed contour on the viewport'
-                    }
-                  </p>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={captureActiveAnnotation} className="tavi-button tavi-button-capture" style={{ flex: 1 }}>
-                      {currentStep.type === 'multi-point' ? 'Add Point' : 'Capture'}
-                    </button>
-                    <button onClick={cancelDrawing} className="tavi-button tavi-button-cancel" style={{ flex: 1 }}>
-                      Cancel
-                    </button>
+                    ))}
                   </div>
                 </div>
-              )}
 
-              <div className="tavi-suggestion" style={{ marginTop: 8 }}>
-                {session.nextRecommendedStepSummary()}
-              </div>
-            </div>
+                {/* ── Draw Controls ── */}
+                    <div className="tavi-card">
+                  <h3 className="tavi-card-title">{currentStep.label}</h3>
+                  {!drawingActive ? (
+                    <>
+                      <p className="tavi-step-hint">{currentStep.hint}</p>
+                      {activeStep === TAVIStructureAnnulus && (
+                        <div className="tavi-calcium-note">
+                          <strong>Calcium Paradox:</strong> When tracing through calcium nodules, bisect the chunks — tracing inside gives larger perimeter but smaller area; tracing outside gives larger area. Take the average approach for representative dimensions.
+                        </div>
+                      )}
+                      {currentStep.type === 'contour' ? (
+                        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                          <button
+                            onClick={handleAutoDetect}
+                            className="tavi-button tavi-button-capture"
+                            style={{ flex: 1 }}
+                            disabled={autoDetecting}
+                          >
+                            {autoDetecting ? 'Detecting...' : 'Auto-Detect'}
+                          </button>
+                          <button onClick={handleStartDrawing} className="tavi-button" style={{ flex: 1 }}>
+                            Manual Draw
+                          </button>
+                        </div>
+                      ) : activeStep === TAVIStructureAorticAxis ? (
+                        <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                          <button
+                            onClick={captureAxisFromCrosshairs}
+                            className="tavi-button tavi-button-capture"
+                            style={{ flex: 1 }}
+                          >
+                            From Crosshairs
+                          </button>
+                          <button onClick={handleStartDrawing} className="tavi-button" style={{ flex: 1 }}>
+                            Place 2 Points
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={handleStartDrawing} className="tavi-button" style={{ marginTop: 8 }}>
+                          {currentStep.type === 'point' ? 'Place Point' : `Place Points (${(currentStep.id === TAVIStructureMembranousSeptum) ? '2' : '3+'})`}
+                        </button>
+                      )}
+                      {autoDetectError && (
+                        <div className="tavi-calcium-note" style={{ marginTop: 6 }}>
+                          {autoDetectError}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="tavi-draw-active">
+                      <p className="tavi-draw-hint">
+                        {currentStep.type === 'multi-point'
+                          ? `Points collected: ${multiPoints.length} / ${(activeStep === TAVIStructureMembranousSeptum || activeStep === TAVIStructureAorticAxis) ? 2 : 3}+`
+                          : currentStep.type === 'point'
+                            ? 'Click on the viewport to place point'
+                            : 'Draw a closed contour on the viewport'
+                        }
+                      </p>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button onClick={captureActiveAnnotation} className="tavi-button tavi-button-capture" style={{ flex: 1 }}>
+                          {currentStep.type === 'multi-point' ? 'Add Point' : 'Capture'}
+                        </button>
+                        <button onClick={cancelDrawing} className="tavi-button tavi-button-cancel" style={{ flex: 1 }}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
-            {/* ── Planning Source ── */}
-            {session.annulusSnapshot && (
-              <div className="tavi-card">
+                  <div className="tavi-suggestion" style={{ marginTop: 8 }}>
+                    {session.nextRecommendedStepSummary()}
+                  </div>
+                </div>
+                  </>
+                )}
+
+                {/* ── Planning Source ── */}
+                {session.annulusSnapshot && (
+                  <div className="tavi-card">
                 <h3 className="tavi-card-title">Planning Source</h3>
                 <label className="tavi-toggle-row">
                   <input
@@ -3208,11 +3732,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                     </div>
                   </div>
                 )}
-              </div>
-            )}
+                  </div>
+                )}
 
-            {/* ── Calcium ── */}
-            <div className="tavi-card">
+                {/* ── Calcium ── */}
+                <div className="tavi-card">
               <h3 className="tavi-card-title">Calcification</h3>
               <div className="tavi-report-grid">
                 <div className="tavi-row">
@@ -3296,22 +3820,26 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                   </>
                 )}
               </div>
-            </div>
+                </div>
+              </>
+            )}
+
+            {activeSubtitle === 'periph' && renderPeripheralCards()}
           </>
         )}
 
         {activeTab === 'report' && (
           <>
-            {/* ── Export + Back ── */}
+            {/* ── Export ── */}
             <div className="tavi-export-bar" style={{ display: 'flex', gap: 6 }}>
-              <button className="tavi-button" onClick={() => { setActiveTab('capture'); onReportToggle?.(false); }} style={{ flex: 'none', padding: '6px 12px', fontSize: '0.75rem' }}>
-                ← TAVI
-              </button>
               <button className="tavi-button tavi-button-export" onClick={exportReport} style={{ flex: 1 }}>
                 Export Text
               </button>
               <button className="tavi-button tavi-button-export" onClick={exportCsvReport} style={{ flex: 1 }} title="Export measurements as CSV (Excel/spreadsheet)">
                 Export CSV
+              </button>
+              <button className="tavi-button tavi-button-export" onClick={exportAnnulusPointsCsv} style={{ flex: 1 }} title="Export cusp, ostium, annulus raw/interpolated points">
+                Points CSV
               </button>
               <button className="tavi-button tavi-button-export" onClick={() => void exportPdfReport(false)} style={{ flex: 1 }} title="PDF report">
                 Export PDF
@@ -3355,6 +3883,9 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                 <p className="tavi-empty">Capture annulus contour to see measurements</p>
               )}
             </div>
+
+            {renderPlanningNavigation()}
+            {renderPlanningSnapshots()}
 
             {/* ── 2. Valve Sizing Recommendations ── */}
             <div className="tavi-card">
@@ -3594,93 +4125,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               )}
             </div>
 
-            {/* ── 4b. Access Route Planning ── */}
-            <div className="tavi-card">
-              <h3 className="tavi-card-title">Access Planning</h3>
-              <div className="tavi-report-grid">
-                <div className="tavi-row">
-                  <span className="tavi-row-label">Planned Access</span>
-                  <span className="tavi-row-value">
-                    <select
-                      className="tavi-inline-select"
-                      value={session.plannedAccess}
-                      onChange={(e) => { session.plannedAccess = e.target.value as any; forceUpdate(); }}
-                    >
-                      {ACCESS_ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                  </span>
-                </div>
-                <div className="tavi-row">
-                  <span className="tavi-row-label">Pigtail Access</span>
-                  <span className="tavi-row-value">
-                    <select
-                      className="tavi-inline-select"
-                      value={session.plannedPigtailAccess}
-                      onChange={(e) => { session.plannedPigtailAccess = e.target.value as any; forceUpdate(); }}
-                    >
-                      {PIGTAIL_ACCESS_ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* ── Access Vessels (ilio-femoral runoff) ── */}
-            <div className="tavi-card">
-              <h3 className="tavi-card-title">Access Vessels</h3>
-              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 6 }}>
-                Draw a vessel path with the centerline tool, then Measure. Min lumen = narrowest perpendicular diameter.
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
-                {([
-                  ['thoracic-aorta', 'Thoracic Aorta'],
-                  ['abdominal-aorta', 'Abdominal Aorta'],
-                  ['iliac-left', 'Iliac L'],
-                  ['iliac-right', 'Iliac R'],
-                ] as [AccessVesselId, string][]).map(([id, label]) => (
-                  <button
-                    key={id}
-                    className="tavi-button tavi-button-capture"
-                    style={{ fontSize: '0.7rem', padding: '4px' }}
-                    disabled={accessBusy != null}
-                    onClick={() => measureAccessVessel(id)}
-                  >
-                    {accessBusy === id ? '…' : `Measure ${label}`}
-                  </button>
-                ))}
-              </div>
-              <div className="tavi-report-grid">
-                {([
-                  ['thoracic-aorta', 'Thoracic Aorta'],
-                  ['abdominal-aorta', 'Abdominal Aorta'],
-                  ['iliac-left', 'Iliac (L)'],
-                  ['iliac-right', 'Iliac (R)'],
-                ] as [AccessVesselId, string][]).map(([id, label]) => {
-                  const v = session.accessVessels.get(id);
-                  return v ? (
-                    <Row
-                      key={id}
-                      label={label}
-                      value={`min ø ${fmt(v.minLumenDiameterMm)} mm · TI ${fmt(v.tortuosityIndex, 2)} · ${fmt(v.cumulativeAngulationDeg, 0)}°`}
-                      warn={v.tortuosityIndex > 1.5 || v.cumulativeAngulationDeg > 90}
-                    />
-                  ) : null;
-                })}
-                {accessMinLumen != null && (
-                  <Row label="Min Ilio-femoral Lumen" value={`${fmt(accessMinLumen)} mm`} />
-                )}
-                {sheathOD != null && (
-                  <Row label="Selected Sheath OD" value={`${fmt(sheathOD)} mm`} />
-                )}
-                {sheathFit && (
-                  <>
-                    <Row label="Margin" value={`${fmt(sheathFit.marginMm)} mm`} warn={sheathFit.feasibility !== 'feasible'} />
-                    <Row label="SFAR" value={fmt(sheathFit.sfar, 2)} warn={sheathFit.sfar > 1.0} highlight={sheathFit.feasibility === 'feasible'} />
-                    <Row label="Access Feasibility" value={sheathFit.feasibility} warn={sheathFit.feasibility === 'unfavorable'} highlight={sheathFit.feasibility === 'feasible'} />
-                  </>
-                )}
-              </div>
-            </div>
+            {renderPeripheralCards()}
 
             {/* ── 5. Structure Geometries ── */}
             <div className="tavi-card">
@@ -3819,6 +4264,32 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
           handleCount={8}
           onContourEdited={(newPts, newGeo) => {
             session.sinusSnapshot = { ...session.sinusSnapshot!, worldPoints: newPts };
+            session.recompute();
+            setRefresh(r => r + 1);
+          }}
+        />
+      )}
+      {workflowPhase !== 'annulus-tracing' && session.annulusSnapshot && (session.annulusGeometry ?? annulus) && (
+        <ContourOverlay
+          key={`annulus-${refresh}`}
+          renderingEngineId={renderingEngineId}
+          viewportId={viewportMode === 'tavi-oblique' ? 'coronal' : 'axial'}
+          contourPoints={session.annulusSnapshot.worldPoints}
+          geometry={(session.annulusGeometry ?? annulus)!}
+          planeNormal={session.annulusSnapshot.planeNormal}
+          contourColor="#ffffff"
+          handleCount={24}
+          showFill={false}
+          showMeasurements={false}
+          onContourEdited={(newPts) => {
+            const rawPoints = resampleClosedContourByCount(newPts, 24);
+            session.annulusRawContourPoints = rawPoints;
+            session.annulusSnapshot = {
+              ...session.annulusSnapshot!,
+              worldPoints: newPts,
+              planeOrigin: rawPoints[0] ?? session.annulusSnapshot!.planeOrigin,
+            };
+            session.useAssistedAnnulusForPlanning = true;
             session.recompute();
             setRefresh(r => r + 1);
           }}

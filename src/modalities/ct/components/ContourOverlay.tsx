@@ -41,6 +41,55 @@ function catmullRomClosed(controlPts: [number, number][], segmentsPerSpan: numbe
   return result;
 }
 
+function cross2D(ax: number, ay: number, bx: number, by: number): number {
+  return ax * by - ay * bx;
+}
+
+function clipLineToClosedPolyline(
+  center: [number, number],
+  lineStart: [number, number],
+  lineEnd: [number, number],
+  polyline: [number, number][]
+): { start: [number, number]; end: [number, number] } | null {
+  const rawDx = lineEnd[0] - lineStart[0];
+  const rawDy = lineEnd[1] - lineStart[1];
+  const length = Math.hypot(rawDx, rawDy);
+  if (length < 1e-3 || polyline.length < 3) return null;
+
+  const dx = rawDx / length;
+  const dy = rawDy / length;
+  const hits: number[] = [];
+
+  for (let i = 0; i < polyline.length; i++) {
+    const a = polyline[i];
+    const b = polyline[(i + 1) % polyline.length];
+    const sx = b[0] - a[0];
+    const sy = b[1] - a[1];
+    const denom = cross2D(dx, dy, sx, sy);
+    if (Math.abs(denom) < 1e-6) continue;
+
+    const qx = a[0] - center[0];
+    const qy = a[1] - center[1];
+    const t = cross2D(qx, qy, sx, sy) / denom;
+    const u = cross2D(qx, qy, dx, dy) / denom;
+    if (u >= -1e-4 && u <= 1 + 1e-4) {
+      hits.push(t);
+    }
+  }
+
+  const sorted = hits
+    .sort((a, b) => a - b)
+    .filter((t, idx, arr) => idx === 0 || Math.abs(t - arr[idx - 1]) > 0.5);
+  const negative = sorted.filter(t => t < -0.5).pop();
+  const positive = sorted.find(t => t > 0.5);
+  if (negative == null || positive == null) return null;
+
+  return {
+    start: [center[0] + dx * negative, center[1] + dy * negative],
+    end: [center[0] + dx * positive, center[1] + dy * positive],
+  };
+}
+
 /** Catmull-Rom in 3D for world-space interpolation */
 function catmullRom3D(
   p0: TAVIVector3D, p1: TAVIVector3D, p2: TAVIVector3D, p3: TAVIVector3D, t: number
@@ -92,6 +141,9 @@ interface ContourOverlayProps {
   onContourEdited?: (newPoints: TAVIVector3D[], newGeometry: TAVIGeometryResult) => void;
   /** Number of control handles (default: 16) */
   handleCount?: number;
+  showFill?: boolean;
+  showMeasurements?: boolean;
+  showHandles?: boolean;
 }
 
 const HANDLE_RADIUS = 5;
@@ -107,6 +159,9 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
   label,
   onContourEdited,
   handleCount = 16,
+  showFill = true,
+  showMeasurements = true,
+  showHandles = true,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -206,12 +261,14 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
     const splinePts = catmullRomClosed(validHandlePts, 10);
 
     // ── Semi-transparent fill ──
-    ctx.beginPath();
-    ctx.moveTo(splinePts[0][0], splinePts[0][1]);
-    for (let i = 1; i < splinePts.length; i++) ctx.lineTo(splinePts[i][0], splinePts[i][1]);
-    ctx.closePath();
-    ctx.fillStyle = `${contourColor}18`;
-    ctx.fill();
+    if (showFill) {
+      ctx.beginPath();
+      ctx.moveTo(splinePts[0][0], splinePts[0][1]);
+      for (let i = 1; i < splinePts.length; i++) ctx.lineTo(splinePts[i][0], splinePts[i][1]);
+      ctx.closePath();
+      ctx.fillStyle = `${contourColor}18`;
+      ctx.fill();
+    }
 
     // ── Contour outline (smooth spline) ──
     ctx.beginPath();
@@ -223,99 +280,121 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
     ctx.setLineDash([]);
     ctx.stroke();
 
-    // ── Diameter lines ──
-    const diams = getDiameterEndpoints(geo);
+    if (showMeasurements) {
+      // ── Diameter lines ──
+      const diams = getDiameterEndpoints(geo);
+      const centroidCanvas = worldToCanvas(geo.centroid);
 
-    // Max diameter (red dashed)
-    const maxS = worldToCanvas(diams.maxStart);
-    const maxE = worldToCanvas(diams.maxEnd);
-    if (maxS && maxE) {
-      ctx.beginPath();
-      ctx.moveTo(maxS[0], maxS[1]);
-      ctx.lineTo(maxE[0], maxE[1]);
-      ctx.strokeStyle = '#f85149';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      for (const ep of [maxS, maxE]) {
+      // Max diameter (red dashed)
+      const maxS = worldToCanvas(diams.maxStart);
+      const maxE = worldToCanvas(diams.maxEnd);
+      if (maxS && maxE) {
+        const clipped = centroidCanvas ? clipLineToClosedPolyline(centroidCanvas, maxS, maxE, splinePts) : null;
+        const lineS = clipped?.start ?? maxS;
+        const lineE = clipped?.end ?? maxE;
         ctx.beginPath();
-        ctx.arc(ep[0], ep[1], 3, 0, Math.PI * 2);
+        ctx.moveTo(lineS[0], lineS[1]);
+        ctx.lineTo(lineE[0], lineE[1]);
+        ctx.strokeStyle = '#f85149';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        for (const ep of [lineS, lineE]) {
+          ctx.beginPath();
+          ctx.arc(ep[0], ep[1], 3, 0, Math.PI * 2);
+          ctx.fillStyle = '#f85149';
+          ctx.fill();
+        }
+
+        // Anchor the Max label at the OUTER end of the dashed line, offset
+        // outward along the line direction. Keeps it clear of the centroid
+        // labels (area + structure name) which sit on the contour centre.
+        const dx = lineE[0] - lineS[0];
+        const dy = lineE[1] - lineS[1];
+        const len = Math.hypot(dx, dy) || 1;
+        const lx = lineE[0] + (dx / len) * 8;
+        const ly = lineE[1] + (dy / len) * 8;
+        const maxLabel = `Max ${geo.maximumDiameterMm.toFixed(1)}mm`;
+        ctx.font = 'bold 11px -apple-system, sans-serif';
+        ctx.textAlign = dx >= 0 ? 'left' : 'right';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3;
+        ctx.strokeText(maxLabel, lx, ly);
         ctx.fillStyle = '#f85149';
-        ctx.fill();
+        ctx.fillText(maxLabel, lx, ly);
       }
 
-      const mx = (maxS[0] + maxE[0]) / 2;
-      const my = (maxS[1] + maxE[1]) / 2;
-      const maxLabel = `Max: ${geo.maximumDiameterMm.toFixed(1)}mm`;
-      ctx.font = 'bold 11px -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 3;
-      ctx.strokeText(maxLabel, mx, my - 8);
-      ctx.fillStyle = '#f85149';
-      ctx.fillText(maxLabel, mx, my - 8);
-    }
-
-    // Min diameter (blue dashed)
-    const minS = worldToCanvas(diams.minStart);
-    const minE = worldToCanvas(diams.minEnd);
-    if (minS && minE) {
-      ctx.beginPath();
-      ctx.moveTo(minS[0], minS[1]);
-      ctx.lineTo(minE[0], minE[1]);
-      ctx.strokeStyle = '#58a6ff';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      for (const ep of [minS, minE]) {
+      // Min diameter (blue dashed)
+      const minS = worldToCanvas(diams.minStart);
+      const minE = worldToCanvas(diams.minEnd);
+      if (minS && minE) {
+        const clipped = centroidCanvas ? clipLineToClosedPolyline(centroidCanvas, minS, minE, splinePts) : null;
+        const lineS = clipped?.start ?? minS;
+        const lineE = clipped?.end ?? minE;
         ctx.beginPath();
-        ctx.arc(ep[0], ep[1], 3, 0, Math.PI * 2);
+        ctx.moveTo(lineS[0], lineS[1]);
+        ctx.lineTo(lineE[0], lineE[1]);
+        ctx.strokeStyle = '#58a6ff';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        for (const ep of [lineS, lineE]) {
+          ctx.beginPath();
+          ctx.arc(ep[0], ep[1], 3, 0, Math.PI * 2);
+          ctx.fillStyle = '#58a6ff';
+          ctx.fill();
+        }
+
+        const dx = lineE[0] - lineS[0];
+        const dy = lineE[1] - lineS[1];
+        const len = Math.hypot(dx, dy) || 1;
+        const lx = lineE[0] + (dx / len) * 8;
+        const ly = lineE[1] + (dy / len) * 8;
+        const minLabel = `Min ${geo.minimumDiameterMm.toFixed(1)}mm`;
+        ctx.font = 'bold 11px -apple-system, sans-serif';
+        ctx.textAlign = dx >= 0 ? 'left' : 'right';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3;
+        ctx.strokeText(minLabel, lx, ly);
         ctx.fillStyle = '#58a6ff';
-        ctx.fill();
+        ctx.fillText(minLabel, lx, ly);
       }
 
-      const mx = (minS[0] + minE[0]) / 2;
-      const my = (minS[1] + minE[1]) / 2;
-      const minLabel = `Min: ${geo.minimumDiameterMm.toFixed(1)}mm`;
-      ctx.font = 'bold 11px -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 3;
-      ctx.strokeText(minLabel, mx, my + 16);
-      ctx.fillStyle = '#58a6ff';
-      ctx.fillText(minLabel, mx, my + 16);
-    }
+      // ── Centroid labels: structure name on top, area below ──
+      // Stack with a 14px line-height so they don't collide. Diameter labels
+      // were moved out to the dashed-line endpoints, so the centroid only has
+      // these two items to display.
+      if (centroidCanvas) {
+        const cx = centroidCanvas[0];
+        const cy = centroidCanvas[1];
 
-    // ── Area label at centroid ──
-    const centroidCanvas = worldToCanvas(geo.centroid);
-    if (centroidCanvas) {
-      const areaLabel = `${geo.areaMm2.toFixed(0)}mm²`;
-      ctx.font = 'bold 12px -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 3;
-      ctx.strokeText(areaLabel, centroidCanvas[0], centroidCanvas[1] + 4);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(areaLabel, centroidCanvas[0], centroidCanvas[1] + 4);
-    }
+        if (label) {
+          ctx.font = 'bold 11px -apple-system, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+          ctx.lineWidth = 3;
+          ctx.strokeText(label, cx, cy - 4);
+          ctx.fillStyle = contourColor;
+          ctx.fillText(label, cx, cy - 4);
+        }
 
-    // ── Structure label ──
-    if (label && centroidCanvas) {
-      ctx.font = '10px -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 3;
-      ctx.strokeText(label, centroidCanvas[0], centroidCanvas[1] + 18);
-      ctx.fillStyle = contourColor;
-      ctx.fillText(label, centroidCanvas[0], centroidCanvas[1] + 18);
+        const areaLabel = `${geo.areaMm2.toFixed(0)} mm²`;
+        ctx.font = 'bold 12px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3;
+        ctx.strokeText(areaLabel, cx, cy + 12);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(areaLabel, cx, cy + 12);
+      }
     }
 
     // ── Draggable handles ──
-    if (onContourEdited) {
+    if (showHandles && onContourEdited) {
       for (let i = 0; i < handleCanvasPts.length; i++) {
         const [hx, hy] = handleCanvasPts[i];
         if (hx < -9000) continue;
@@ -330,7 +409,7 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
         ctx.stroke();
       }
     }
-  }, [getViewport, worldToCanvas, contourColor, label, onContourEdited, getDiameterEndpoints]);
+  }, [getViewport, worldToCanvas, contourColor, label, onContourEdited, getDiameterEndpoints, showFill, showHandles, showMeasurements]);
 
   // ── Lifecycle: create canvas, attach to viewport, setup listeners ──
   useEffect(() => {
@@ -362,6 +441,12 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
       return [e.clientX - rect.left, e.clientY - rect.top];
     };
 
+    const stopViewportInteraction = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+
     const hitTestHandle = (cx: number, cy: number): number | null => {
       if (!onContourEditedRef.current) return null;
       const handles = handlesRef.current;
@@ -383,8 +468,7 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
         dragStateRef.current = { dragging: true, handleIndex: hit };
         canvas.style.pointerEvents = 'auto';
         canvas.style.cursor = 'grabbing';
-        e.preventDefault();
-        e.stopPropagation();
+        stopViewportInteraction(e);
       }
     };
 
@@ -408,8 +492,7 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
           if (newGeo) geometryRef.current = newGeo;
           redraw();
         }
-        e.preventDefault();
-        e.stopPropagation();
+        stopViewportInteraction(e);
       } else if (onContourEditedRef.current) {
         const hit = hitTestHandle(cx, cy);
         canvas.style.pointerEvents = hit !== null ? 'auto' : 'none';
@@ -417,7 +500,7 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
       }
     };
 
-    const onMouseUp = () => {
+    const onMouseUp = (e: MouseEvent) => {
       if (dragStateRef.current?.dragging) {
         dragStateRef.current = null;
         canvas.style.pointerEvents = 'none';
@@ -430,18 +513,19 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
           onContourEditedRef.current(denseContour, newGeo);
         }
         redraw();
+        stopViewportInteraction(e);
       }
     };
 
-    el.addEventListener('mousedown', onMouseDown);
-    el.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
+    el.addEventListener('mousedown', onMouseDown, true);
+    el.addEventListener('mousemove', onMouseMove, true);
+    document.addEventListener('mouseup', onMouseUp, true);
 
     return () => {
       el.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, onCamera as EventListener);
-      el.removeEventListener('mousedown', onMouseDown);
-      el.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
+      el.removeEventListener('mousedown', onMouseDown, true);
+      el.removeEventListener('mousemove', onMouseMove, true);
+      document.removeEventListener('mouseup', onMouseUp, true);
       ro.disconnect();
       if (canvas.parentElement === el) {
         el.removeChild(canvas);

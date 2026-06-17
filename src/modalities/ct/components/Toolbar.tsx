@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
-import { setActiveTool, resetCrosshairsToCenter, centerViewportsOnCrosshairs, ToolName } from '../core/toolManager';
+import { setActiveTool, resetCrosshairsToCenter, centerViewportsOnCrosshairs, zoomMPRToCrosshair, ToolName } from '../core/toolManager';
 
 const tools: { name: ToolName; label: string; icon: string; shortcut: string; key: string }[] = [
   { name: 'Crosshairs', label: 'Crosshairs', icon: '+', shortcut: 'C', key: 'c' },
@@ -15,6 +15,14 @@ const tools: { name: ToolName; label: string; icon: string; shortcut: string; ke
 
 const MPR_VP_IDS = ['axial', 'sagittal', 'coronal'];
 const VOLUME_ID = 'cornerstoneStreamingImageVolume:myVolume';
+type SlabMode = 'composite' | 'mip' | 'minip' | 'avg';
+
+const slabModes: { key: SlabMode; label: string; title: string }[] = [
+  { key: 'composite', label: 'Thin', title: 'Single slice' },
+  { key: 'mip', label: 'MIP', title: 'Maximum intensity projection' },
+  { key: 'minip', label: 'MinIP', title: 'Minimum intensity projection' },
+  { key: 'avg', label: 'Avg', title: 'Average intensity projection' },
+];
 
 interface Props {
   renderingEngineId: string;
@@ -25,7 +33,7 @@ interface Props {
 
 export function Toolbar({ renderingEngineId, onReset, onSwitchToMPR, isStack2D }: Props) {
   const [activeTool, setActive] = useState<ToolName>('Crosshairs');
-  const [mipEnabled, setMipEnabled] = useState(true);
+  const [slabMode, setSlabMode] = useState<SlabMode>('mip');
   const [slabThickness, setSlabThickness] = useState(5);
 
   // View settings
@@ -50,40 +58,55 @@ export function Toolbar({ renderingEngineId, onReset, onSwitchToMPR, isStack2D }
     centerViewportsOnCrosshairs(renderingEngineId);
   }, [renderingEngineId]);
 
-  // ── Slab MIP controls ──
-  const applyMip = useCallback((enabled: boolean, thickness: number) => {
+  const handleCenterZoom6 = useCallback(() => {
+    zoomMPRToCrosshair(renderingEngineId, 6);
+  }, [renderingEngineId]);
+
+  // ── Slab projection controls ──
+  const applySlabProjection = useCallback((mode: SlabMode, thickness: number) => {
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
     if (!engine) return;
+    const blendMode = mode === 'mip'
+      ? cornerstone.Enums.BlendModes.MAXIMUM_INTENSITY_BLEND
+      : mode === 'minip'
+        ? cornerstone.Enums.BlendModes.MINIMUM_INTENSITY_BLEND
+        : mode === 'avg'
+          ? cornerstone.Enums.BlendModes.AVERAGE_INTENSITY_BLEND
+          : cornerstone.Enums.BlendModes.COMPOSITE;
+
     for (const vpId of MPR_VP_IDS) {
       const vp = engine.getViewport(vpId) as cornerstone.Types.IVolumeViewport | undefined;
       if (!vp || !('setBlendMode' in vp)) continue;
-      if (enabled) {
-        (vp as any).setBlendMode(cornerstone.Enums.BlendModes.MAXIMUM_INTENSITY_BLEND);
-        (vp as any).setSlabThickness(thickness);
-      } else {
-        (vp as any).setBlendMode(cornerstone.Enums.BlendModes.COMPOSITE);
+      if (mode === 'composite') {
+        (vp as any).setBlendMode(blendMode);
         (vp as any).resetSlabThickness?.();
+      } else {
+        (vp as any).setBlendMode(blendMode);
+        (vp as any).setSlabThickness(Math.max(0.1, thickness));
       }
       vp.render();
     }
   }, [renderingEngineId]);
 
-  const toggleMip = useCallback(() => {
-    const newVal = !mipEnabled;
-    setMipEnabled(newVal);
-    applyMip(newVal, slabThickness);
-  }, [mipEnabled, slabThickness, applyMip]);
+  const handleSlabModeChange = useCallback((mode: SlabMode) => {
+    setSlabMode(mode);
+    applySlabProjection(mode, slabThickness);
+  }, [applySlabProjection, slabThickness]);
 
   const handleSlabChange = useCallback((newThickness: number) => {
     setSlabThickness(newThickness);
-    if (mipEnabled) applyMip(true, newThickness);
-  }, [mipEnabled, applyMip]);
+    if (slabMode !== 'composite') applySlabProjection(slabMode, newThickness);
+  }, [slabMode, applySlabProjection]);
+
+  useEffect(() => {
+    applySlabProjection(slabMode, slabThickness);
+  }, [applySlabProjection, slabMode, slabThickness]);
 
   const handleReset = useCallback(() => {
     if (onReset) onReset();
-    setMipEnabled(false);
+    setSlabMode('composite');
     setSlabThickness(5);
-    applyMip(false, 5);
+    applySlabProjection('composite', 5);
     stopCine();
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
     if (!engine) return;
@@ -97,7 +120,7 @@ export function Toolbar({ renderingEngineId, onReset, onSwitchToMPR, isStack2D }
       vp.render();
     }
     setTimeout(() => resetCrosshairsToCenter(renderingEngineId), 100);
-  }, [renderingEngineId, onReset, applyMip]);
+  }, [renderingEngineId, onReset, applySlabProjection]);
 
   // ── Cine player ──
   const scrollViewport = useCallback((vpId: string, delta: number) => {
@@ -242,6 +265,10 @@ export function Toolbar({ renderingEngineId, onReset, onSwitchToMPR, isStack2D }
         <span className="tool-label">Center</span>
         <span className="tool-shortcut">F</span>
       </button>
+      <button className="toolbar-btn" onClick={handleCenterZoom6} title="Center on crosshair + 6× zoom">
+        <span className="tool-icon">6×</span>
+        <span className="tool-label">6× Zoom</span>
+      </button>
       <button className="toolbar-btn reset-btn" onClick={handleReset} title="Reset all viewports (R)">
         <span className="tool-icon">↺</span>
         <span className="tool-label">Reset</span>
@@ -298,19 +325,30 @@ export function Toolbar({ renderingEngineId, onReset, onSwitchToMPR, isStack2D }
 
       <div className="toolbar-divider" />
 
-      {/* MIP toggle + slab */}
-      <button className={`toolbar-btn ${mipEnabled ? 'active' : ''}`} onClick={toggleMip} title="Toggle Slab MIP">
-        <span className="tool-icon">◈</span>
-        <span className="tool-label">MIP</span>
-      </button>
-      {mipEnabled && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 4px' }}>
-          <input type="range" min={1} max={60} value={slabThickness}
-            onChange={(e) => handleSlabChange(Number(e.target.value))}
-            style={{ width: 80, height: 3 }} title={`Slab: ${slabThickness}mm`} />
-          <span style={{ fontSize: '10px', color: 'var(--text-muted)', minWidth: 30 }}>{slabThickness}mm</span>
+      {/* Slab projection */}
+      <div className="toolbar-slab-control" title="Slab Projection">
+        <div className="toolbar-slab-modes" role="group" aria-label="Slab Projection">
+          {slabModes.map((mode) => (
+            <button
+              key={mode.key}
+              type="button"
+              className={`toolbar-slab-btn ${slabMode === mode.key ? 'active' : ''}`}
+              onClick={() => handleSlabModeChange(mode.key)}
+              title={mode.title}
+            >
+              {mode.key === 'mip' && <span className="tool-icon">◈</span>}
+              <span>{mode.label}</span>
+            </button>
+          ))}
         </div>
-      )}
+        <div className={`toolbar-slab-thickness ${slabMode === 'composite' ? 'disabled' : ''}`}>
+          <input type="range" min={1} max={60} value={slabThickness}
+            disabled={slabMode === 'composite'}
+            onChange={(e) => handleSlabChange(Number(e.target.value))}
+            title={`Slab: ${slabThickness}mm`} />
+          <span>{slabThickness}mm</span>
+        </div>
+      </div>
 
       <div className="toolbar-divider" />
 

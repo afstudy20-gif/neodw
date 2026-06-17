@@ -74,7 +74,7 @@ export class ConstrainedContourTool {
       width: 100%;
       height: 100%;
       pointer-events: none;
-      z-index: 50;
+      z-index: 55;
     `;
     el.style.position = 'relative';
     el.appendChild(this.canvas);
@@ -105,11 +105,21 @@ export class ConstrainedContourTool {
 
       this.points.push(projected);
       this.redraw();
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
     };
 
     // Mouse handlers for drag mode (only when closed)
     this.mouseDownHandler = (e: MouseEvent) => {
-      if (!this.closed || e.button !== 0) return;
+      if (e.button !== 0) return;
+
+      if (!this.closed) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        return;
+      }
 
       const canvasPoint = this.eventToCanvasPoint(e);
       if (!canvasPoint) return;
@@ -121,6 +131,7 @@ export class ConstrainedContourTool {
         this.dragStartCanvas = canvasPoint;
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
       }
     };
 
@@ -142,6 +153,7 @@ export class ConstrainedContourTool {
         this.redraw();
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
       } else if (this.closed) {
         // Hover detection for cursor feedback
         const newHover = this.hitTestPoint(canvasPoint);
@@ -156,10 +168,13 @@ export class ConstrainedContourTool {
       }
     };
 
-    this.mouseUpHandler = (_e: MouseEvent) => {
+    this.mouseUpHandler = (e: MouseEvent) => {
       if (this.dragging) {
         this.dragging = false;
         this.dragIndex = -1;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
       }
     };
 
@@ -170,10 +185,10 @@ export class ConstrainedContourTool {
 
     // Attach click handler to the viewport element (needs pointer-events)
     // We use the viewport element itself, not the canvas overlay
-    el.addEventListener('click', this.clickHandler);
-    el.addEventListener('mousedown', this.mouseDownHandler);
-    el.addEventListener('mousemove', this.mouseMoveHandler);
-    el.addEventListener('mouseup', this.mouseUpHandler);
+    el.addEventListener('click', this.clickHandler, true);
+    el.addEventListener('mousedown', this.mouseDownHandler, true);
+    el.addEventListener('mousemove', this.mouseMoveHandler, true);
+    el.addEventListener('mouseup', this.mouseUpHandler, true);
 
     // Listen for camera changes
     el.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, this.cameraModifiedHandler as EventListener);
@@ -188,10 +203,10 @@ export class ConstrainedContourTool {
 
     const el = this.viewport.element;
     if (el) {
-      if (this.clickHandler) el.removeEventListener('click', this.clickHandler);
-      if (this.mouseDownHandler) el.removeEventListener('mousedown', this.mouseDownHandler);
-      if (this.mouseMoveHandler) el.removeEventListener('mousemove', this.mouseMoveHandler);
-      if (this.mouseUpHandler) el.removeEventListener('mouseup', this.mouseUpHandler);
+      if (this.clickHandler) el.removeEventListener('click', this.clickHandler, true);
+      if (this.mouseDownHandler) el.removeEventListener('mousedown', this.mouseDownHandler, true);
+      if (this.mouseMoveHandler) el.removeEventListener('mousemove', this.mouseMoveHandler, true);
+      if (this.mouseUpHandler) el.removeEventListener('mouseup', this.mouseUpHandler, true);
       if (this.cameraModifiedHandler) {
         el.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, this.cameraModifiedHandler as EventListener);
       }
@@ -384,12 +399,13 @@ export class ConstrainedContourTool {
       ctx.setLineDash([]);
       ctx.stroke();
 
-      // Draw point number
-      ctx.fillStyle = '#fff';
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(String(i + 1), cp[0], cp[1]);
+      if (!this.closed) {
+        ctx.fillStyle = '#fff';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), cp[0], cp[1]);
+      }
     }
 
     ctx.restore();
