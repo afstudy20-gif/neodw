@@ -4,6 +4,8 @@ import {
   TAVIGeometryResult,
   TAVICalciumResult,
   TAVIFluoroAngleResult,
+  TAVICuspOverlapView,
+  TAVICuspOverlapViews,
   TAVIProjectionConfirmationResult,
 } from './TAVITypes';
 
@@ -466,9 +468,11 @@ export class TAVIGeometry {
     //   tan(β) = -(sin(α)*nx - cos(α)*ny) / nz
     // At the "optimal" α where |β| is minimized:
     //   α_opt = atan2(nx, -ny) (aligns the horizontal beam component with the normal's horizontal projection)
-    const laoRao = (Math.atan2(normal.x, -normal.y) * 180.0) / Math.PI;
+    // Guard the degenerate near-vertical normal (nx≈ny≈0): atan2(0,-0)=π would
+    // flip a nearly-horizontal annulus to LAO 180° instead of 0°.
+    const alphaRad = Math.hypot(normal.x, normal.y) > 1e-6 ? Math.atan2(normal.x, -normal.y) : 0;
+    const laoRao = (alphaRad * 180.0) / Math.PI;
     // Then compute β at α_opt:
-    const alphaRad = Math.atan2(normal.x, -normal.y);
     const horizProjection = Math.sin(alphaRad) * normal.x - Math.cos(alphaRad) * normal.y;
     const cranialCaudal = Math.abs(normal.z) > 0.001
       ? (Math.atan2(-horizProjection, normal.z) * 180.0) / Math.PI
@@ -704,77 +708,78 @@ export class TAVIGeometry {
   }
 
   /**
-   * Compute implantation plane angles for each cusp.
-   * Each cusp-specific angle is the C-arm orientation that centers that cusp
-   * in the projection while maintaining perpendicularity to the annulus plane.
+   * Convert a C-arm beam DIRECTION (LPS) into LAO/RAO + CRA/CAU angles.
+   *
+   * Beam model (matching fluoroAngleForPlaneNormal / computePerpendicularityCurve):
+   *   beam = (sin α·cos β, -cos α·cos β, sin β),  α = LAO(+)/RAO(-), β = CRA(+)/CAU(-)
+   * Inverting for a unit beam b:
+   *   sin β = b.z,  α = atan2(b.x, -b.y)
+   * A beam line is direction-agnostic, so the antiparallel beam projects identically.
+   * We pick the representation with |α| ≤ 90° (the physical C-arm half-space) by
+   * flipping the beam when its anterior/posterior component would force |α| > 90°.
    */
-  static computeCuspImplantationAngles(
+  static fluoroAngleForBeamDirection(beam: TAVIVector3D): TAVIFluoroAngleResult {
+    let b = this.vectorNormalize(beam);
+    if (this.vectorIsZero(b)) {
+      return {
+        laoRaoLabel: 'LAO', cranialCaudalLabel: 'CRANIAL',
+        laoRaoDegrees: 0, cranialCaudalDegrees: 0, planeNormal: b,
+      };
+    }
+    // cos α = -b.y / cos β; |α| ≤ 90° ⟺ cos α ≥ 0 ⟺ b.y ≤ 0. Flip otherwise.
+    if (b.y > 0) b = this.vectorScale(b, -1);
+
+    const bz = Math.max(-1, Math.min(1, b.z));
+    const cosBeta = Math.sqrt(Math.max(0, 1 - bz * bz));
+    // Guard a pure cranial/caudal beam (bx≈by≈0): atan2(0,-0)=π → spurious LAO 180°.
+    const laoRao = Math.hypot(b.x, b.y) > 1e-6 ? (Math.atan2(b.x, -b.y) * 180) / Math.PI : 0;
+    const cranialCaudal = (Math.atan2(bz, cosBeta) * 180) / Math.PI;
+
+    return {
+      laoRaoLabel: laoRao >= 0 ? 'LAO' : 'RAO',
+      cranialCaudalLabel: cranialCaudal >= 0 ? 'CRANIAL' : 'CAUDAL',
+      laoRaoDegrees: Math.abs(laoRao),
+      cranialCaudalDegrees: Math.abs(cranialCaudal),
+      planeNormal: b,
+    };
+  }
+
+  /**
+   * Cusp-overlap fluoroscopy views. For each pair of cusp nadirs, the beam that
+   * makes them overlap is parallel to the chord joining them. Projecting that
+   * chord into the annular plane keeps the beam ⊥ annulus normal, so every
+   * overlap view lies exactly ON the line of perpendicularity. The third cusp is
+   * splayed. Returns null if any nadir is missing.
+   */
+  static computeCuspOverlapViews(
     annulusNormal: TAVIVector3D,
-    annulusCentroid: TAVIVector3D,
     cuspLCC: TAVIVector3D,
     cuspNCC: TAVIVector3D,
     cuspRCC: TAVIVector3D
-  ): {
-    rccAnterior: TAVIFluoroAngleResult;
-    lccPosterior: TAVIFluoroAngleResult;
-    nccPosterior: TAVIFluoroAngleResult;
-    lvView: TAVIFluoroAngleResult;
-  } {
-    // Each implantation plane is defined by rotating the annulus normal
-    // toward the direction of the cusp from the centroid, creating a view
-    // where that cusp appears centered.
-    //
-    // The cusp direction in the annulus plane gives the "viewing preference"
-    // for that implantation angle.
+  ): TAVICuspOverlapViews | null {
+    const n = this.vectorNormalize(annulusNormal);
+    if (this.vectorIsZero(n)) return null;
 
-    const computeCuspAngle = (cusp: TAVIVector3D): TAVIFluoroAngleResult => {
-      // Direction from centroid to cusp, projected onto annulus plane
-      const toCusp = this.vectorSubtract(cusp, annulusCentroid);
-      const projected = this.vectorSubtract(
-        toCusp,
-        this.vectorScale(annulusNormal, this.vectorDot(toCusp, annulusNormal))
-      );
-      const projNorm = this.vectorNormalize(projected);
-
-      if (this.vectorIsZero(projNorm)) {
-        return this.fluoroAngleForPlaneNormal(annulusNormal);
-      }
-
-      // Rotate the annulus normal slightly toward this cusp direction
-      // to create the implantation plane view
-      const tiltAngle = 15 * Math.PI / 180; // ~15 degree tilt toward cusp
-      const tilted = this.vectorNormalize(
-        this.vectorAdd(
-          this.vectorScale(annulusNormal, Math.cos(tiltAngle)),
-          this.vectorScale(projNorm, Math.sin(tiltAngle))
-        )
-      );
-
-      return this.fluoroAngleForPlaneNormal(tilted);
+    const overlapView = (
+      a: TAVIVector3D,
+      b: TAVIVector3D,
+      overlapPair: ['L' | 'R' | 'N', 'L' | 'R' | 'N'],
+      isolatedCusp: 'L' | 'R' | 'N'
+    ): TAVICuspOverlapView | null => {
+      const chord = this.vectorSubtract(a, b);
+      // Remove the annulus-normal component so the beam lies exactly in the
+      // annular plane (overlap view sits on the perpendicularity curve).
+      const inPlane = this.vectorSubtract(chord, this.vectorScale(n, this.vectorDot(chord, n)));
+      if (this.vectorIsZero(this.vectorNormalize(inPlane))) return null;
+      return { angle: this.fluoroAngleForBeamDirection(inPlane), overlapPair, isolatedCusp };
     };
 
-    // RCC Anterior: view with RCC facing the operator
-    const rccAnterior = computeCuspAngle(cuspRCC);
+    const rlOverlap = overlapView(cuspRCC, cuspLCC, ['R', 'L'], 'N');
+    const rnOverlap = overlapView(cuspRCC, cuspNCC, ['R', 'N'], 'L');
+    const lnOverlap = overlapView(cuspLCC, cuspNCC, ['L', 'N'], 'R');
+    if (!rlOverlap || !rnOverlap || !lnOverlap) return null;
 
-    // LCC Posterior: view centered on LCC
-    const lccPosterior = computeCuspAngle(cuspLCC);
-
-    // NCC Posterior: view centered on NCC
-    const nccPosterior = computeCuspAngle(cuspNCC);
-
-    // LV View: standard coplanar view (no cusp tilt)
-    // Use the most RAO feasible caudal projection
-    const coplanar = this.fluoroAngleForPlaneNormal(annulusNormal);
-    const lvView: TAVIFluoroAngleResult = {
-      ...coplanar,
-      // Bias toward RAO/Caudal for LV view (avoid descending aorta)
-      laoRaoLabel: 'RAO',
-      laoRaoDegrees: Math.max(coplanar.laoRaoDegrees, 20),
-      cranialCaudalLabel: 'CAUDAL',
-      cranialCaudalDegrees: Math.max(coplanar.cranialCaudalDegrees, 30),
-    };
-
-    return { rccAnterior, lccPosterior, nccPosterior, lvView };
+    return { rlOverlap, rnOverlap, lnOverlap };
   }
 
   /** Compute a plane from three non-collinear points. Returns normal and centroid. */

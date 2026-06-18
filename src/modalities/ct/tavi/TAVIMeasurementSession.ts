@@ -5,6 +5,7 @@ import {
   TAVIGeometryResult,
   TAVICalciumResult,
   TAVIFluoroAngleResult,
+  TAVICuspOverlapViews,
   TAVIProjectionConfirmationResult,
   TAVISinusDiameterResult,
   SinusLabel,
@@ -559,18 +560,12 @@ export class TAVIMeasurementSession {
     return TAVIGeometry.computeLAOTable(planningAnnulus.planeNormal);
   }
 
-  /** Cusp-specific implantation plane angles */
-  public get implantationPlaneAngles(): {
-    rccAnterior: TAVIFluoroAngleResult;
-    lccPosterior: TAVIFluoroAngleResult;
-    nccPosterior: TAVIFluoroAngleResult;
-    lvView: TAVIFluoroAngleResult;
-  } | null {
+  /** Cusp-overlap fluoroscopy views (all on the line of perpendicularity). */
+  public get cuspOverlapViews(): TAVICuspOverlapViews | null {
     const planningAnnulus = this.activeAnnulusGeometry();
     if (!planningAnnulus || !this.cuspLCC || !this.cuspNCC || !this.cuspRCC) return null;
-    return TAVIGeometry.computeCuspImplantationAngles(
+    return TAVIGeometry.computeCuspOverlapViews(
       planningAnnulus.planeNormal,
-      planningAnnulus.centroid,
       this.cuspLCC,
       this.cuspNCC,
       this.cuspRCC
@@ -661,17 +656,16 @@ export class TAVIMeasurementSession {
     }
     lines.push('');
 
-    // Implantation angles
-    const angles = this.implantationPlaneAngles;
-    if (angles) {
-      lines.push('IMPLANTATION PLANE ANGLES');
+    // Cusp-overlap fluoroscopy views (on the line of perpendicularity)
+    const overlaps = this.cuspOverlapViews;
+    if (overlaps) {
+      lines.push('CUSP-OVERLAP VIEWS');
       lines.push('───────────────────────────────────────────');
       const fmtAngle = (a: TAVIFluoroAngleResult) =>
         `${a.laoRaoLabel} ${Math.abs(a.laoRaoDegrees).toFixed(0)}° / ${a.cranialCaudalLabel} ${Math.abs(a.cranialCaudalDegrees).toFixed(0)}°`;
-      lines.push(`RCC Anterior:     ${fmtAngle(angles.rccAnterior)}`);
-      lines.push(`LCC Posterior:    ${fmtAngle(angles.lccPosterior)}`);
-      lines.push(`NCC Posterior:    ${fmtAngle(angles.nccPosterior)}`);
-      lines.push(`LV View:          ${fmtAngle(angles.lvView)}`);
+      lines.push(`R/L overlap (NCC):  ${fmtAngle(overlaps.rlOverlap.angle)}`);
+      lines.push(`R/N overlap (LCC):  ${fmtAngle(overlaps.rnOverlap.angle)}`);
+      lines.push(`L/N overlap (RCC):  ${fmtAngle(overlaps.lnOverlap.angle)}`);
       lines.push('');
     }
 
@@ -807,14 +801,13 @@ export class TAVIMeasurementSession {
       rows.push([`${prefix} Area`, geom.areaMm2.toFixed(1), 'mm2']);
     }
 
-    const angles = this.implantationPlaneAngles;
-    if (angles) {
+    const overlaps = this.cuspOverlapViews;
+    if (overlaps) {
       const fmtAngle = (a: TAVIFluoroAngleResult) =>
         `${a.laoRaoLabel} ${Math.abs(a.laoRaoDegrees).toFixed(0)} / ${a.cranialCaudalLabel} ${Math.abs(a.cranialCaudalDegrees).toFixed(0)}`;
-      rows.push(['RCC Anterior Angle', fmtAngle(angles.rccAnterior), 'deg']);
-      rows.push(['LCC Posterior Angle', fmtAngle(angles.lccPosterior), 'deg']);
-      rows.push(['NCC Posterior Angle', fmtAngle(angles.nccPosterior), 'deg']);
-      rows.push(['LV View Angle', fmtAngle(angles.lvView), 'deg']);
+      rows.push(['R/L Overlap View (NCC)', fmtAngle(overlaps.rlOverlap.angle), 'deg']);
+      rows.push(['R/N Overlap View (LCC)', fmtAngle(overlaps.rnOverlap.angle), 'deg']);
+      rows.push(['L/N Overlap View (RCC)', fmtAngle(overlaps.lnOverlap.angle), 'deg']);
     }
 
     rows.push(['Planned Access', this.plannedAccess, '']);

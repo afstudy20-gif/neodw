@@ -89,6 +89,29 @@ export interface TAVIFluoroAngleResult {
   planeNormal: TAVIVector3D;
 }
 
+/**
+ * Cusp-overlap fluoroscopy views. Each view lies ON the line of perpendicularity
+ * (beam in the annular plane) and corresponds to a beam parallel to the chord
+ * joining two cusp nadirs, so those two cusps overlap and the third is splayed.
+ * Named by the overlapping pair; `isolatedCusp` is the splayed cusp.
+ */
+export interface TAVICuspOverlapView {
+  angle: TAVIFluoroAngleResult;
+  /** The two cusps that overlap in this projection. */
+  overlapPair: ['L' | 'R' | 'N', 'L' | 'R' | 'N'];
+  /** The cusp left splayed (isolated) in this projection. */
+  isolatedCusp: 'L' | 'R' | 'N';
+}
+
+export interface TAVICuspOverlapViews {
+  /** RCC + LCC overlap → NCC isolated (self-expanding "cusp-overlap view"). */
+  rlOverlap: TAVICuspOverlapView;
+  /** RCC + NCC overlap → LCC isolated. */
+  rnOverlap: TAVICuspOverlapView;
+  /** LCC + NCC overlap → RCC isolated. */
+  lnOverlap: TAVICuspOverlapView;
+}
+
 export interface TAVIProjectionConfirmationResult {
   confirmationNormal: TAVIVector3D;
   confirmationAngle: TAVIFluoroAngleResult;

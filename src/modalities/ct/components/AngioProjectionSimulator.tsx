@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import type { TAVIFluoroAngleResult } from '../tavi/TAVITypes';
+import type { TAVIFluoroAngleResult, TAVICuspOverlapViews } from '../tavi/TAVITypes';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
 
 interface AngioProjectionSimulatorProps {
@@ -11,13 +11,8 @@ interface AngioProjectionSimulatorProps {
   laoTable: { laoDeg: number; cranialCaudalDeg: number; label: string }[];
   /** Current coplanar fluoro angle */
   coplanarAngle?: TAVIFluoroAngleResult | null;
-  /** Cusp implantation angles */
-  implantationAngles?: {
-    rccAnterior: TAVIFluoroAngleResult;
-    lccPosterior: TAVIFluoroAngleResult;
-    nccPosterior: TAVIFluoroAngleResult;
-    lvView: TAVIFluoroAngleResult;
-  } | null;
+  /** Cusp-overlap views (all on the line of perpendicularity) */
+  overlapViews?: TAVICuspOverlapViews | null;
   /** Called when user selects an angle */
   onAngleSelected?: (laoRaoDeg: number, cranCaudDeg: number) => void;
   /** Width */
@@ -41,7 +36,7 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
   raoTable,
   laoTable,
   coplanarAngle,
-  implantationAngles,
+  overlapViews,
   onAngleSelected,
   width: propWidth,
   height: propHeight = 340,
@@ -194,12 +189,20 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
       ctx.stroke();
     }
 
-    // ── RAO projection markers ──
+    // ── Marker labels with greedy collision avoidance ──
+    // Dots/markers are drawn immediately; their text labels are queued and
+    // placed in a single prioritized pass so dense ticks never overprint.
+    const placedBoxes: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    type LabelReq = { text: string; ax: number; ay: number; color: string; bold: boolean; priority: number };
+    const labelReqs: LabelReq[] = [];
+    const inPlot = (x: number, y: number) =>
+      x >= PADDING.left && x <= PADDING.left + plotW && y >= PADDING.top && y <= PADDING.top + plotH;
+
+    // ── RAO projection ticks (origin de-duplicated → "AP") ──
     for (const entry of raoTable) {
       const x = degToX(-entry.raoDeg);
       const y = degToY(entry.cranialCaudalDeg);
-      if (x < PADDING.left || x > PADDING.left + plotW) continue;
-      if (y < PADDING.top || y > PADDING.top + plotH) continue;
+      if (!inPlot(x, y)) continue;
       ctx.fillStyle = '#58a6ff';
       ctx.beginPath();
       ctx.arc(x, y, 4, 0, Math.PI * 2);
@@ -208,19 +211,18 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
       ctx.beginPath();
       ctx.arc(x, y, 2, 0, Math.PI * 2);
       ctx.fill();
-      // Label
-      ctx.fillStyle = '#58a6ff';
-      ctx.font = '9px -apple-system, sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`R${entry.raoDeg}`, x + 7, y + 3);
+      labelReqs.push({
+        text: entry.raoDeg === 0 ? 'AP' : `R${entry.raoDeg}`,
+        ax: x, ay: y, color: '#58a6ff', bold: false, priority: entry.raoDeg === 0 ? 2 : 1,
+      });
     }
 
-    // ── LAO projection markers ──
+    // ── LAO projection ticks (skip 0 — origin already drawn as AP) ──
     for (const entry of laoTable) {
+      if (entry.laoDeg === 0) continue;
       const x = degToX(entry.laoDeg);
       const y = degToY(entry.cranialCaudalDeg);
-      if (x < PADDING.left || x > PADDING.left + plotW) continue;
-      if (y < PADDING.top || y > PADDING.top + plotH) continue;
+      if (!inPlot(x, y)) continue;
       ctx.fillStyle = '#bc8cff';
       ctx.beginPath();
       ctx.arc(x, y, 4, 0, Math.PI * 2);
@@ -229,40 +231,77 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
       ctx.beginPath();
       ctx.arc(x, y, 2, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#bc8cff';
-      ctx.font = '9px -apple-system, sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`L${entry.laoDeg}`, x + 7, y + 3);
+      labelReqs.push({ text: `L${entry.laoDeg}`, ax: x, ay: y, color: '#bc8cff', bold: false, priority: 1 });
     }
 
-    // ── Cusp implantation angle markers ──
-    if (implantationAngles) {
-      const markers: { angle: TAVIFluoroAngleResult; label: string; color: string }[] = [
-        { angle: implantationAngles.rccAnterior, label: 'RC', color: '#3fb950' },
-        { angle: implantationAngles.lccPosterior, label: 'LC', color: '#f85149' },
-        { angle: implantationAngles.nccPosterior, label: 'NC', color: '#d29922' },
+    // ── Cusp-overlap views (all sit ON the perpendicularity curve) ──
+    // Labelled by the overlapping pair; R/L overlap (isolates NCC) is the
+    // self-expanding "cusp-overlap" working view, so it is emphasised.
+    if (overlapViews) {
+      const cuspColor: Record<'L' | 'R' | 'N', string> = { R: '#3fb950', L: '#f85149', N: '#d29922' };
+      const markers = [
+        { v: overlapViews.rlOverlap, key: 'rl' as const },
+        { v: overlapViews.rnOverlap, key: 'rn' as const },
+        { v: overlapViews.lnOverlap, key: 'ln' as const },
       ];
-      for (const m of markers) {
-        const p = fluoToPlot(m.angle);
+      for (const { v } of markers) {
+        const p = fluoToPlot(v.angle);
         const x = degToX(p.x);
         const y = degToY(p.y);
-        if (x < PADDING.left || x > PADDING.left + plotW) continue;
-        if (y < PADDING.top || y > PADDING.top + plotH) continue;
-        // Diamond shape
-        ctx.fillStyle = m.color;
+        if (!inPlot(x, y)) continue;
+        const isKey = v.isolatedCusp === 'N'; // R/L overlap
+        const color = cuspColor[v.isolatedCusp];
+        if (isKey) {
+          ctx.strokeStyle = 'rgba(63, 185, 80, 0.25)';
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.arc(x, y, 7, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(x, y - 5);
-        ctx.lineTo(x + 4, y);
-        ctx.lineTo(x, y + 5);
-        ctx.lineTo(x - 4, y);
-        ctx.closePath();
+        ctx.arc(x, y, isKey ? 6 : 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = m.color;
-        ctx.font = 'bold 8px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(m.label, x, y - 8);
+        labelReqs.push({
+          text: `${v.overlapPair[0]}/${v.overlapPair[1]}`,
+          ax: x, ay: y, color, bold: isKey, priority: isKey ? 4 : 3,
+        });
       }
     }
+
+    // ── Place queued labels (highest priority first; drop if no clear slot) ──
+    const placeLabel = (req: LabelReq) => {
+      ctx.font = `${req.bold ? 'bold ' : ''}9px -apple-system, sans-serif`;
+      const w = ctx.measureText(req.text).width;
+      const h = 10;
+      const candidates: [number, number][] = [
+        [req.ax + 8, req.ay + 3],
+        [req.ax - 8 - w, req.ay + 3],
+        [req.ax - w / 2, req.ay - 9],
+        [req.ax - w / 2, req.ay + 15],
+      ];
+      for (const [lx, ly] of candidates) {
+        const box = { x0: lx - 1, y0: ly - h, x1: lx + w + 1, y1: ly + 2 };
+        if (box.x0 < PADDING.left || box.x1 > PADDING.left + plotW) continue;
+        if (box.y0 < PADDING.top || box.y1 > PADDING.top + plotH) continue;
+        const hit = placedBoxes.some(
+          (b) => !(box.x1 < b.x0 || box.x0 > b.x1 || box.y1 < b.y0 || box.y0 > b.y1)
+        );
+        if (hit) continue;
+        placedBoxes.push(box);
+        ctx.fillStyle = req.color;
+        ctx.textAlign = 'left';
+        ctx.fillText(req.text, lx, ly);
+        return;
+      }
+    };
+    labelReqs.sort((a, b) => b.priority - a.priority);
+    for (const req of labelReqs) placeLabel(req);
 
     // ── Coplanar angle marker (main blue circle) ──
     if (coplanarAngle) {
@@ -335,7 +374,7 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
       ctx.fillText(`${cranCaudLabel}: ${Math.abs(activeAngle.y).toFixed(0)}°`, width - PADDING.right, 36);
     }
 
-  }, [curve, raoTable, laoTable, coplanarAngle, implantationAngles, selectedAngle, hoverAngle, width, height, degToX, degToY, plotW, plotH]);
+  }, [curve, raoTable, laoTable, coplanarAngle, overlapViews, selectedAngle, hoverAngle, width, height, degToX, degToY, plotW, plotH]);
 
   useEffect(() => {
     draw();
@@ -403,11 +442,11 @@ export const AngioProjectionSimulator: React.FC<AngioProjectionSimulatorProps> =
         <span className="angio-legend-item"><span className="angio-legend-swatch" style={{ background: '#d29922' }} /> Perpendicularity</span>
         <span className="angio-legend-item"><span className="angio-legend-swatch" style={{ background: '#58a6ff' }} /> RAO</span>
         <span className="angio-legend-item"><span className="angio-legend-swatch" style={{ background: '#bc8cff' }} /> LAO</span>
-        {implantationAngles && (
+        {overlapViews && (
           <>
-            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-diamond" style={{ background: '#3fb950' }} /> RC</span>
-            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-diamond" style={{ background: '#f85149' }} /> LC</span>
-            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-diamond" style={{ background: '#d29922' }} /> NC</span>
+            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-ring" style={{ borderColor: '#3fb950' }} /> R/L overlap (NCC)</span>
+            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-ring" style={{ borderColor: '#f85149' }} /> R/N overlap (LCC)</span>
+            <span className="angio-legend-item"><span className="angio-legend-swatch angio-legend-ring" style={{ borderColor: '#d29922' }} /> L/N overlap (RCC)</span>
           </>
         )}
       </div>
