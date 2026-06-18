@@ -440,132 +440,114 @@ export function autoTraceAnnulusContrastEdgeAtPlane(
   }
   if (centralSamples.length < 16) return null;
 
-  const lumenHU = percentile(centralSamples.filter(v => v < 650), 0.82);
+  const lumenHU = percentile(centralSamples.filter(v => v < 650), 0.85);
   const tissueHU = percentile(centralSamples, 0.18);
   if (!Number.isFinite(lumenHU) || lumenHU < 55) return null;
 
-  const boundaryThreshold = Math.max(45, Math.min(lumenHU - 35, tissueHU + (lumenHU - tissueHU) * 0.55));
-  const radii: number[] = [];
-  const points: TAVIVector3D[] = [];
+  // ── Pass 1: build every radial HU profile and estimate the perivascular
+  // background from the OUTER third of each ray. A globally-robust background
+  // (rather than a central percentile, which at the annular plane is itself
+  // mostly lumen) keeps the contrast level stable regardless of whether the
+  // plane centre landed on blood pool or leaflet tissue. ──
+  const profiles: { r: number; hu: number }[][] = [];
+  const outerSamples: number[] = [];
 
   for (let i = 0; i < radialCount; i++) {
     const angle = (i / radialCount) * Math.PI * 2;
     const dirU = Math.cos(angle);
     const dirV = Math.sin(angle);
-    const profile: { r: number; hu: number }[] = [];
 
+    const raw: { r: number; hu: number }[] = [];
     for (let r = radialStepMm; r <= maxRadiusMm; r += radialStepMm) {
       const hu = sampleAt(dirU * r, dirV * r);
-      profile.push({ r, hu: Number.isFinite(hu) ? hu : -1000 });
+      raw.push({ r, hu: Number.isFinite(hu) ? hu : -1000 });
     }
-    if (profile.length < 8) continue;
-
-    const smooth = profile.map((p, idx) => {
-      const prev = profile[Math.max(0, idx - 1)].hu;
-      const next = profile[Math.min(profile.length - 1, idx + 1)].hu;
+    const smooth = raw.map((p, idx) => {
+      const prev = raw[Math.max(0, idx - 1)].hu;
+      const next = raw[Math.min(raw.length - 1, idx + 1)].hu;
       return { r: p.r, hu: (prev + p.hu * 2 + next) / 4 };
     });
+    profiles.push(smooth);
 
-    let peakIdx = -1;
-    let peakHU = -Infinity;
-    for (let j = 0; j < smooth.length; j++) {
-      const r = smooth[j].r;
-      const hu = smooth[j].hu;
-      if (r < 2 || r > Math.min(maxRadiusMm - 2, 16)) continue;
-      if (hu > peakHU && hu < 750) {
-        peakHU = hu;
-        peakIdx = j;
-      }
+    const outerStart = Math.floor(smooth.length * 0.7);
+    for (let j = outerStart; j < smooth.length; j++) {
+      if (smooth[j].hu > -400) outerSamples.push(smooth[j].hu);
     }
-    if (peakIdx < 0 || peakHU < boundaryThreshold + 15) continue;
-
-    let edgeR: number | null = null;
-    let bestDropScore = -Infinity;
-    let bestDropR: number | null = null;
-    const startIdx = Math.max(peakIdx, Math.floor(minRadiusMm / radialStepMm));
-
-    // Prefer the OUTERMOST bright-blood -> lower-HU transition. Leaflet tissue
-    // and calcium can create a strong inner edge; scanning outward from the
-    // brightest peak stops too early and leaves the annulus contour inside the
-    // visible lumen boundary. Starting from the outside catches the actual
-    // contrast-to-background boundary when it is present.
-    for (let j = smooth.length - 4; j >= startIdx; j--) {
-      const r = smooth[j].r;
-      if (r < minRadiusMm || r > maxRadiusMm) continue;
-      const before = (smooth[Math.max(0, j - 2)].hu + smooth[Math.max(0, j - 1)].hu + smooth[j].hu) / 3;
-      const after = (smooth[j + 1].hu + smooth[j + 2].hu + smooth[j + 3].hu) / 3;
-      const drop = before - after;
-      if (before >= boundaryThreshold && after < boundaryThreshold && drop > 8) {
-        edgeR = r + radialStepMm * 0.5;
-        break;
-      }
-      if (drop > 0 && before > boundaryThreshold) {
-        // A slightly smaller drop farther out is usually preferable to a very
-        // sharp leaflet/coaptation edge closer to the center.
-        const score = drop + r * 1.5;
-        if (score > bestDropScore) {
-          bestDropScore = score;
-          bestDropR = r + radialStepMm * 0.5;
-        }
-      }
-    }
-
-    if (edgeR == null && bestDropR != null && bestDropScore > 25) edgeR = bestDropR;
-    if (edgeR == null) {
-      // Last sustained bright sample is the most conservative outer boundary
-      // fallback when the outside remains partly enhanced/noisy.
-      for (let j = smooth.length - 1; j >= startIdx; j--) {
-        const prev = smooth[Math.max(0, j - 1)].hu;
-        const hu = smooth[j].hu;
-        if (smooth[j].r >= minRadiusMm && Math.max(prev, hu) >= boundaryThreshold) {
-          edgeR = smooth[j].r;
-          break;
-        }
-      }
-    }
-
-    if (edgeR == null) {
-      // Final fallback: keep the legacy inward scan, but only if there is no
-      // outer-edge evidence. This preserves behavior on low-contrast studies.
-      let bestDrop = 0;
-      for (let j = startIdx; j < smooth.length - 2; j++) {
-        const r = smooth[j].r;
-        if (r < minRadiusMm || r > maxRadiusMm) continue;
-        const before = (smooth[Math.max(0, j - 2)].hu + smooth[Math.max(0, j - 1)].hu + smooth[j].hu) / 3;
-        const after = (smooth[j + 1].hu + smooth[j + 2].hu) / 2;
-        const drop = before - after;
-        if (before >= boundaryThreshold && after < boundaryThreshold && drop > 10) {
-          edgeR = r + radialStepMm * 0.5;
-          break;
-        }
-        if (drop > bestDrop && before > boundaryThreshold) {
-          bestDrop = drop;
-          bestDropR = r + radialStepMm * 0.5;
-        }
-      }
-      if (edgeR == null && bestDropR != null && bestDrop > 25) edgeR = bestDropR;
-    }
-
-    if (edgeR == null) {
-      for (let j = smooth.length - 1; j >= 0; j--) {
-        if (smooth[j].r >= minRadiusMm && smooth[j].hu >= boundaryThreshold) {
-          edgeR = smooth[j].r;
-          break;
-        }
-      }
-    }
-    if (edgeR == null) continue;
-
-    edgeR = Math.max(minRadiusMm, Math.min(maxRadiusMm, edgeR));
-    radii.push(edgeR);
-    points.push({
-      x: planeOrigin.x + u.x * dirU * edgeR + v.x * dirV * edgeR,
-      y: planeOrigin.y + u.y * dirU * edgeR + v.y * dirV * edgeR,
-      z: planeOrigin.z + u.z * dirU * edgeR + v.z * dirV * edgeR,
-    });
   }
 
-  if (points.length < Math.max(24, radialCount * 0.45)) return null;
+  const backgroundHU =
+    outerSamples.length >= 8 ? percentile(outerSamples, 0.4) : tissueHU;
+  // Full-width-half-maximum contrast level: midpoint of background and lumen,
+  // kept strictly between the two so neither a low-contrast lumen (the cap must
+  // not fall below background) nor a noisy background can collapse it. Earlier
+  // a `min(lumen-40, …)` cap could drop `half` below its own floor when the
+  // lumen was < ~100 HU (delayed-phase scans), grossly over-sizing the contour.
+  const midpoint = backgroundHU + (lumenHU - backgroundHU) * 0.5;
+  const half = Math.max(backgroundHU + 20, Math.min(lumenHU - 20, midpoint));
+
+  // ── Pass 2: per ray, take the first FWHM down-crossing — scanning OUTWARD —
+  // that stays below the contrast level for a sustained span. The sustain span
+  // bridges internal leaflet/calcific gaps (which return to lumen brightness
+  // just beyond the notch) while still stopping at the true blood-pool exit to
+  // background; this avoids both the undershoot of a naive first-crossing and
+  // the overshoot of an "outermost edge" preference. Sub-step interpolation
+  // places the edge exactly on the half-maximum, so the contour tracks
+  // contrast. A handful of rays that bridge into a neighbouring structure are
+  // bounded afterwards by the median clip + outer-spike suppression. ──
+  const minIdx = Math.max(1, Math.floor(minRadiusMm / radialStepMm));
+  const sustainSteps = Math.max(2, Math.round(2.25 / radialStepMm));
+  // One slot per ray (NaN = ray found no contrast edge). The array MUST stay
+  // angularly uniform: the circular smoothing + index-based reconstruction below
+  // assume evenly spaced angles, so failed rays are interpolated rather than
+  // dropped (dropping them remaps the surviving angles and distorts the shape).
+  const rayRadii: number[] = new Array(radialCount).fill(NaN);
+  let validCount = 0;
+
+  for (let i = 0; i < radialCount; i++) {
+    const smooth = profiles[i];
+    if (smooth.length < 8) continue;
+
+    // The down-crossing requires smooth[j] >= half, so a ray that never reaches
+    // contrast yields no crossing and is skipped — no separate lumen gate is
+    // needed (and gating on the inner core would wrongly reject annular lumina
+    // whose centre sits on leaflet tissue, the very case this tracer targets).
+    let edgeR: number | null = null;
+    for (let j = minIdx; j < smooth.length - 1; j++) {
+      if (smooth[j].hu < half || smooth[j + 1].hu >= half) continue;
+      // Confirm the drop is sustained for ~2.25mm so we do not stop on a notch.
+      let sustained = true;
+      for (let k = j + 1; k <= Math.min(smooth.length - 1, j + sustainSteps); k++) {
+        if (smooth[k].hu >= half) {
+          sustained = false;
+          break;
+        }
+      }
+      if (!sustained) continue;
+      const a = smooth[j].hu;
+      const b = smooth[j + 1].hu;
+      const t = (a - half) / Math.max(1e-3, a - b);
+      edgeR = smooth[j].r + t * radialStepMm;
+      break;
+    }
+    if (edgeR == null) continue;
+    rayRadii[i] = Math.max(minRadiusMm, Math.min(maxRadiusMm, edgeR));
+    validCount++;
+  }
+
+  if (validCount < Math.max(24, radialCount * 0.45)) return null;
+
+  // Fill failed rays by circular linear interpolation between nearest neighbours
+  // so every angular bin has a radius before smoothing/reconstruction.
+  const radii = rayRadii.slice();
+  for (let i = 0; i < radialCount; i++) {
+    if (!Number.isNaN(rayRadii[i])) continue;
+    let lo = -1, hi = -1, ld = 0, hd = 0;
+    for (let d = 1; d < radialCount; d++) { const idx = (i - d + radialCount) % radialCount; if (!Number.isNaN(rayRadii[idx])) { lo = idx; ld = d; break; } }
+    for (let d = 1; d < radialCount; d++) { const idx = (i + d) % radialCount; if (!Number.isNaN(rayRadii[idx])) { hi = idx; hd = d; break; } }
+    if (lo >= 0 && hi >= 0) radii[i] = rayRadii[lo] + (rayRadii[hi] - rayRadii[lo]) * (ld / (ld + hd));
+    else if (lo >= 0) radii[i] = rayRadii[lo];
+    else if (hi >= 0) radii[i] = rayRadii[hi];
+  }
 
   const medR = median(radii);
   if (!Number.isFinite(medR)) return null;
