@@ -1306,13 +1306,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   useEffect(() => {
     if (workflowPhase !== 'axis-validation') return;
     if (!ncMarkingActive) return;
-    if (ncGuidePointsRef.current.length >= 3) return;
+    if (ncGuidePointsRef.current.length >= 5) return;
 
     const engine = getEngine();
     if (!engine) return;
 
     const interval = setInterval(() => {
-      if (ncGuidePointsRef.current.length >= 3) return;
+      if (ncGuidePointsRef.current.length >= 5) return;
 
       for (const vpId of ['axial', 'coronal', 'sagittal']) {
         const vp = engine.getViewport(vpId);
@@ -1326,12 +1326,12 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
           clearProbeAnnotations();
 
-          const willComplete = ncGuidePointsRef.current.length + 1 >= 3;
+          const willComplete = ncGuidePointsRef.current.length + 1 >= 5;
           setNcGuidePoints(prev => {
-            if (prev.length >= 3) return prev;
+            if (prev.length >= 5) return prev;
             return [...prev, wp];
           });
-          // Auto-close the marking session once the 3rd point lands so the
+          // Auto-close the marking session once the 5th point lands so the
           // next probe click flows to whichever UI the user picks next.
           if (willComplete) {
             setNcMarkingActive(false);
@@ -2666,11 +2666,11 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
                         {/* ── 2. NC Cusp Guide ── */}
                         <Section num="2" title="NC Cusp Region">
-                          {ncGuidePoints.length < 3 ? (
+                          {ncGuidePoints.length < 5 ? (
                             <div>
                               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
                                 {ncMarkingActive
-                                  ? `Click the 3 corners of the NC region in the axial view. (${ncGuidePoints.length}/3)`
+                                  ? `Click 5 points along the NC region outline in the axial view. (${ncGuidePoints.length}/5)`
                                   : 'Mark the NC region. Starting this step does not affect other measurements.'}
                               </div>
                               <button onClick={() => {
@@ -2684,7 +2684,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                                 className="tavi-button tavi-button-capture"
                                 style={{ width: '100%', fontSize: '0.72rem', padding: '5px 8px' }}>
                                 {ncMarkingActive
-                                  ? (ncGuidePoints.length === 0 ? 'Marking… click axial' : `Next Point (${ncGuidePoints.length}/3)`)
+                                  ? (ncGuidePoints.length === 0 ? 'Marking… click axial' : `Next Point (${ncGuidePoints.length}/5)`)
                                   : 'Start Marking NC'}
                               </button>
                               {ncMarkingActive && (

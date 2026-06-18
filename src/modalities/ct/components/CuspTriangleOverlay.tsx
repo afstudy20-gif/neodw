@@ -75,12 +75,13 @@ export const CuspTriangleOverlay: React.FC<CuspTriangleOverlayProps> = ({
       ctx.setLineDash([]);
     }
 
-    // 3 points: filled triangle (faint)
+    // ≥3 points: closed polygon (triangle through pentagon). Each click adds a
+    // vertex; the polygon is always closed back to the first vertex so the user
+    // gets continuous outline feedback while marking.
     if (canvasPts.length >= 3) {
       ctx.beginPath();
       ctx.moveTo(canvasPts[0][0], canvasPts[0][1]);
-      ctx.lineTo(canvasPts[1][0], canvasPts[1][1]);
-      ctx.lineTo(canvasPts[2][0], canvasPts[2][1]);
+      for (let i = 1; i < canvasPts.length; i++) ctx.lineTo(canvasPts[i][0], canvasPts[i][1]);
       ctx.closePath();
       ctx.fillStyle = 'rgba(234, 179, 8, 0.08)';
       ctx.fill();
@@ -90,9 +91,11 @@ export const CuspTriangleOverlay: React.FC<CuspTriangleOverlayProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // "NC" label at centroid (subdued)
-      const cx = (canvasPts[0][0] + canvasPts[1][0] + canvasPts[2][0]) / 3;
-      const cy = (canvasPts[0][1] + canvasPts[1][1] + canvasPts[2][1]) / 3;
+      // "NC" label at the polygon centroid (subdued)
+      let cx = 0, cy = 0;
+      for (const [px, py] of canvasPts) { cx += px; cy += py; }
+      cx /= canvasPts.length;
+      cy /= canvasPts.length;
       ctx.font = '11px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
