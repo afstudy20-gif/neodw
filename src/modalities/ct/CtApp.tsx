@@ -32,6 +32,7 @@ import { LeftAtriumPanel, type LeftAtriumPanelHandle } from './components/LeftAt
 import { AortaPanel, type AortaPanelHandle } from './components/AortaPanel';
 import { LAAPanel, type LAAPanelHandle } from './components/LAAPanel';
 import { LVADASPanel, type LVADASPanelHandle } from './components/LVADASPanel';
+import { VascularPanel, type VascularPanelHandle } from './components/VascularPanel';
 import { SecondaryCaptureViewer } from './components/SecondaryCaptureViewer';
 
 const RENDERING_ENGINE_ID = 'myRenderingEngine';
@@ -39,14 +40,14 @@ const VOLUME_ID = 'cornerstoneStreamingImageVolume:myVolume';
 const VIEWPORT_IDS = ['axial', 'sagittal', 'coronal', 'volume3d'];
 const MPR_VIEWPORT_IDS = ['axial', 'sagittal', 'coronal'];
 
-type RightPanel = null | '3d' | 'tavi' | 'hand-mr' | 'la' | 'aorta' | 'laa' | 'lv-adas';
+type RightPanel = null | '3d' | 'tavi' | 'hand-mr' | 'la' | 'aorta' | 'vascular' | 'laa' | 'lv-adas';
 
 interface VolumeResult {
   name: string;
   volumeCm3: number;
 }
 
-export type CtInitialPanel = null | '3d' | 'tavi' | 'hand-mr' | 'la' | 'aorta' | 'laa' | 'lv-adas';
+export type CtInitialPanel = null | '3d' | 'tavi' | 'hand-mr' | 'la' | 'aorta' | 'vascular' | 'laa' | 'lv-adas';
 
 interface CtAppProps {
   onBack?: () => void;
@@ -74,7 +75,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const [loadingProgress, setLoadingProgress] = useState('');
   const [showMetadata, setShowMetadata] = useState(false);
   const [showSegmentation, setShowSegmentation] = useState(false);
-  const [rightPanel, setRightPanel] = useState<RightPanel>(initialPanel ?? null);
+  // 'aorta' is folded into the combined Vascular panel (Aort subtab).
+  const [rightPanel, setRightPanel] = useState<RightPanel>(initialPanel === 'aorta' ? 'vascular' : (initialPanel ?? null));
   const [reportExpanded, setReportExpanded] = useState(false);
   const [volumeResults, setVolumeResults] = useState<VolumeResult[]>([]);
   const [viewportMode, setViewportMode] = useState<ViewportMode>('standard');
@@ -90,6 +92,9 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const laFileInputRef = useRef<HTMLInputElement>(null);
   const [pendingLAAction, setPendingLAAction] = useState<null | 'save' | { load: File }>(null);
   const aortaPanelRef = useRef<AortaPanelHandle>(null);
+  const vascularPanelRef = useRef<VascularPanelHandle>(null);
+  // Combined Vascular panel subtab: 'aort' = aorta segmentation/3D, 'periph' = vascular workflow.
+  const [vascularSubtab, setVascularSubtab] = useState<'aort' | 'periph'>('aort');
   const aortaFileInputRef = useRef<HTMLInputElement>(null);
   const [pendingAortaAction, setPendingAortaAction] = useState<null | 'save' | { load: File }>(null);
   const laaPanelRef = useRef<LAAPanelHandle>(null);
@@ -153,7 +158,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   // LA / Aorta panels need the bottom-right 3D cell visible for the mesh overlay
   // (portal into #viewport-3d). Un-hide while either is active; restore on close.
   useEffect(() => {
-    if (rightPanel === 'la' || rightPanel === 'aorta' || rightPanel === 'laa' || rightPanel === 'lv-adas') {
+    if (rightPanel === 'la' || rightPanel === 'aorta' || rightPanel === 'vascular' || rightPanel === 'laa' || rightPanel === 'lv-adas') {
       setHide3dPanel(false);
       const t = setTimeout(resizeViewports, 60);
       return () => clearTimeout(t);
@@ -183,7 +188,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   // Pending Aorta save/load
   useEffect(() => {
     if (!pendingAortaAction) return;
-    if (rightPanel !== 'aorta') return;
+    if (rightPanel !== 'vascular' || vascularSubtab !== 'aort') return;
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
@@ -195,7 +200,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     };
     requestAnimationFrame(tick);
     return () => { cancelled = true; };
-  }, [rightPanel, pendingAortaAction]);
+  }, [rightPanel, vascularSubtab, pendingAortaAction]);
 
   // Pending LAA save/load
   useEffect(() => {
@@ -761,7 +766,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     aortaPanelRef.current.saveSession();
                   } else {
                     setPendingAortaAction('save');
-                    setRightPanel('aorta');
+                    setVascularSubtab('aort');
+                    setRightPanel('vascular');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
                   }
@@ -787,7 +793,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     void aortaPanelRef.current.loadSessionFile(f);
                   } else {
                     setPendingAortaAction({ load: f });
-                    setRightPanel('aorta');
+                    setVascularSubtab('aort');
+                    setRightPanel('vascular');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
                   }
@@ -925,17 +932,17 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                   return next;
                 });
               }}>LA 3D</button>
-              <button className={`toolbar-btn ${rightPanel === 'aorta' ? 'active' : ''}`} onClick={() => {
+              <button className={`toolbar-btn ${rightPanel === 'vascular' ? 'active' : ''}`} onClick={() => {
                 setRightPanel((prev) => {
-                  const next = prev === 'aorta' ? null : 'aorta';
-                  if (next === 'aorta' && viewportMode !== 'standard') {
+                  const next = prev === 'vascular' ? null : 'vascular';
+                  if (next === 'vascular' && viewportMode !== 'standard') {
                     setViewportMode('standard');
                     exitDoubleObliqueMode(RENDERING_ENGINE_ID);
                   }
                   resizeViewports();
                   return next;
                 });
-              }}>Aorta 3D</button>
+              }}>Vascular</button>
               <button className={`toolbar-btn ${rightPanel === 'laa' ? 'active' : ''}`} onClick={() => {
                 setRightPanel((prev) => {
                   const next = prev === 'laa' ? null : 'laa';
@@ -977,7 +984,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             <SeriesPanel seriesList={seriesList} activeSeriesUID={activeSeries?.seriesInstanceUID || ''} onSelectSeries={loadSeries} onOpen2DViewer={open2DViewer} isLoading={isLoading} />
           )}
 
-          <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0, visibility: rightPanel === 'tavi' && reportExpanded ? 'hidden' : 'visible' }}>
             <ViewportGrid hide3d={hide3dPanel && viewportMode === 'standard'} mode={viewportMode} />
 
             {/* 3D mode: overlay controls on bottom-left of viewport */}
@@ -1072,20 +1079,36 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
             </div>
           )}
 
-          {rightPanel === 'aorta' && (
-            <div className="side-panel" style={{ width: '360px' }}>
+          {rightPanel === 'vascular' && (
+            <div className="side-panel" style={{ width: '390px' }}>
               <div className="side-panel-tabs">
-                <button className="side-panel-tab active">Aorta 3D</button>
+                <button className={`side-panel-tab ${vascularSubtab === 'aort' ? 'active' : ''}`}
+                  onClick={() => { setVascularSubtab('aort'); resizeViewports(); }}>Aort</button>
+                <button className={`side-panel-tab ${vascularSubtab === 'periph' ? 'active' : ''}`}
+                  onClick={() => { setVascularSubtab('periph'); resizeViewports(); }}>Periph</button>
+                {vascularSubtab === 'periph' && (
+                  <button className="side-panel-reset" onClick={() => vascularPanelRef.current?.resetAll()} title="Reset vascular measurements">Reset</button>
+                )}
                 <button className="side-panel-close" onClick={() => { setRightPanel(null); resizeViewports(); }}>×</button>
               </div>
               <div className="side-panel-body" style={{ padding: 0 }}>
-                <AortaPanel
-                  ref={aortaPanelRef}
-                  renderingEngineId={RENDERING_ENGINE_ID}
-                  volumeId={VOLUME_ID}
-                  patientName={activeSeries?.patientName}
-                  studyDate={activeSeries?.studyDate}
-                />
+                {vascularSubtab === 'aort' ? (
+                  <AortaPanel
+                    ref={aortaPanelRef}
+                    renderingEngineId={RENDERING_ENGINE_ID}
+                    volumeId={VOLUME_ID}
+                    patientName={activeSeries?.patientName}
+                    studyDate={activeSeries?.studyDate}
+                  />
+                ) : (
+                  <VascularPanel
+                    ref={vascularPanelRef}
+                    renderingEngineId={RENDERING_ENGINE_ID}
+                    volumeId={VOLUME_ID}
+                    patientName={activeSeries?.patientName}
+                    studyDate={activeSeries?.studyDate}
+                  />
+                )}
               </div>
             </div>
           )}

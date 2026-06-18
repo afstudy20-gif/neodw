@@ -130,6 +130,15 @@ const MODES: ModeDef[] = [
     tags: ['Centerline', 'Ø by segment', 'Sinotubular', 'Aneurysm', 'Tortuosity', 'Arch type'],
   },
   {
+    route: { kind: 'ct', panel: 'vascular', title: 'mod.vascular' },
+    group: 'cross',
+    name: 'mod.vascular',
+    desc: 'mod.vascular.desc',
+    icon: <IcoActivity/>,
+    key: 'vascular',
+    tags: ['EVAR', 'Centerline', 'Neck Ø', 'Trajectory', 'Fenestration', 'Iliac'],
+  },
+  {
     route: { kind: 'ct', panel: 'lv-adas', title: 'mod.lvadas' },
     group: 'cross',
     name: 'mod.lvadas',
