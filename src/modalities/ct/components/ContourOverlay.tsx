@@ -476,7 +476,10 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
       const [cx, cy] = eventToCanvas(e);
 
       if (dragStateRef.current?.dragging) {
-        const worldPtRaw = vp.canvasToWorld([cx, cy] as cornerstone.Types.Point2);
+        // Re-fetch the live viewport — the closed-over `vp` is stale if the
+        // engine recreated viewports (e.g. after loadSeries).
+        const liveVp = getViewport() ?? vp;
+        const worldPtRaw = liveVp.canvasToWorld([cx, cy] as cornerstone.Types.Point2);
         if (worldPtRaw) {
           const rawPt = { x: worldPtRaw[0], y: worldPtRaw[1], z: worldPtRaw[2] };
           const centroid = geometryRef.current.centroid;
@@ -535,8 +538,8 @@ export const ContourOverlay: React.FC<ContourOverlayProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderingEngineId, viewportId]);
 
-  // Redraw when data changes
-  useEffect(() => { redraw(); });
+  // Redraw when data changes (redraw is a useCallback keyed on its inputs).
+  useEffect(() => { redraw(); }, [redraw]);
 
   return null;
 };
