@@ -1703,6 +1703,38 @@ button:focus:not(:focus-visible) {
   color: var(--text-primary);
 }
 
+/* ── Vascular accordion: each step's content under its own heading ── */
+.vascular-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vascular-accordion-header {
+  font-weight: 500;
+}
+
+.vascular-accordion-caret {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.vascular-accordion-body {
+  margin: 2px 0 6px 11px;
+  padding-left: 11px;
+  border-left: 2px solid var(--accent);
+}
+
+/* The step content already renders a .tavi-card; inside the accordion drop its
+   outer chrome so it reads as nested content, not a detached card. */
+.vascular-accordion-body .tavi-card {
+  border: none;
+  background: transparent;
+  padding: 6px 0 0;
+  margin: 0;
+}
+
 .tavi-check-icon {
   width: 18px;
   height: 18px;
@@ -2390,6 +2422,14 @@ button:focus:not(:focus-visible) {
   transform: rotate(45deg);
   width: 7px;
   height: 7px;
+}
+
+.angio-legend-ring {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid;
+  background: transparent !important;
 }
 
 /* ── Perpendicularity Plot ── */
