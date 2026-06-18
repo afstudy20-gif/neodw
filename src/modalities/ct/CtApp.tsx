@@ -75,8 +75,11 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const [loadingProgress, setLoadingProgress] = useState('');
   const [showMetadata, setShowMetadata] = useState(false);
   const [showSegmentation, setShowSegmentation] = useState(false);
-  // 'aorta' is folded into the combined Vascular panel (Aort subtab).
-  const [rightPanel, setRightPanel] = useState<RightPanel>(initialPanel === 'aorta' ? 'vascular' : (initialPanel ?? null));
+  // Legacy single panels folded into combined panels: 'aorta' → Vascular (Aort
+  // subtab), 'laa' → Left Atrium panel (LAA subtab).
+  const [rightPanel, setRightPanel] = useState<RightPanel>(
+    initialPanel === 'aorta' ? 'vascular' : initialPanel === 'laa' ? 'la' : (initialPanel ?? null)
+  );
   const [reportExpanded, setReportExpanded] = useState(false);
   const [volumeResults, setVolumeResults] = useState<VolumeResult[]>([]);
   const [viewportMode, setViewportMode] = useState<ViewportMode>('standard');
@@ -100,6 +103,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   const laaPanelRef = useRef<LAAPanelHandle>(null);
   const laaFileInputRef = useRef<HTMLInputElement>(null);
   const [pendingLAAAction, setPendingLAAAction] = useState<null | 'save' | { load: File }>(null);
+  // Combined Left Atrium panel subtab: 'la' = LA segmentation/3D, 'laa' = LAA occlusion workflow.
+  const [laSubtab, setLaSubtab] = useState<'la' | 'laa'>(initialPanel === 'laa' ? 'laa' : 'la');
   const lvadasPanelRef = useRef<LVADASPanelHandle>(null);
   const lvadasFileInputRef = useRef<HTMLInputElement>(null);
   const [pendingLVADASAction, setPendingLVADASAction] = useState<null | 'save' | { load: File }>(null);
@@ -171,7 +176,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   // Pending LA save/load: panel must be mounted before ref is valid.
   useEffect(() => {
     if (!pendingLAAction) return;
-    if (rightPanel !== 'la') return;
+    if (rightPanel !== 'la' || laSubtab !== 'la') return;
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
@@ -183,7 +188,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     };
     requestAnimationFrame(tick);
     return () => { cancelled = true; };
-  }, [rightPanel, pendingLAAction]);
+  }, [rightPanel, laSubtab, pendingLAAction]);
 
   // Pending Aorta save/load
   useEffect(() => {
@@ -205,7 +210,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
   // Pending LAA save/load
   useEffect(() => {
     if (!pendingLAAAction) return;
-    if (rightPanel !== 'laa') return;
+    if (rightPanel !== 'la' || laSubtab !== 'laa') return;
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
@@ -217,7 +222,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     };
     requestAnimationFrame(tick);
     return () => { cancelled = true; };
-  }, [rightPanel, pendingLAAAction]);
+  }, [rightPanel, laSubtab, pendingLAAAction]);
 
   // Pending LV-ADAS save/load
   useEffect(() => {
@@ -726,6 +731,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     leftAtriumPanelRef.current.saveSession();
                   } else {
                     setPendingLAAction('save');
+                    setLaSubtab('la');
                     setRightPanel('la');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
@@ -752,6 +758,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     void leftAtriumPanelRef.current.loadSessionFile(f);
                   } else {
                     setPendingLAAction({ load: f });
+                    setLaSubtab('la');
                     setRightPanel('la');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
@@ -808,7 +815,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     laaPanelRef.current.saveSession();
                   } else {
                     setPendingLAAAction('save');
-                    setRightPanel('laa');
+                    setLaSubtab('laa');
+                    setRightPanel('la');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
                   }
@@ -834,7 +842,8 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     void laaPanelRef.current.loadSessionFile(f);
                   } else {
                     setPendingLAAAction({ load: f });
-                    setRightPanel('laa');
+                    setLaSubtab('laa');
+                    setRightPanel('la');
                     if (viewportMode !== 'standard') setViewportMode('standard');
                     resizeViewports();
                   }
@@ -931,7 +940,7 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                   resizeViewports();
                   return next;
                 });
-              }}>LA 3D</button>
+              }}>LA / LAA</button>
               <button className={`toolbar-btn ${rightPanel === 'vascular' ? 'active' : ''}`} onClick={() => {
                 setRightPanel((prev) => {
                   const next = prev === 'vascular' ? null : 'vascular';
@@ -943,17 +952,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                   return next;
                 });
               }}>Vascular</button>
-              <button className={`toolbar-btn ${rightPanel === 'laa' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'laa' ? null : 'laa';
-                  if (next === 'laa' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>LAA 3D</button>
               <button className={`toolbar-btn ${rightPanel === 'lv-adas' ? 'active' : ''}`} onClick={() => {
                 setRightPanel((prev) => {
                   const next = prev === 'lv-adas' ? null : 'lv-adas';
@@ -1064,17 +1062,30 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
           {rightPanel === 'la' && (
             <div className="side-panel" style={{ width: '360px' }}>
               <div className="side-panel-tabs">
-                <button className="side-panel-tab active">Left Atrium 3D</button>
+                <button className={`side-panel-tab ${laSubtab === 'la' ? 'active' : ''}`}
+                  onClick={() => { setLaSubtab('la'); resizeViewports(); }}>Left Atrium</button>
+                <button className={`side-panel-tab ${laSubtab === 'laa' ? 'active' : ''}`}
+                  onClick={() => { setLaSubtab('laa'); resizeViewports(); }}>LAA Occlusion</button>
                 <button className="side-panel-close" onClick={() => { setRightPanel(null); resizeViewports(); }}>×</button>
               </div>
               <div className="side-panel-body" style={{ padding: 0 }}>
-                <LeftAtriumPanel
-                  ref={leftAtriumPanelRef}
-                  renderingEngineId={RENDERING_ENGINE_ID}
-                  volumeId={VOLUME_ID}
-                  patientName={activeSeries?.patientName}
-                  studyDate={activeSeries?.studyDate}
-                />
+                {laSubtab === 'la' ? (
+                  <LeftAtriumPanel
+                    ref={leftAtriumPanelRef}
+                    renderingEngineId={RENDERING_ENGINE_ID}
+                    volumeId={VOLUME_ID}
+                    patientName={activeSeries?.patientName}
+                    studyDate={activeSeries?.studyDate}
+                  />
+                ) : (
+                  <LAAPanel
+                    ref={laaPanelRef}
+                    renderingEngineId={RENDERING_ENGINE_ID}
+                    volumeId={VOLUME_ID}
+                    patientName={activeSeries?.patientName}
+                    studyDate={activeSeries?.studyDate}
+                  />
+                )}
               </div>
             </div>
           )}
@@ -1109,24 +1120,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                     studyDate={activeSeries?.studyDate}
                   />
                 )}
-              </div>
-            </div>
-          )}
-
-          {rightPanel === 'laa' && (
-            <div className="side-panel" style={{ width: '360px' }}>
-              <div className="side-panel-tabs">
-                <button className="side-panel-tab active">LAA 3D</button>
-                <button className="side-panel-close" onClick={() => { setRightPanel(null); resizeViewports(); }}>×</button>
-              </div>
-              <div className="side-panel-body" style={{ padding: 0 }}>
-                <LAAPanel
-                  ref={laaPanelRef}
-                  renderingEngineId={RENDERING_ENGINE_ID}
-                  volumeId={VOLUME_ID}
-                  patientName={activeSeries?.patientName}
-                  studyDate={activeSeries?.studyDate}
-                />
               </div>
             </div>
           )}
