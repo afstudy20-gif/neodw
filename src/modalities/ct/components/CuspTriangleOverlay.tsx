@@ -63,54 +63,51 @@ export const CuspTriangleOverlay: React.FC<CuspTriangleOverlayProps> = ({
     }
     if (canvasPts.length < 2) return;
 
-    // 2 points: dashed line
+    // 2 points: dashed line (faint — visual guide only)
     if (canvasPts.length === 2) {
       ctx.beginPath();
       ctx.moveTo(canvasPts[0][0], canvasPts[0][1]);
       ctx.lineTo(canvasPts[1][0], canvasPts[1][1]);
-      ctx.strokeStyle = '#eab308';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
     }
 
-    // 3 points: filled triangle
+    // 3 points: filled triangle (faint)
     if (canvasPts.length >= 3) {
       ctx.beginPath();
       ctx.moveTo(canvasPts[0][0], canvasPts[0][1]);
       ctx.lineTo(canvasPts[1][0], canvasPts[1][1]);
       ctx.lineTo(canvasPts[2][0], canvasPts[2][1]);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(234, 179, 8, 0.22)';
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.08)';
       ctx.fill();
-      ctx.strokeStyle = '#eab308';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = 'rgba(234, 179, 8, 0.40)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // "NC" label at centroid
+      // "NC" label at centroid (subdued)
       const cx = (canvasPts[0][0] + canvasPts[1][0] + canvasPts[2][0]) / 3;
       const cy = (canvasPts[0][1] + canvasPts[1][1] + canvasPts[2][1]) / 3;
-      ctx.font = 'bold 13px -apple-system, sans-serif';
+      ctx.font = '11px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-      ctx.lineWidth = 3;
-      ctx.strokeText('NC', cx, cy);
-      ctx.fillStyle = '#eab308';
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.55)';
       ctx.fillText('NC', cx, cy);
     }
 
-    // Vertex dots
+    // Vertex dots (small, faint)
     for (const [px, py] of canvasPts) {
       ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fillStyle = '#eab308';
+      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.6)';
       ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.lineWidth = 1;
       ctx.stroke();
     }
   }, [getEngine]);
@@ -156,7 +153,7 @@ export const CuspTriangleOverlay: React.FC<CuspTriangleOverlayProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderingEngineId, viewportIds.join(',')]);
 
-  useEffect(() => { redrawAll(); });
+  useEffect(() => { redrawAll(); }, [redrawAll, points]);
 
   return null;
 };

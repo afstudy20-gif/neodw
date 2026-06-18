@@ -2739,24 +2739,17 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             onConfirm={() => captureCuspFromMPR('rcc')}
                             onUndo={() => { setCuspPoints(p => ({ ...p, rcc: undefined })); session.cuspRCC = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
 
-                          {/* NCH — placed directly at the non-coronary nadir (3mensio
-                              defines the annulus plane through all three real nadirs). */}
-                          <PlaceRow label="NCH" captured={!!cuspPoints.ncc}
-                            onPlace={() => cuspPoints.ncc ? startCuspUpdate('ncc') : startSingleProbePlacement()}
-                            onConfirm={() => captureCuspFromMPR('ncc')}
-                            onUndo={() => { setCuspPoints(p => ({ ...p, ncc: undefined })); session.cuspNCC = undefined; session.recompute(); startSingleProbePlacement(); forceUpdate(); }} />
-
-                          {/* Optional convenience: rough NCH guess from LCH+RCH. Only an
-                              approximation (assumes a symmetric tri-leaflet root in the
-                              annulus plane) — always verify/re-place at the true nadir. */}
-                          {cuspPoints.lcc && cuspPoints.rcc && (
-                            <button onClick={() => {
+                          {/* NCH — estimate first (3mensio places all 3 nadirs, but the
+                              non-coronary one is hard to find on MPR; estimate from LCH+RCH
+                              gives a starting dot the user verifies / updates by clicking the
+                              true nadir). The plane through 3 real nadirs is built later by
+                              Auto Trace Annulus / explicit Update. */}
+                          {!cuspPoints.ncc && cuspPoints.lcc && cuspPoints.rcc && (() => {
+                            const estimate = () => {
                               const lcc = cuspPoints.lcc!, rcc = cuspPoints.rcc!;
                               const mid = { x: (lcc.x+rcc.x)/2, y: (lcc.y+rcc.y)/2, z: (lcc.z+rcc.z)/2 };
                               const chord = TAVIGeometry.vectorSubtract(rcc, lcc);
                               const chordLen = TAVIGeometry.vectorLength(chord);
-                              // Perpendicular to the chord AND the aortic axis → lies in the
-                              // (tilted) annulus plane, unlike the old world-axial (z=0) guess.
                               const axisDir = session.aorticAxisDirection
                                 ?? controllerRef.current?.getAxisDirection()
                                 ?? { x: 0, y: 0, z: 1 };
@@ -2768,14 +2761,32 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                               session.cuspNCC = nccEst;
                               setCuspPoints(prev => ({ ...prev, ncc: nccEst }));
                               session.recompute(); forceUpdate();
-                            }}
-                              className="tavi-button"
-                              style={{ width: '100%', fontSize: '0.68rem', padding: '3px 8px', marginTop: 2, opacity: 0.85 }}>
-                              {cuspPoints.ncc ? '↻ Re-estimate NCH (approx)' : 'Estimate NCH (approx — verify)'}
-                            </button>
+                            };
+                            return (
+                              <button onClick={estimate}
+                                className="tavi-button tavi-button-capture"
+                                style={{ width: '100%', fontSize: '0.72rem', padding: '4px 8px', marginBottom: 3 }}>
+                                Estimate NCH
+                              </button>
+                            );
+                          })()}
+                          {cuspPoints.ncc && (
+                            <div style={{ display: 'flex', gap: 4, marginBottom: 3 }}>
+                              <button onClick={() => startCuspUpdate('ncc')}
+                                className="tavi-button tavi-button-captured"
+                                style={{ flex: 1, fontSize: '0.72rem', padding: '4px 6px' }}>
+                                {activeCuspUpdate === 'ncc' ? 'Click new NCH' : '✓ NCH'}
+                              </button>
+                              <button onClick={() => { if (!captureCuspFromMPR('ncc')) startCuspUpdate('ncc'); }}
+                                className="tavi-button tavi-button-capture"
+                                style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 8px' }}>Update</button>
+                              <button onClick={() => { setCuspPoints(p => ({ ...p, ncc: undefined })); session.cuspNCC = undefined; session.recompute(); forceUpdate(); }}
+                                className="tavi-button tavi-button-cancel"
+                                style={{ flex: 'none', fontSize: '0.72rem', padding: '4px 6px' }}>↻</button>
+                            </div>
                           )}
                           {!cuspPoints.lcc && !cuspPoints.rcc && !cuspPoints.ncc && (
-                            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', padding: '2px 0' }}>Place each cusp nadir (LCH, RCH, NCH) at its lowest hinge point.</div>
+                            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', padding: '2px 0' }}>Place LCH + RCH first; NCH will be estimated, then you can update it.</div>
                           )}
                         </Section>
 
