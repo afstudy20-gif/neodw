@@ -122,16 +122,27 @@ const navitor: ValveFamily = {
   ],
 };
 
-// Meril Myval (standard nominal sizes), balloon-expandable
+// Meril Myval / Myval Octacor (balloon-expandable). Myval's distinguishing
+// feature is its fine size matrix: conventional (20/23/26/29), intermediate
+// (21.5/24.5/27.5) and extra-large (30.5/32) sizes. The annular bands below are
+// contiguous 1.5 mm perimeter-diameter steps with area/perimeter kept internally
+// consistent (perimeter = π·d, area = π·d²/4). ⚠ These intermediate bands are
+// interpolated — verify against the current Meril Navigator / IFU matrix before
+// clinical use (see the file-level safety note).
 const myval: ValveFamily = {
   name: 'Myval',
   manufacturer: 'Meril Life Sciences',
   type: 'balloon-expandable',
   sizes: [
-    { size: 20, perimeterDiameterMin: 18.0, perimeterDiameterMax: 20.5, areaMin: 254, areaMax: 330, perimeterMin: 56.5, perimeterMax: 64.4, sheathOuterDiameterMm: 6.0 },
-    { size: 23, perimeterDiameterMin: 20.5, perimeterDiameterMax: 23.5, areaMin: 330, areaMax: 434, perimeterMin: 64.4, perimeterMax: 73.8, sheathOuterDiameterMm: 6.0 },
-    { size: 26, perimeterDiameterMin: 23.5, perimeterDiameterMax: 26.5, areaMin: 434, areaMax: 552, perimeterMin: 73.8, perimeterMax: 83.3, sheathOuterDiameterMm: 6.5 },
-    { size: 29, perimeterDiameterMin: 26.5, perimeterDiameterMax: 29.5, areaMin: 552, areaMax: 683, perimeterMin: 83.3, perimeterMax: 92.7, sheathOuterDiameterMm: 6.5 },
+    { size: 20.0, perimeterDiameterMin: 18.0, perimeterDiameterMax: 19.5, areaMin: 254, areaMax: 299, perimeterMin: 56.5, perimeterMax: 61.3, sheathOuterDiameterMm: 6.0 },
+    { size: 21.5, perimeterDiameterMin: 19.5, perimeterDiameterMax: 21.0, areaMin: 299, areaMax: 346, perimeterMin: 61.3, perimeterMax: 66.0, sheathOuterDiameterMm: 6.0 },
+    { size: 23.0, perimeterDiameterMin: 21.0, perimeterDiameterMax: 22.5, areaMin: 346, areaMax: 398, perimeterMin: 66.0, perimeterMax: 70.7, sheathOuterDiameterMm: 6.0 },
+    { size: 24.5, perimeterDiameterMin: 22.5, perimeterDiameterMax: 24.0, areaMin: 398, areaMax: 452, perimeterMin: 70.7, perimeterMax: 75.4, sheathOuterDiameterMm: 6.0 },
+    { size: 26.0, perimeterDiameterMin: 24.0, perimeterDiameterMax: 25.5, areaMin: 452, areaMax: 511, perimeterMin: 75.4, perimeterMax: 80.1, sheathOuterDiameterMm: 6.5 },
+    { size: 27.5, perimeterDiameterMin: 25.5, perimeterDiameterMax: 27.0, areaMin: 511, areaMax: 573, perimeterMin: 80.1, perimeterMax: 84.8, sheathOuterDiameterMm: 6.5 },
+    { size: 29.0, perimeterDiameterMin: 27.0, perimeterDiameterMax: 28.5, areaMin: 573, areaMax: 638, perimeterMin: 84.8, perimeterMax: 89.5, sheathOuterDiameterMm: 6.5 },
+    { size: 30.5, perimeterDiameterMin: 28.5, perimeterDiameterMax: 30.0, areaMin: 638, areaMax: 707, perimeterMin: 89.5, perimeterMax: 94.2, sheathOuterDiameterMm: 6.5 },
+    { size: 32.0, perimeterDiameterMin: 30.0, perimeterDiameterMax: 31.5, areaMin: 707, areaMax: 779, perimeterMin: 94.2, perimeterMax: 99.0, sheathOuterDiameterMm: 6.5 },
   ],
 };
 
@@ -153,16 +164,28 @@ export interface ValveSizeRecommendation {
   fitStatus: string;
   /** Cover index: (prosthesis_diameter - annulus_diameter) / prosthesis_diameter × 100 */
   coverIndex?: number;
-  /** Oversizing percentage: (prosthesis_area / annulus_area - 1) × 100 */
+  /**
+   * Headline oversizing percentage, computed by the metric the manufacturer
+   * sizes the device with: AREA for balloon-expandable (Edwards/Meril),
+   * PERIMETER for self-expanding (Medtronic/Abbott/Boston). Mixing the two
+   * inflates self-expanding oversizing roughly twofold (area scales with d²).
+   */
   oversizingPct?: number;
+  /** Which metric `oversizingPct` was computed from. */
+  oversizingMetric?: 'area' | 'perimeter';
   /** Sizing warning message */
   sizingWarning?: string;
 }
 
 /**
  * Given annular measurements, recommend valve sizes for each family.
- * Uses perimeter-derived diameter as the primary sizing criterion
- * (industry standard), with area as a secondary check.
+ *
+ * Sizing criterion follows the manufacturer: balloon-expandable valves
+ * (Edwards Sapien, Meril Myval) are sized by annular AREA; self-expanding
+ * valves (Medtronic Evolut, Abbott Navitor, Boston ACURATE) by annular
+ * PERIMETER. Oversizing is likewise reported in the matching metric — the two
+ * are NOT interchangeable (area scales with diameter², so an area figure
+ * roughly doubles the equivalent perimeter oversizing).
  */
 export function recommendValveSizes(
   perimeterMm: number,
@@ -171,70 +194,75 @@ export function recommendValveSizes(
   const perimDiameter = perimeterMm / Math.PI;
 
   return VALVE_FAMILIES.map((family) => {
+    const sizedByArea = family.type === 'balloon-expandable';
+    const value = sizedByArea ? areaMm2 : perimDiameter;
+    const lo = (vs: ValveSize) => (sizedByArea ? vs.areaMin : vs.perimeterDiameterMin);
+    const hi = (vs: ValveSize) => (sizedByArea ? vs.areaMax : vs.perimeterDiameterMax);
+
     let primarySize: ValveSize | null = null;
     let alternativeSize: ValveSize | null = null;
     let fitStatus = 'out-of-range';
 
     for (const vs of family.sizes) {
-      if (perimDiameter >= vs.perimeterDiameterMin && perimDiameter <= vs.perimeterDiameterMax) {
+      if (value >= lo(vs) && value <= hi(vs)) {
         primarySize = vs;
         fitStatus = 'in-range';
         break;
       }
     }
 
-    // If no exact perimeter match, find closest
+    // If no exact match, clamp to the nearest end of the family range.
     if (!primarySize) {
-      const allSizes = family.sizes;
-      const smallest = allSizes[0];
-      const largest = allSizes[allSizes.length - 1];
-
-      if (perimDiameter < smallest.perimeterDiameterMin) {
+      const smallest = family.sizes[0];
+      const largest = family.sizes[family.sizes.length - 1];
+      if (value < lo(smallest)) {
         primarySize = smallest;
         fitStatus = 'undersized';
-      } else if (perimDiameter > largest.perimeterDiameterMax) {
+      } else if (value > hi(largest)) {
         primarySize = largest;
         fitStatus = 'oversized';
       }
     }
 
-    // Find alternative (adjacent size)
+    // Find alternative (adjacent size), using the same sizing metric.
     if (primarySize) {
       const idx = family.sizes.indexOf(primarySize);
-      // If near the upper boundary, suggest next size up
-      if (perimDiameter > (primarySize.perimeterDiameterMin + primarySize.perimeterDiameterMax) / 2) {
+      if (value > (lo(primarySize) + hi(primarySize)) / 2) {
         if (idx < family.sizes.length - 1) alternativeSize = family.sizes[idx + 1];
       } else {
         if (idx > 0) alternativeSize = family.sizes[idx - 1];
       }
     }
 
-    // Compute Cover Index and Oversizing percentage
+    // Cover index + modality-appropriate oversizing.
     let coverIndex: number | undefined;
     let oversizingPct: number | undefined;
+    let oversizingMetric: 'area' | 'perimeter' | undefined;
     let sizingWarning: string | undefined;
 
     if (primarySize) {
-      // Cover Index = (nominal_valve_diameter - annulus_perimeter_diameter) / nominal_valve_diameter × 100
+      // Cover index = (nominal device diameter − annulus perimeter-diameter) / device × 100.
       coverIndex = ((primarySize.size - perimDiameter) / primarySize.size) * 100;
 
-      // Area-based oversizing: (valve_nominal_area / patient_area - 1) × 100
-      const valveNominalArea = Math.PI * (primarySize.size / 2) ** 2;
-      oversizingPct = (valveNominalArea / areaMm2 - 1) * 100;
+      // Nominal device geometry from its label diameter.
+      const areaOversizing = (Math.PI * (primarySize.size / 2) ** 2 / areaMm2 - 1) * 100;
+      const perimeterOversizing = (Math.PI * primarySize.size / perimeterMm - 1) * 100;
+      oversizingMetric = sizedByArea ? 'area' : 'perimeter';
+      oversizingPct = sizedByArea ? areaOversizing : perimeterOversizing;
 
-      // Warnings
+      // Warnings — dangerous directions only; "ideal" oversizing differs by
+      // device family (e.g. Evolut targets ~20% perimeter, ACURATE far less),
+      // so we do not flag merely-low oversizing.
       if (coverIndex < 0) {
-        sizingWarning = `Undersized: Cover Index ${coverIndex.toFixed(1)}% (negative). Risk of embolization and PVL.`;
-      } else if (coverIndex > 20) {
-        sizingWarning = `Oversized: Cover Index ${coverIndex.toFixed(1)}%. Risk of annular rupture and conduction disturbance.`;
-      } else if (family.type === 'balloon-expandable' && oversizingPct > 20) {
-        sizingWarning = `Area oversizing ${oversizingPct.toFixed(0)}% >20%. Consider self-expanding alternative.`;
-      } else if (family.type === 'self-expanding' && oversizingPct > 25) {
-        sizingWarning = `Area oversizing ${oversizingPct.toFixed(0)}% >25%. Risk of conduction disturbance.`;
+        sizingWarning = `Undersized: cover index ${coverIndex.toFixed(1)}% (negative). Embolization / PVL risk.`;
+      } else if (sizedByArea && areaOversizing > 20) {
+        sizingWarning = `Area oversizing ${areaOversizing.toFixed(0)}% (>20%). Annular rupture risk; consider a self-expanding alternative.`;
+      } else if (!sizedByArea && perimeterOversizing > 30) {
+        sizingWarning = `Perimeter oversizing ${perimeterOversizing.toFixed(0)}% (>30%). Excess oversizing — rupture / conduction risk.`;
       }
     }
 
-    return { family, primarySize, alternativeSize, fitStatus, coverIndex, oversizingPct, sizingWarning };
+    return { family, primarySize, alternativeSize, fitStatus, coverIndex, oversizingPct, oversizingMetric, sizingWarning };
   });
 }
 

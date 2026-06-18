@@ -60,13 +60,26 @@ describe('recommendValveSizes', () => {
     expect(s3b.primarySize?.size).toBe(29);
   });
 
-  it('warns about conduction risk for an over-oversized self-expanding pick', () => {
-    // Evolut PRO+ 23mm (nominal area ≈ 415mm²); area 300 → ~38% oversizing (>25%)
-    const recs = recommendValveSizes(60, 300); // d ≈ 19.1mm → Evolut PRO+ 23
+  it('reports PERIMETER-based oversizing for self-expanding valves and warns only on excess', () => {
+    // Evolut PRO+ 23mm nominal perimeter π·23 ≈ 72.3mm. Annulus perimeter 55mm
+    // → perimeter oversizing ≈ 31% (>30%).
+    const recs = recommendValveSizes(55, 240); // d ≈ 17.5mm → Evolut PRO+ 23
     const ep = recs.find((r) => r.family.name === 'Evolut PRO+')!;
     expect(ep.primarySize?.size).toBe(23);
-    expect(ep.oversizingPct!).toBeGreaterThan(25);
-    expect(ep.sizingWarning).toMatch(/conduction/i);
+    expect(ep.oversizingMetric).toBe('perimeter');
+    expect(ep.oversizingPct!).toBeGreaterThan(30);
+    expect(ep.sizingWarning).toMatch(/conduction|oversizing/i);
+  });
+
+  it('does NOT false-alarm a normally-oversized self-expanding pick (perimeter vs area)', () => {
+    // Perimeter 76.2mm, area 459.7mm² → Evolut 29; perimeter oversizing ≈ 20%
+    // (the literature target). The old area-based math flagged ~44% — regression guard.
+    const recs = recommendValveSizes(76.2, 459.7);
+    const ev = recs.find((r) => r.family.name === 'Evolut FX')!;
+    expect(ev.primarySize?.size).toBe(29);
+    expect(ev.oversizingMetric).toBe('perimeter');
+    expect(ev.oversizingPct!).toBeLessThan(25);
+    expect(ev.sizingWarning).toBeUndefined();
   });
 
   it('suggests a self-expanding alternative for an over-oversized balloon-expandable pick', () => {
