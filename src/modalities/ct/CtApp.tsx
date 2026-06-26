@@ -945,41 +945,6 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
                   resizeViewports();
                 }
               }}>3D</button>
-              <button className="toolbar-btn" onClick={() => toggleRightPanel('tavi')}>TAVI</button>
-              <button className={`toolbar-btn ${rightPanel === 'hand-mr' ? 'active' : ''}`} onClick={() => toggleRightPanel('hand-mr')}>Hand MR</button>
-              <button className={`toolbar-btn ${rightPanel === 'la' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'la' ? null : 'la';
-                  if (next === 'la' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>LA / LAA</button>
-              <button className={`toolbar-btn ${rightPanel === 'vascular' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'vascular' ? null : 'vascular';
-                  if (next === 'vascular' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>Vascular</button>
-              <button className={`toolbar-btn ${rightPanel === 'lv-adas' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'lv-adas' ? null : 'lv-adas';
-                  if (next === 'lv-adas' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>LV-ADAS</button>
             </>
           )}
         </div>

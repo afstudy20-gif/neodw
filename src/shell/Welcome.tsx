@@ -83,15 +83,24 @@ interface ModeDef {
   tags: string[];
 }
 
-const MODES: ModeDef[] = [
+const ALL_MODES: ModeDef[] = [
   {
-    route: { kind: 'ct', panel: null, title: 'mod.ctmr' },
+    route: { kind: 'ct', panel: null, title: 'mod.ct' },
     group: 'cross',
-    name: 'mod.ctmr',
-    desc: 'mod.ctmr.desc',
-    icon: <IcoHeart/>,
-    key: 'ctmr',
-    tags: ['MPR', '3D VR', 'W/L', 'Length', 'Angle', 'Annotate'],
+    name: 'mod.ct',
+    desc: 'mod.ct.desc',
+    icon: <IcoScan/>,
+    key: 'ct',
+    tags: ['Bone', 'Lung', 'Mediastinum', 'Brain', 'Liver', 'CTA', 'MPR'],
+  },
+  {
+    route: { kind: 'ct', panel: null, title: 'mod.mr' },
+    group: 'cross',
+    name: 'mod.mr',
+    desc: 'mod.mr.desc',
+    icon: <IcoScan/>,
+    key: 'mr',
+    tags: ['T1', 'T2', 'FLAIR', 'STIR', 'DWI', 'T2* GRE', 'MPR'],
   },
   {
     route: { kind: 'ct', panel: 'tavi', title: 'mod.tavi' },
@@ -181,6 +190,14 @@ const GROUPS: { id: ModeDef['group']; key: string }[] = [
   { id: 'coronary', key: 'sec.coronary' },
   { id: 'xray', key: 'sec.xray' },
 ];
+
+const ENABLED_ENV = (import.meta.env.VITE_ENABLED_MODALITIES ?? '').trim();
+const ENABLED_SET = ENABLED_ENV
+  ? new Set(ENABLED_ENV.split(',').map((s: string) => s.trim()).filter(Boolean))
+  : null;
+const MODES: ModeDef[] = ENABLED_SET
+  ? ALL_MODES.filter((m) => ENABLED_SET.has(m.key))
+  : ALL_MODES;
 
 function pickFiles(folder: boolean): Promise<File[]> {
   return new Promise((resolve) => {
@@ -411,7 +428,7 @@ export default function Welcome({ onLaunch }: Props) {
         {/* Modalities section */}
         <div className="nd-modalities-head">
           <div className="cap">{t('sp.choose')}</div>
-          <div className="mono nd-modalities-count">{MODES.length} ENVIRONMENTS · DICOM WORKSTATION</div>
+          <div className="mono nd-modalities-count">{MODES.length} KART · BT / MR DICOM</div>
         </div>
 
         {GROUPS.map((g) => {
@@ -528,13 +545,19 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
     },
   };
 
+  const subLabel = m.key === 'ct'
+    ? 'BT · VERTEBRA · SPINAL KANAL'
+    : m.key === 'mr'
+      ? 'MR · VERTEBRA · SPINAL KANAL'
+      : `${m.key.toUpperCase()} · DICOM`;
+
   return (
     <div className={`nd-mode-card ${dragOver ? 'drop-over' : ''}`} {...cardDropHandlers}>
       <div className="nd-mode-head">
         <div className="nd-mode-icon">{m.icon}</div>
-        <div style={{ flex: 1 }}>
+        <div className="nd-mode-copy">
           <div className="nd-mode-title">{t(m.name)}</div>
-          <div className="mono nd-mode-sub">{m.key.toUpperCase()} · DICOM · MULTI-SERIES</div>
+          <div className="mono nd-mode-sub">{subLabel}</div>
         </div>
         {m.featured && <span className="cap nd-mode-badge">Primary</span>}
       </div>
@@ -567,12 +590,8 @@ function ModalityCard({ m, t, onLaunch, onDropFiles }: {
       </div>
 
       <div className="nd-mode-drop-hint" aria-hidden>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <path d="M7 10l5-5 5 5"/>
-          <path d="M12 5v12"/>
-        </svg>
-        <span>veya DICOM dosya/klasörünü buraya sürükle-bırak</span>
+        <IcoUpload s={11}/>
+        <span>DICOM dosya/klasörünü sürükle-bırak</span>
       </div>
 
       {dragOver && (
