@@ -52,6 +52,12 @@ export type CtInitialPanel = null | '3d' | 'tavi' | 'hand-mr' | 'la' | 'aorta' |
 interface CtAppProps {
   onBack?: () => void;
   initialFiles?: File[];
+  /**
+   * Pre-built series list (e.g. fetched from a DICOMweb server). When provided,
+   * the file-loading pipeline is bypassed and the first series is opened
+   * directly. `initialFiles` takes precedence when both are set.
+   */
+  initialSeries?: DicomSeriesInfo[];
   initialPanel?: CtInitialPanel;
   title?: string;
 }
@@ -65,7 +71,7 @@ function ThemeToggleBtn() {
   );
 }
 
-export default function App({ onBack, initialFiles, initialPanel = null, title }: CtAppProps = {}) {
+export default function App({ onBack, initialFiles, initialSeries, initialPanel = null, title }: CtAppProps = {}) {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [seriesList, setSeriesList] = useState<DicomSeriesInfo[]>([]);
@@ -354,6 +360,17 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
     if (isInitialized && initialFiles && initialFiles.length > 0) {
       void handleFilesLoaded(initialFiles);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInitialized]);
+
+  // Bootstrap from a pre-built series list (DICOMweb remote share). Distinct
+  // from the initialFiles effect because there is no parse/expand stage —
+  // the series already have wadors imageIds and registered metadata.
+  useEffect(() => {
+    if (!isInitialized || !initialSeries || initialSeries.length === 0) return;
+    if (initialFiles && initialFiles.length > 0) return; // file path wins
+    setSeriesList(initialSeries);
+    void loadSeries(initialSeries[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isInitialized]);
 
@@ -928,41 +945,6 @@ export default function App({ onBack, initialFiles, initialPanel = null, title }
                   resizeViewports();
                 }
               }}>3D</button>
-              <button className="toolbar-btn" onClick={() => toggleRightPanel('tavi')}>TAVI</button>
-              <button className={`toolbar-btn ${rightPanel === 'hand-mr' ? 'active' : ''}`} onClick={() => toggleRightPanel('hand-mr')}>Hand MR</button>
-              <button className={`toolbar-btn ${rightPanel === 'la' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'la' ? null : 'la';
-                  if (next === 'la' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>LA / LAA</button>
-              <button className={`toolbar-btn ${rightPanel === 'vascular' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'vascular' ? null : 'vascular';
-                  if (next === 'vascular' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>Vascular</button>
-              <button className={`toolbar-btn ${rightPanel === 'lv-adas' ? 'active' : ''}`} onClick={() => {
-                setRightPanel((prev) => {
-                  const next = prev === 'lv-adas' ? null : 'lv-adas';
-                  if (next === 'lv-adas' && viewportMode !== 'standard') {
-                    setViewportMode('standard');
-                    exitDoubleObliqueMode(RENDERING_ENGINE_ID);
-                  }
-                  resizeViewports();
-                  return next;
-                });
-              }}>LV-ADAS</button>
             </>
           )}
         </div>

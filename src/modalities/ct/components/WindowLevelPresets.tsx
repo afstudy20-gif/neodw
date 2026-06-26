@@ -9,27 +9,30 @@ interface Preset {
 }
 
 const CT_PRESETS: Preset[] = [
-  { name: 'Default', window: 700, level: 350, description: 'Coronary arteries (standard)' },
-  { name: 'Lung', window: 1500, level: -600, description: 'Lung parenchyma' },
-  { name: 'Abdomen', window: 400, level: 40, description: 'Soft tissue' },
-  { name: 'Mediastinum', window: 350, level: 50, description: 'Mediastinal' },
-  { name: 'Chest', window: 800, level: 200, description: 'Thorax overview' },
-  { name: 'Bone', window: 2000, level: 300, description: 'Bone structures' },
-  { name: 'CT Angio', window: 600, level: 300, description: 'Vascular contrast' },
-  { name: 'TAVI', window: 555, level: 208, description: 'Aortic valve planning' },
-  { name: 'Cardiac Fat', window: 170, level: -115, description: 'Epicardial fat' },
+  { name: 'Soft Tissue', window: 400, level: 40, description: 'Genel yumuşak doku (abdomen/pelvis)' },
+  { name: 'Brain', window: 80, level: 40, description: 'Beyin parankimi' },
+  { name: 'Stroke', window: 35, level: 35, description: 'Erken isemi (inafter stroke)' },
+  { name: 'Subdural', window: 130, level: 50, description: 'Subdural / ekstra-aksiyel kan' },
+  { name: 'Bone', window: 2000, level: 400, description: 'Kemik / vertebra korteksi' },
+  { name: 'Lung', window: 1500, level: -600, description: 'Akciğer parankimi' },
+  { name: 'Mediastinum', window: 350, level: 50, description: 'Mediyasten / hiler yapılar' },
+  { name: 'Liver', window: 150, level: 30, description: 'Karaciğer parankimi / lezyonlar' },
+  { name: 'CT Angio', window: 600, level: 200, description: 'Vasküler kontrast (anjiyo)' },
+  { name: 'TAVI', window: 555, level: 208, description: 'Aortik kapak planlama' },
+  { name: 'Cardiac Fat', window: 170, level: -115, description: 'Epikardiyal yağ' },
 ];
 
 const MR_PRESETS: Preset[] = [
-  { name: 'Default', window: 800, level: 400, description: 'T1 weighted — anatomy' },
-  { name: 'T2', window: 1200, level: 600, description: 'T2 weighted — fluid bright' },
-  { name: 'STIR/PD', window: 1500, level: 750, description: 'STIR / Proton Density' },
-  { name: 'Tendon', window: 450, level: 225, description: 'Tendons (T1/PD)' },
-  { name: 'Ligament', window: 350, level: 175, description: 'Ligaments (SL, TFCC)' },
-  { name: 'Bone Marrow', window: 700, level: 350, description: 'Bone marrow edema' },
-  { name: 'Edema', window: 1800, level: 900, description: 'Fluid/edema (STIR)' },
-  { name: 'Nerve', window: 400, level: 200, description: 'Peripheral nerve' },
-  { name: 'Bright', window: 2000, level: 1000, description: 'High signal overview' },
+  { name: 'T1', window: 600, level: 300, description: 'T1 ağırlıklı — anatomi, yağ, kontrast sonrası' },
+  { name: 'T2', window: 1200, level: 600, description: 'T2 ağırlıklı — patoloji, ödem, sıvı (parlak)' },
+  { name: 'FLAIR', window: 900, level: 450, description: 'T2-FLAIR — BOS baskılanmış (periventriküler lezyon, MS)' },
+  { name: 'STIR', window: 1200, level: 400, description: 'STIR — yağ baskılanmış (kemik iliği ödemi, MSK)' },
+  { name: 'T2* GRE', window: 600, level: 200, description: 'T2* / GRE — kanama, kalsifikasyon, susceptibility' },
+  { name: 'DWI', window: 1200, level: 400, description: 'Difüzyon (DWI) — akut isemi, hücresellik' },
+  { name: 'PD', window: 1500, level: 750, description: 'Proton Density — eklem kıkırdağı, menisküs' },
+  { name: 'Tendon', window: 450, level: 225, description: 'Tendon (T1/PD) — el, bilek' },
+  { name: 'Ligament', window: 350, level: 175, description: 'Ligament (SL, TFCC)' },
+  { name: 'Nerve', window: 400, level: 200, description: 'Periferik sinir' },
 ];
 
 // Colormaps — VTK.js preset names
@@ -49,7 +52,7 @@ interface Props {
 export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }: Props) {
   const mod = modality?.trim().toUpperCase() || '';
   const PRESETS = (mod === 'MR' || mod === 'MRI') ? MR_PRESETS : CT_PRESETS;
-  const [activePreset, setActivePreset] = useState<string | null>('Default');
+  const [activePreset, setActivePreset] = useState<string | null>(PRESETS[0]?.name ?? null);
   const [isOpen, setIsOpen] = useState(false);
   const [showColormap, setShowColormap] = useState(false);
   const [activeColormap, setActiveColormap] = useState('Grayscale');

@@ -1,8 +1,11 @@
-import { Component, lazy, Suspense, useState, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useState, useEffect, type ReactNode } from 'react';
 import Welcome from './shell/Welcome';
 import { I18nProvider, useI18n } from './shell/i18n';
 import { ThemeProvider } from './theme/ThemeProvider';
 import type { CtInitialPanel } from './modalities/ct/CtApp';
+import type { DicomSeriesInfo } from './modalities/ct/core/dicomLoader';
+import { parseDicomWebUrlParams, loadDicomWebStudy } from './shared/dicom/dicomwebLoader';
+import { initCornerstone } from './shared/core/cornerstone';
 
 // Catches errors from React.lazy chunk loads (e.g., stale index.html after
 // a fresh deploy 404s the hashed chunk). Without this the Suspense fallback
@@ -67,6 +70,7 @@ export type ModalityRoute =
 interface Session {
   route: ModalityRoute;
   files?: File[];
+  remoteSeries?: DicomSeriesInfo[];
 }
 
 export default function App() {
@@ -81,6 +85,7 @@ export default function App() {
 
 function Shell() {
   const [session, setSession] = useState<Session | null>(null);
+  const [remoteLoad, setRemoteLoad] = useState<{ status: 'loading' | 'error'; message: string } | null>(null);
   const { t } = useI18n();
 
   function handleBack() {
@@ -89,6 +94,50 @@ function Shell() {
 
   function handleLaunch(route: ModalityRoute, files?: File[]) {
     setSession({ route, files });
+  }
+
+  // Remote-share bootstrap. When the URL carries ?dicomweb=...&study=...
+  // (plus #token=...) we skip the Welcome screen and pull the study from the
+  // configured DICOMweb endpoint before mounting the CT viewer.
+  useEffect(() => {
+    const params = parseDicomWebUrlParams();
+    if (!params) return;
+    let cancelled = false;
+    setRemoteLoad({ status: 'loading', message: 'Fetching remote study…' });
+    (async () => {
+      try {
+        await initCornerstone();
+        const series = await loadDicomWebStudy({
+          baseUrl: params.dicomweb,
+          studyUID: params.study,
+          token: params.token,
+          modalities: params.modality === 'mr' ? ['MR'] : ['CT', 'MR'],
+        });
+        if (cancelled) return;
+        if (series.length === 0) {
+          setRemoteLoad({ status: 'error', message: 'No CT/MR series found in this study.' });
+          return;
+        }
+        setSession({
+          route: { kind: 'ct', panel: null, title: 'mod.ct' },
+          remoteSeries: series,
+        });
+        setRemoteLoad(null);
+      } catch (err: any) {
+        if (cancelled) return;
+        setRemoteLoad({ status: 'error', message: err?.message || 'Remote study load failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (remoteLoad) {
+    return (
+      <div style={{ padding: 40, color: 'var(--nd-text)', fontFamily: 'system-ui' }}>
+        <h2>{remoteLoad.status === 'loading' ? 'Loading remote study' : 'Could not load study'}</h2>
+        <p style={{ opacity: 0.8 }}>{remoteLoad.message}</p>
+      </div>
+    );
   }
 
   if (!session) {
@@ -102,6 +151,7 @@ function Shell() {
         <CtApp
           onBack={handleBack}
           initialFiles={session.files}
+          initialSeries={session.remoteSeries}
           initialPanel={session.route.panel}
           title={t(session.route.title)}
         />
