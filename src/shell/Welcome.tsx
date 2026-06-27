@@ -91,7 +91,7 @@ const ALL_MODES: ModeDef[] = [
     desc: 'mod.ct.desc',
     icon: <IcoScan/>,
     key: 'ct',
-    tags: ['Bone', 'Lung', 'Mediastinum', 'Brain', 'Liver', 'CTA', 'MPR'],
+    tags: ['Vertebra', 'Spinal kanal', 'Kemik pencere', 'MPR'],
   },
   {
     route: { kind: 'ct', panel: null, title: 'mod.mr' },
@@ -100,7 +100,7 @@ const ALL_MODES: ModeDef[] = [
     desc: 'mod.mr.desc',
     icon: <IcoScan/>,
     key: 'mr',
-    tags: ['T1', 'T2', 'FLAIR', 'STIR', 'DWI', 'T2* GRE', 'MPR'],
+    tags: ['Vertebra', 'Spinal kanal', 'Disk', 'MPR'],
   },
   {
     route: { kind: 'ct', panel: 'tavi', title: 'mod.tavi' },

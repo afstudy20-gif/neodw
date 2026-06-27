@@ -1,41 +1,25 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
-
-interface Preset {
-  name: string;
-  window: number;
-  level: number;
-  description: string;
-}
+import {
+  computeMrVoiRange,
+  getScalarDataFromVolume,
+  MR_PRESETS,
+  MR_PRESETS_TUNED,
+  type Preset,
+} from '../windowLevel';
 
 const CT_PRESETS: Preset[] = [
-  { name: 'Soft Tissue', window: 400, level: 40, description: 'Genel yumuşak doku (abdomen/pelvis)' },
-  { name: 'Brain', window: 80, level: 40, description: 'Beyin parankimi' },
-  { name: 'Stroke', window: 35, level: 35, description: 'Erken isemi (inafter stroke)' },
-  { name: 'Subdural', window: 130, level: 50, description: 'Subdural / ekstra-aksiyel kan' },
-  { name: 'Bone', window: 2000, level: 400, description: 'Kemik / vertebra korteksi' },
-  { name: 'Lung', window: 1500, level: -600, description: 'Akciğer parankimi' },
-  { name: 'Mediastinum', window: 350, level: 50, description: 'Mediyasten / hiler yapılar' },
-  { name: 'Liver', window: 150, level: 30, description: 'Karaciğer parankimi / lezyonlar' },
-  { name: 'CT Angio', window: 600, level: 200, description: 'Vasküler kontrast (anjiyo)' },
-  { name: 'TAVI', window: 555, level: 208, description: 'Aortik kapak planlama' },
-  { name: 'Cardiac Fat', window: 170, level: -115, description: 'Epikardiyal yağ' },
+  { name: 'Soft Tissue', window: 400, level: 40, description: 'Default soft-tissue window' },
+  { name: 'Bone', window: 1800, level: 400, description: 'Bone / spine' },
+  { name: 'Lung', window: 1500, level: -600, description: 'Lung parenchyma' },
+  { name: 'Brain', window: 80, level: 40, description: 'Brain parenchyma' },
+  { name: 'Abdomen', window: 350, level: 40, description: 'Abdominal soft tissue' },
+  { name: 'Mediastinum', window: 350, level: 50, description: 'Mediastinum' },
+  { name: 'Liver', window: 150, level: 30, description: 'Liver / narrow soft tissue' },
+  { name: 'CT Angio', window: 600, level: 100, description: 'Vascular contrast' },
+  { name: 'Stroke', window: 40, level: 40, description: 'Narrow stroke window' },
 ];
 
-const MR_PRESETS: Preset[] = [
-  { name: 'T1', window: 600, level: 300, description: 'T1 ağırlıklı — anatomi, yağ, kontrast sonrası' },
-  { name: 'T2', window: 1200, level: 600, description: 'T2 ağırlıklı — patoloji, ödem, sıvı (parlak)' },
-  { name: 'FLAIR', window: 900, level: 450, description: 'T2-FLAIR — BOS baskılanmış (periventriküler lezyon, MS)' },
-  { name: 'STIR', window: 1200, level: 400, description: 'STIR — yağ baskılanmış (kemik iliği ödemi, MSK)' },
-  { name: 'T2* GRE', window: 600, level: 200, description: 'T2* / GRE — kanama, kalsifikasyon, susceptibility' },
-  { name: 'DWI', window: 1200, level: 400, description: 'Difüzyon (DWI) — akut isemi, hücresellik' },
-  { name: 'PD', window: 1500, level: 750, description: 'Proton Density — eklem kıkırdağı, menisküs' },
-  { name: 'Tendon', window: 450, level: 225, description: 'Tendon (T1/PD) — el, bilek' },
-  { name: 'Ligament', window: 350, level: 175, description: 'Ligament (SL, TFCC)' },
-  { name: 'Nerve', window: 400, level: 200, description: 'Periferik sinir' },
-];
-
-// Colormaps — VTK.js preset names
 const COLORMAPS = [
   'Grayscale',
   'hsv', 'jet', 'rainbow', 'Warm to Cool', 'Cool to Warm',
@@ -47,12 +31,14 @@ interface Props {
   renderingEngineId: string;
   viewportIds: string[];
   modality?: string;
+  defaultPreset?: string;
+  volumeKey?: string;
 }
 
-export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }: Props) {
+export function WindowLevelPresets({ renderingEngineId, viewportIds, modality, defaultPreset, volumeKey }: Props) {
   const mod = modality?.trim().toUpperCase() || '';
   const PRESETS = (mod === 'MR' || mod === 'MRI') ? MR_PRESETS : CT_PRESETS;
-  const [activePreset, setActivePreset] = useState<string | null>(PRESETS[0]?.name ?? null);
+  const [activePreset, setActivePreset] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [showColormap, setShowColormap] = useState(false);
   const [activeColormap, setActiveColormap] = useState('Grayscale');
@@ -60,7 +46,6 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
   const dropdownRef = useRef<HTMLDivElement>(null);
   const colormapRef = useRef<HTMLDivElement>(null);
 
-  // Get all target viewport IDs including stack2d if it exists
   const getAllTargetVpIds = useCallback(() => {
     const ids = [...viewportIds];
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
@@ -75,32 +60,45 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
     if (!engine) return;
 
     const isMR = (mod === 'MR' || mod === 'MRI');
-    let dataMax = 2000;
-    if (isMR) {
+    const tuned = isMR ? MR_PRESETS_TUNED.find((p) => p.name === preset.name) : undefined;
+    if (tuned?.reset) {
+      for (const vpId of getAllTargetVpIds()) {
+        const viewport = engine.getViewport(vpId) as any;
+        if (!viewport || viewport.type === cornerstone.Enums.ViewportType.VOLUME_3D) continue;
+        try { viewport.resetProperties?.(); } catch { /* ignore */ }
+        viewport.render();
+      }
+      setActivePreset(preset.name);
+      setIsOpen(false);
+      return;
+    }
+
+    let mrVoiRange: { lower: number; upper: number } | null = null;
+    if (isMR && tuned) {
       try {
         const volume = cornerstone.cache.getVolume('cornerstoneStreamingImageVolume:myVolume') as any;
-        if (volume?.voxelManager) {
-          const range = volume.voxelManager.getRange();
-          if (range) dataMax = range[1];
-        }
+        mrVoiRange = computeMrVoiRange(getScalarDataFromVolume(volume), tuned.name);
       } catch { /* ignore */ }
+      if (!mrVoiRange) return;
     }
 
     for (const vpId of getAllTargetVpIds()) {
       const viewport = engine.getViewport(vpId);
       if (!viewport || viewport.type === cornerstone.Enums.ViewportType.VOLUME_3D) continue;
 
-      let w = preset.window;
-      let l = preset.level;
-      if (isMR) {
-        const scale = dataMax / 2000;
-        w = Math.round(preset.window * scale);
-        l = Math.round(preset.level * scale);
+      let lower: number;
+      let upper: number;
+      if (isMR && tuned && mrVoiRange) {
+        lower = mrVoiRange.lower;
+        upper = mrVoiRange.upper;
+      } else {
+        const w = preset.window;
+        const l = preset.level;
+        lower = l - w / 2;
+        upper = l + w / 2;
       }
 
-      (viewport as any).setProperties({
-        voiRange: { lower: l - w / 2, upper: l + w / 2 },
-      });
+      (viewport as any).setProperties({ voiRange: { lower, upper } });
       viewport.render();
     }
     setActivePreset(preset.name);
@@ -115,12 +113,10 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
       if (!viewport || viewport.type === cornerstone.Enums.ViewportType.VOLUME_3D) continue;
       try {
         if (name === 'Grayscale') {
-          // Remove colormap — try multiple approaches
           const vp = viewport as any;
           if (vp.setColormap) {
             vp.setColormap(undefined);
           }
-          // Also reset via the actor's color transfer function
           try {
             const actor = vp.getDefaultActor?.()?.actor;
             if (actor) {
@@ -158,9 +154,37 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
       (viewport as any).setProperties({ invert: next });
       viewport.render();
     }
-  }, [invertColors, renderingEngineId, viewportIds]);
+  }, [invertColors, renderingEngineId, getAllTargetVpIds]);
 
-  // Number key shortcuts (1-9) for presets
+  useEffect(() => {
+    if (!defaultPreset || !volumeKey) return;
+    const preset = PRESETS.find((p) => p.name === defaultPreset);
+    if (!preset) return;
+
+    const apply = () => {
+      const engine = cornerstone.getRenderingEngine(renderingEngineId);
+      if (!engine) return;
+      const ready = getAllTargetVpIds().some((id) => {
+        try { return !!engine.getViewport(id); } catch { return false; }
+      });
+      if (ready) applyPreset(preset);
+    };
+
+    const onCompleted = () => apply();
+    const onModified = () => apply();
+    const target = cornerstone.eventTarget as unknown as EventTarget;
+    target.addEventListener(cornerstone.Enums.Events.IMAGE_VOLUME_LOADING_COMPLETED, onCompleted);
+    target.addEventListener(cornerstone.Enums.Events.IMAGE_VOLUME_MODIFIED, onModified);
+
+    const timers = [600, 2000, 5000, 12000].map((ms) => setTimeout(apply, ms));
+
+    return () => {
+      target.removeEventListener(cornerstone.Enums.Events.IMAGE_VOLUME_LOADING_COMPLETED, onCompleted);
+      target.removeEventListener(cornerstone.Enums.Events.IMAGE_VOLUME_MODIFIED, onModified);
+      timers.forEach(clearTimeout);
+    };
+  }, [volumeKey, defaultPreset, PRESETS, renderingEngineId, getAllTargetVpIds, applyPreset]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
@@ -178,7 +202,6 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
     return () => window.removeEventListener('keydown', handler);
   }, [PRESETS, applyPreset, toggleInvert]);
 
-  // Close on outside click
   useEffect(() => {
     if (!isOpen && !showColormap) return;
     const handler = (e: MouseEvent) => {
@@ -198,7 +221,6 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
 
   return (
     <>
-      {/* W/L Presets */}
       <div className="wl-dropdown" ref={dropdownRef} style={{ position: 'relative' }}>
         <button
           className={`toolbar-btn ${isOpen ? 'active' : ''}`}
@@ -245,7 +267,6 @@ export function WindowLevelPresets({ renderingEngineId, viewportIds, modality }:
         )}
       </div>
 
-      {/* Colormap */}
       <div ref={colormapRef} style={{ position: 'relative' }}>
         <button
           className={`toolbar-btn ${showColormap ? 'active' : ''}`}

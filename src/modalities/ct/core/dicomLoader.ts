@@ -17,6 +17,16 @@ export interface DicomSeriesInfo {
   studyDescription: string;
   studyDate: string;
   sopClassUID?: string;
+  imageType?: string;
+  sequenceName?: string;
+  scanningSequence?: string;
+  sequenceVariant?: string;
+  scanOptions?: string;
+  mrAcquisitionType?: string;
+  repetitionTime?: string;
+  echoTime?: string;
+  inversionTime?: string;
+  flipAngle?: string;
 }
 
 interface ParsedFile {
@@ -212,6 +222,16 @@ export async function loadDicomFiles(files: File[]): Promise<DicomSeriesInfo[]> 
         studyDescription: first.studyDescription || 'Unknown Study',
         studyDate: first.studyDate || '',
         sopClassUID: first.sopClassUID || '',
+        imageType: first.imageType || '',
+        sequenceName: first.sequenceName || '',
+        scanningSequence: first.scanningSequence || '',
+        sequenceVariant: first.sequenceVariant || '',
+        scanOptions: first.scanOptions || '',
+        mrAcquisitionType: first.mrAcquisitionType || '',
+        repetitionTime: first.repetitionTime || '',
+        echoTime: first.echoTime || '',
+        inversionTime: first.inversionTime || '',
+        flipAngle: first.flipAngle || '',
       });
     }
   }
