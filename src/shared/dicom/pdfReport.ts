@@ -31,8 +31,26 @@ export interface PdfReportInput {
   footnote?: string;
 }
 
+type JsPdfConstructor = typeof import('jspdf').jsPDF;
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function loadJsPdf(): Promise<JsPdfConstructor> {
+  try {
+    const { jsPDF } = await import('jspdf');
+    if (typeof jsPDF !== 'function') {
+      throw new Error('module did not export jsPDF');
+    }
+    return jsPDF;
+  } catch (error) {
+    throw new Error(`PDF export failed: jsPDF could not be loaded (${describeError(error)})`);
+  }
+}
+
 export async function buildPdfReport(input: PdfReportInput): Promise<Uint8Array> {
-  const { jsPDF } = await import('jspdf');
+  const jsPDF = await loadJsPdf();
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const W = doc.internal.pageSize.getWidth();
   const MARGIN = 48;

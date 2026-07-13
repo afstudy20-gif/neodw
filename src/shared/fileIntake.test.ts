@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  expandAndFilterDicom,
+  FileIntakeError,
   isDicomByMagic,
   looksLikeImplicitDicom,
   isArchiveName,
@@ -91,5 +93,27 @@ describe('sniffArchive', () => {
 
   it('returns null for files shorter than 8 bytes', async () => {
     expect(await sniffArchive(fileFrom([0x50, 0x4b, 0x03]))).toBeNull();
+  });
+});
+
+describe('expandAndFilterDicom archive errors', () => {
+  it('throws a user-visible error for a corrupt ZIP instead of silently dropping it', async () => {
+    const corruptZip = fileFrom(
+      [0x50, 0x4b, 0x03, 0x04, ...new Array(300).fill(0)],
+      'broken-study.zip'
+    );
+
+    await expect(expandAndFilterDicom([corruptZip])).rejects.toThrow(FileIntakeError);
+    await expect(expandAndFilterDicom([corruptZip])).rejects.toThrow(
+      'Failed to extract ZIP archive "broken-study.zip"'
+    );
+  });
+
+  it('throws a user-visible error for unsupported archive families', async () => {
+    const tar = fileFrom(new Array(300).fill(0), 'study.tar.gz');
+
+    await expect(expandAndFilterDicom([tar])).rejects.toThrow(
+      'Unsupported archive type for "study.tar.gz". ZIP and RAR are supported.'
+    );
   });
 });

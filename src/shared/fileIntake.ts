@@ -5,6 +5,38 @@ import JSZip from 'jszip';
 
 const DICOM_MAGIC = [0x44, 0x49, 0x43, 0x4d]; // "DICM" at byte offset 128
 
+interface ArchiveFailure {
+  name: string;
+  reason: string;
+}
+
+export class FileIntakeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FileIntakeError';
+  }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatArchiveFailure(kind: 'ZIP' | 'RAR', archiveName: string, failures: ArchiveFailure[]): FileIntakeError {
+  const preview = failures
+    .slice(0, 3)
+    .map((failure) => `${failure.name} (${failure.reason})`)
+    .join(', ');
+  const remaining = failures.length > 3 ? `, and ${failures.length - 3} more` : '';
+  const noun = failures.length === 1 ? 'entry' : 'entries';
+  return new FileIntakeError(
+    `Failed to extract ${failures.length} ${kind} ${noun} from "${archiveName}": ${preview}${remaining}`
+  );
+}
+
+function isArchiveFailure(value: File | ArchiveFailure | null): value is ArchiveFailure {
+  return value !== null && !(value instanceof File);
+}
+
 // Check DICOM Part-10 magic "DICM" at offset 128.
 export async function isDicomByMagic(file: File | Blob): Promise<boolean> {
   if (file.size < 132) return false;
@@ -60,11 +92,15 @@ async function extractZip(file: File): Promise<File[]> {
         const base = name.split('/').pop() || name;
         return cloneFile(base, data, entry.date?.getTime());
       } catch (e) {
-        console.warn('[intake] zip entry failed', name, e);
-        return null;
+        return { name, reason: describeError(e) };
       }
     })
   );
+
+  const failures = decoded.filter(isArchiveFailure);
+  if (failures.length > 0) {
+    throw formatArchiveFailure('ZIP', file.name, failures);
+  }
 
   return decoded.filter((f): f is File => f != null);
 }
@@ -92,6 +128,7 @@ async function extractRar(file: File): Promise<File[]> {
     const archive = await Archive.open(file);
     const entries = await archive.getFilesArray();
     const out: File[] = [];
+    const failures: ArchiveFailure[] = [];
     for (const entry of entries) {
       try {
         const extracted = await entry.file.extract();
@@ -102,13 +139,19 @@ async function extractRar(file: File): Promise<File[]> {
           out.push(cloneFile(entry.file.name, new Uint8Array(data)));
         }
       } catch (e) {
-        console.warn('[intake] rar entry failed', entry.file?.name, e);
+        failures.push({
+          name: entry.file?.name ?? '<unnamed>',
+          reason: describeError(e),
+        });
       }
+    }
+    if (failures.length > 0) {
+      throw formatArchiveFailure('RAR', file.name, failures);
     }
     return out;
   } catch (e) {
-    console.warn('[intake] rar extraction failed', e);
-    return [];
+    if (e instanceof FileIntakeError) throw e;
+    throw new FileIntakeError(`Failed to extract RAR archive "${file.name}": ${describeError(e)}`);
   }
 }
 
@@ -186,22 +229,18 @@ export async function expandAndFilterDicom(files: File[]): Promise<File[]> {
         const entries = await extractZip(f);
         expanded.push(...entries);
       } catch (e) {
-        console.warn('[intake] zip extract failed', f.name, e);
+        if (e instanceof FileIntakeError) throw e;
+        throw new FileIntakeError(`Failed to extract ZIP archive "${f.name}": ${describeError(e)}`);
       }
       continue;
     }
     if (byContent === 'rar') {
       const entries = await extractRar(f);
-      if (entries.length > 0) {
-        expanded.push(...entries);
-      } else {
-        console.warn('[intake] rar extraction returned no entries — libarchive.js may be unavailable');
-      }
+      expanded.push(...entries);
       continue;
     }
     if (byName === 'tar') {
-      console.warn('[intake] tar/tgz/7z not supported yet, skipping', f.name);
-      continue;
+      throw new FileIntakeError(`Unsupported archive type for "${f.name}". ZIP and RAR are supported.`);
     }
     expanded.push(f);
   }

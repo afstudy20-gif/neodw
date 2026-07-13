@@ -63,7 +63,83 @@ export interface SegBuildResult {
 const DEFAULT_CATEGORY = { code: 'T-D000A', designator: 'SRT', meaning: 'Anatomical Structure' };
 const DEFAULT_TYPE = { code: 'T-D0050', designator: 'SRT', meaning: 'Tissue' };
 
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`SEG ${label} must be a positive integer, got ${value}`);
+  }
+}
+
+function assertPositiveFinite(value: number, label: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`SEG ${label} must be a positive finite number, got ${value}`);
+  }
+}
+
+function assertFiniteTuple(value: readonly number[], expectedLength: number, label: string): void {
+  if (value.length !== expectedLength || value.some((n) => !Number.isFinite(n))) {
+    throw new Error(`SEG ${label} must contain ${expectedLength} finite numbers`);
+  }
+}
+
+function assertRequiredString(value: string | undefined, label: string): void {
+  if (!value || value.trim().length === 0) {
+    throw new Error(`SEG ${label} is required`);
+  }
+}
+
+function validateSegInput(input: SegInput): void {
+  assertPositiveInteger(input.rows, 'rows');
+  assertPositiveInteger(input.columns, 'columns');
+  assertPositiveInteger(input.slices, 'slices');
+
+  const expectedMaskLength = input.rows * input.columns * input.slices;
+  if (input.mask.length !== expectedMaskLength) {
+    throw new Error(
+      `SEG mask length mismatch: expected ${expectedMaskLength} bytes ` +
+      `(${input.slices} slices x ${input.rows} rows x ${input.columns} columns), got ${input.mask.length}`
+    );
+  }
+
+  for (let i = 0; i < input.mask.length; i += 1) {
+    const v = input.mask[i];
+    if (v !== 0 && v !== 1) {
+      throw new Error(`SEG mask must be binary (0 or 1), got ${v} at voxel ${i}`);
+    }
+  }
+
+  assertPositiveFinite(input.pixelSpacing[0], 'pixelSpacing[0]');
+  assertPositiveFinite(input.pixelSpacing[1], 'pixelSpacing[1]');
+  assertPositiveFinite(input.sliceThickness, 'sliceThickness');
+  assertFiniteTuple(input.imagePositionPatient, 3, 'imagePositionPatient');
+  assertFiniteTuple(input.imageOrientationPatient, 6, 'imageOrientationPatient');
+
+  assertRequiredString(input.source.studyInstanceUid, 'source.studyInstanceUid');
+  assertRequiredString(input.source.seriesInstanceUid, 'source.seriesInstanceUid');
+  assertRequiredString(input.source.sopClassUid, 'source.sopClassUid');
+  assertRequiredString(input.label, 'label');
+
+  if (input.source.sopInstanceUids.length !== input.slices) {
+    throw new Error(
+      `SEG source SOP Instance UID count mismatch: expected ${input.slices}, got ${input.source.sopInstanceUids.length}`
+    );
+  }
+  input.source.sopInstanceUids.forEach((uid, index) => {
+    assertRequiredString(uid, `source.sopInstanceUids[${index}]`);
+  });
+
+  if (input.segmentColor) {
+    assertFiniteTuple(input.segmentColor, 3, 'segmentColor');
+    input.segmentColor.forEach((channel, index) => {
+      if (!Number.isInteger(channel) || channel < 0 || channel > 255) {
+        throw new Error(`SEG segmentColor[${index}] must be an integer from 0 to 255, got ${channel}`);
+      }
+    });
+  }
+}
+
 export function buildDicomSeg(input: SegInput): SegBuildResult {
+  validateSegInput(input);
+
   const segSeriesUid = generateUid();
   const segSopUid = generateUid();
   const frameOfReferenceUid = generateUid();
