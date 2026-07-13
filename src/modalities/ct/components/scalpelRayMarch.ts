@@ -175,6 +175,32 @@ export function shouldEraseVoxel(hu: number | null | undefined, eraseValue = SCA
   return hu !== eraseValue;
 }
 
+/**
+ * Walk a view ray front-to-back and return the parametric distance `t` of the
+ * first sample whose HU falls within [minHU, maxHU]. Returns null when nothing
+ * along the range qualifies. `sampleHU` returns null for samples outside the
+ * volume — those are skipped, not treated as a hit.
+ *
+ * This is what turns a 2D pick on a 3D volume render into an accurate seed:
+ * `canvasToWorld` on a volume viewport only yields a focal-plane point, so a
+ * naive seed lands at an arbitrary depth (usually air) and region grow fails.
+ * First-hit marching lands the seed on the structure actually under the cursor.
+ */
+export function firstHitT(
+  range: MarchRange,
+  step: number,
+  sampleHU: (t: number) => number | null,
+  minHU: number,
+  maxHU: number,
+): number | null {
+  if (step <= 0 || range.tMax < range.tMin) return null;
+  for (let t = range.tMin; t <= range.tMax; t += step) {
+    const hu = sampleHU(t);
+    if (hu !== null && hu >= minHU && hu <= maxHU) return t;
+  }
+  return null;
+}
+
 export function collectPolygonRaySamples(
   polygon: Point2[],
   sampleStep = 2,

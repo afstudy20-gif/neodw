@@ -3,6 +3,7 @@ import {
   SCALPEL_AIR_HU,
   buildViewRay,
   collectPolygonRaySamples,
+  firstHitT,
   intersectAabb,
   marchRangeAlongRay,
   pointInPolygon,
@@ -25,6 +26,42 @@ describe('eraseValueForScalarType', () => {
     expect(eraseValueForScalarType(undefined)).toBe(SCALPEL_AIR_HU);
     expect(eraseValueForScalarType(null)).toBe(SCALPEL_AIR_HU);
     expect(eraseValueForScalarType('')).toBe(SCALPEL_AIR_HU);
+  });
+});
+
+describe('firstHitT', () => {
+  // HU profile along a ray: air until t=5, contrast blood (300) at t=5..7, bone (900) after.
+  const sampleHU = (t: number): number | null => {
+    if (t < 0) return null;          // outside the volume
+    if (t < 5) return -1000;         // air
+    if (t < 7) return 300;           // contrast blood pool
+    return 900;                      // bone
+  };
+
+  it('returns the first t whose HU falls in [minHU, maxHU]', () => {
+    const t = firstHitT({ tMin: 0, tMax: 10 }, 1, sampleHU, 100, 500);
+    expect(t).toBe(5); // first sample >= 100 && <= 500
+  });
+
+  it('skips out-of-volume (null) samples without treating them as hits', () => {
+    const t = firstHitT({ tMin: -3, tMax: 6 }, 1, sampleHU, 100, 500);
+    expect(t).toBe(5);
+  });
+
+  it('returns null when nothing along the ray is inside the window', () => {
+    const t = firstHitT({ tMin: 0, tMax: 4 }, 1, sampleHU, 100, 500); // only air sampled
+    expect(t).toBeNull();
+  });
+
+  it('does not stop on denser tissue past the window (bone excluded)', () => {
+    // Window that only matches bone should skip the earlier blood samples.
+    const t = firstHitT({ tMin: 0, tMax: 10 }, 1, sampleHU, 800, 1000);
+    expect(t).toBe(7);
+  });
+
+  it('guards against non-positive step and inverted ranges', () => {
+    expect(firstHitT({ tMin: 0, tMax: 10 }, 0, sampleHU, 100, 500)).toBeNull();
+    expect(firstHitT({ tMin: 10, tMax: 0 }, 1, sampleHU, 100, 500)).toBeNull();
   });
 });
 
