@@ -57,6 +57,50 @@ export interface AccessVesselResult {
   minLumenAtArcLengthMm: number;
 }
 
+/**
+ * User-selected prosthesis for the virtual valve deployment simulation.
+ *
+ * `family` and `size` reference entries in TAVIValveDatabase.VALVE_FAMILIES.
+ * Stored as the nominal `size` label + family name (rather than object refs)
+ * so the selection survives a session round-trip without being tied to a
+ * particular VALVE_FAMILIES array instance.
+ */
+export interface TAVISelectedValve {
+  /** Valve family name, matching ValveFamily.name in TAVIValveDatabase. */
+  familyName: string;
+  /** Nominal label size in mm (e.g. 23, 26, 21.5 for Myval). */
+  sizeMm: number;
+}
+
+/**
+ * Implant-depth distribution ratio for self-expanding valves. Controls how the
+ * nominal frame is positioned relative to the annular plane: the smaller share
+ * sits sub-annular (toward the LVOT) and the larger share supra-annular.
+ * Balloon-expandable valves are short and centred, so this only meaningfully
+ * affects the longer self-expanding frames — but is kept valve-type agnostic so
+ * the toggle stays live across selection changes.
+ */
+export type TAVIDeploymentRatio = '80/20' | '90/10';
+
+/**
+ * Valve-in-Valve (ViV) planning state. Populated when the operator switches to
+ * the ViV subtab. Holds the failing surgical bioprosthesis (selected from the
+ * database or measured on CT) and the TAVI prosthesis chosen to deploy inside it.
+ */
+export interface TAVIVivState {
+  /** Surgical bioprosthesis name (matches VivProsthesisDatabase). */
+  surgicalName: string | null;
+  /** Surgical label size (mm), e.g. 23. */
+  surgicalLabelMm: number | null;
+  /** True internal diameter of the surgical valve (mm). Either from the DB or
+   *  measured directly on CT (measurement overrides DB). */
+  innerDiameterMm: number | null;
+  /** Whether innerDiameterMm was measured on CT (true) or taken from the DB. */
+  measured: boolean;
+  /** Selected TAVI valve to deploy inside (family + size), or null. */
+  selectedTavi: TAVISelectedValve | null;
+}
+
 export type SinusLabel = 'LCS' | 'RCS' | 'NCS'; // Left / Right / Non-coronary sinus
 
 export interface TAVISinusDiameterResult {

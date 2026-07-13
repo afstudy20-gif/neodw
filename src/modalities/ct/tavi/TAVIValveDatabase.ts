@@ -156,6 +156,27 @@ export const VALVE_FAMILIES: ValveFamily[] = [
   myval,
 ];
 
+/**
+ * Resolve a user selection (family name + nominal size) back to its family and
+ * size entries in VALVE_FAMILIES. Returns null when the selection no longer
+ * matches the database (e.g. after a vendor rename / IFU revision). Used by the
+ * virtual deployment view and device-type-aware risk scoring.
+ */
+export function resolveSelectedValve(
+  familyName: string,
+  sizeMm: number,
+): { family: ValveFamily; size: ValveSize } | null {
+  const family = VALVE_FAMILIES.find((f) => f.name === familyName);
+  if (!family) return null;
+  // Match on exact nominal size label. Myval uses 0.5mm increments, so a small
+  // epsilon guards against float compare noise.
+  const size = family.sizes.find(
+    (s) => Math.abs(s.size - sizeMm) < 0.01,
+  );
+  if (!size) return null;
+  return { family, size };
+}
+
 export interface ValveSizeRecommendation {
   family: ValveFamily;
   primarySize: ValveSize | null;

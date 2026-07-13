@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, useImperativeHandle } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useImperativeHandle, useMemo } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { setActiveTool, enableProbeTool, disableProbeTool, enterDoubleObliqueMode, setDoubleObliqueCenterHandler } from '../core/toolManager';
@@ -16,7 +16,7 @@ import {
   TAVIStructureMembranousSeptum,
 } from '../tavi/TAVIMeasurementSession';
 import { TAVIContourSnapshot, TAVIPointSnapshot, TAVIVector3D, TAVIGeometryResult, TAVIFluoroAngleResult, SinusLabel } from '../tavi/TAVITypes';
-import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, ValveSizeRecommendation } from '../tavi/TAVIValveDatabase';
+import { recommendValveSizes, assessTAVRRisks, assessBAVRisk, computePacemakerRiskScore, ValveSizeRecommendation, resolveSelectedValve } from '../tavi/TAVIValveDatabase';
 import { AngioProjectionSimulator } from './AngioProjectionSimulator';
 import { PerpendicularityPlot } from './PerpendicularityPlot';
 import { TAVIGeometry } from '../tavi/TAVIGeometry';
@@ -28,6 +28,12 @@ import { CuspMarkerOverlay, CuspId } from '../tavi/CuspMarkerOverlay';
 import { AnnulusMeasurementOverlay } from '../tavi/AnnulusMeasurementOverlay';
 import { CoronaryHeightView } from './CoronaryHeightView';
 import { ValveVisualization3D } from './ValveVisualization3D';
+import { ValveDeploy3D, type MeshLayer } from './ValveDeploy3D';
+import { frameProfileFor, positionFrame, buildFrameMesh, buildAnnulusDiscMesh, surgicalFrameProfile } from '../tavi/ValveFrameGeometry';
+import { computeDeploymentResult, type DeploymentResult } from '../tavi/ValveDeployment';
+import { useAorticRootSurface } from '../tavi/useAorticRootSurface';
+import { SURGICAL_BIOPROSTHESES, resolveSurgicalBioprosthesis } from '../tavi/VivProsthesisDatabase';
+import { meshToBinarySTL } from '../la/stlExport';
 import { ContourOverlay } from './ContourOverlay';
 import { CuspTriangleOverlay } from './CuspTriangleOverlay';
 import type { ViewportMode } from './ViewportGrid';
@@ -193,7 +199,7 @@ interface TAVIPanelProps {
 }
 
 type TAVIWorkflowPhase = 'legacy' | 'axis-detection' | 'axis-validation' | 'centerline-review' | 'cusp-definition' | 'annulus-tracing' | 'coronary-heights' | 'report';
-type TAVISubtitle = 'valve' | 'as-aort';
+type TAVISubtitle = 'valve' | 'as-aort' | 'viv';
 
 export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   renderingEngineId,
@@ -210,7 +216,13 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const [multiPoints, setMultiPoints] = useState<TAVIPointSnapshot[]>([]);
   const [activeTab, setActiveTab] = useState<'capture' | 'report'>('capture');
   const [activeSubtitle, setActiveSubtitle] = useState<TAVISubtitle>('valve');
-  const [deploymentRatio, setDeploymentRatio] = useState<'80/20' | '90/10'>('80/20');
+  // Deployment ratio lives on the session so the value survives resets and
+  // feeds the report/simulation. Local setter mirrors onto session + triggers re-render.
+  const setDeploymentRatio = useCallback((ratio: '80/20' | '90/10') => {
+    session.deploymentRatio = ratio;
+    session.recompute();
+    setRefresh((p) => p + 1);
+  }, [session]);
   const [livePerp, setLivePerp] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
 
@@ -1992,11 +2004,100 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
     ? assessBAVRisk(ecc(annulus), annulus.minimumDiameterMm, annulus.maximumDiameterMm)
     : { isSuspectedBAV: false, bavWarning: '' };
 
-  // Pacemaker risk score
+  // Resolve the selected prosthesis back to its family/size entry so the risk
+  // models and deployment view can read the device type, sheath OD, etc.
+  const selectedValveEntry = session.selectedValve
+    ? resolveSelectedValve(session.selectedValve.familyName, session.selectedValve.sizeMm)
+    : null;
+
+  // Pacemaker risk score — device-type aware once a prosthesis is selected.
+  // Previously this was hardcoded `isSelfExpanding: false`, which understated
+  // risk for self-expanding valves (Evolut / Navitor / ACURATE). Now it reflects
+  // the actual selected platform and the live implant depth from the simulation.
   const pmRisk = computePacemakerRiskScore({
     membranousSeptumLengthMm: session.membranousSeptumLengthMm,
-    isSelfExpanding: false, // default; ideally based on selected valve
+    implantDepthMm: session.implantDepthMm,
+    isSelfExpanding: selectedValveEntry?.family.type === 'self-expanding',
   });
+
+  // On-demand 3D aortic-root surface (built in the AS.AORT subtab from the
+  // annulus centroid seed). Shared with the valve deployment view so the
+  // prosthesis can be shown in the context of the actual root anatomy.
+  const rootSurface = useAorticRootSurface(volumeId);
+
+  // Virtual deployment meshes. Built only when a prosthesis is selected AND an
+  const deploymentView = useMemo(() => {
+    if (!selectedValveEntry || !session.annulusPlaneCentroid || !session.annulusPlaneNormal) return null;
+    const origin = session.annulusPlaneCentroid;
+    // Aortic axis: prefer the detected axis direction; fall back to the annulus normal.
+    const axisRaw = session.aorticAxisDirection ?? session.annulusPlaneNormal;
+    const len = Math.hypot(axisRaw.x, axisRaw.y, axisRaw.z) || 1;
+    const axis = { x: axisRaw.x / len, y: axisRaw.y / len, z: axisRaw.z / len };
+    // In-plane basis: pick a helper not parallel to the axis, then cross-product.
+    const helper = Math.abs(axis.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 0, y: 1, z: 0 };
+    const lx = TAVIGeometry.vectorNormalize(TAVIGeometry.vectorCross(helper, axis));
+    const ly = TAVIGeometry.vectorNormalize(TAVIGeometry.vectorCross(axis, lx));
+
+    const profile = frameProfileFor(
+      selectedValveEntry.family.name,
+      selectedValveEntry.family.type === 'self-expanding',
+      selectedValveEntry.size.size,
+    );
+    const rings = positionFrame(profile, session.implantDepthMm, session.deploymentRatio);
+    const frameMesh = buildFrameMesh(rings, { origin, axis, localX: lx, localY: ly }, 36);
+    const annulusMesh = buildAnnulusDiscMesh(session.annulusSnapshot?.worldPoints ?? []);
+
+    const layers: MeshLayer[] = [];
+    // Semi-transparent aortic-root surface (built in AS.AORT), if available.
+    if (rootSurface.mesh) {
+      layers.push({ mesh: rootSurface.mesh, color: [0.9, 0.55, 0.35], alpha: 0.22 });
+    }
+    layers.push(
+      { mesh: annulusMesh, color: [0.85, 0.85, 0.85], alpha: 0.18 },
+      { mesh: frameMesh, color: [0.38, 0.78, 1.0], alpha: 0.92 },
+    );
+    const landmarks: { point: TAVIVector3D; color: [number, number, number]; radiusMm?: number }[] = [];
+    if (session.cuspLCC) landmarks.push({ point: session.cuspLCC, color: [0.35, 0.95, 0.45], radiusMm: 1.6 });
+    if (session.cuspNCC) landmarks.push({ point: session.cuspNCC, color: [0.98, 0.88, 0.2], radiusMm: 1.6 });
+    if (session.cuspRCC) landmarks.push({ point: session.cuspRCC, color: [0.98, 0.4, 0.4], radiusMm: 1.6 });
+    if (session.leftOstiumSnapshot) landmarks.push({ point: session.leftOstiumSnapshot.worldPoint, color: [1.0, 0.55, 0.1], radiusMm: 1.8 });
+    if (session.rightOstiumSnapshot) landmarks.push({ point: session.rightOstiumSnapshot.worldPoint, color: [0.7, 0.4, 1.0], radiusMm: 1.8 });
+
+    // Post-deployment metrics (cover index, coronary clearance, PVL indicator).
+    const annulusGeom = session.activeAnnulusGeometry();
+    let deploymentResult: DeploymentResult | null = null;
+    if (annulusGeom) {
+      deploymentResult = computeDeploymentResult({
+        family: selectedValveEntry.family,
+        size: selectedValveEntry.size,
+        annulus: {
+          perimeterMm: annulusGeom.perimeterMm,
+          areaMm2: annulusGeom.areaMm2,
+          minimumDiameterMm: annulusGeom.minimumDiameterMm,
+          maximumDiameterMm: annulusGeom.maximumDiameterMm,
+        },
+        frameOutflowHeightMm: rings[rings.length - 1].heightAboveAnnulusMm,
+        coronaryHeights: { left: session.leftCoronaryHeightMm, right: session.rightCoronaryHeightMm },
+        calciumGrades: { annulus: session.annulusCalcificationGrade, cusp: session.cuspCalcificationGrade },
+      });
+    }
+
+    return { layers, landmarks, frameHeightMm: profile.totalHeightMm, deploymentResult };
+    // refresh lets implant-depth / deployment-ratio / selection changes rebuild.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    selectedValveEntry,
+    session.annulusPlaneCentroid,
+    session.annulusPlaneNormal,
+    session.aorticAxisDirection,
+    session.annulusSnapshot,
+    session.implantDepthMm,
+    session.deploymentRatio,
+    session.cuspLCC, session.cuspNCC, session.cuspRCC,
+    session.leftOstiumSnapshot, session.rightOstiumSnapshot,
+    rootSurface.mesh,
+    refresh,
+  ]);
 
   const navigateToPlanningPlane = useCallback((distanceMm: number) => {
     const controller = controllerRef.current;
@@ -2260,6 +2361,26 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
       ],
     });
 
+    // Virtual deployment summary (only when a prosthesis is selected).
+    const dep = session.deploymentResult();
+    if (session.selectedValve && dep) {
+      sections.push({
+        title: `Virtual Deployment — ${session.selectedValve.familyName} ${fmt(session.selectedValve.sizeMm, session.selectedValve.sizeMm % 1 === 0 ? 0 : 1)}mm`,
+        rows: [
+          { label: 'Implant Depth', value: fmt(session.implantDepthMm), unit: 'mm sub-annular' },
+          { label: 'Deployment Ratio', value: session.deploymentRatio },
+          { label: 'Cover Index', value: fmt(dep.coverIndexPct), unit: '%' },
+          { label: `Oversizing (${dep.oversizingMetric})`, value: fmt(dep.oversizingPct, 0), unit: '%' },
+          ...dep.coronary.map((c) => ({
+            label: `${c.side === 'left' ? 'LCO' : 'RCO'} Clearance`,
+            value: `${fmt(c.clearanceMm)} mm — ${c.risk.toUpperCase()}`,
+          })),
+          { label: 'PVL Risk', value: `${dep.pvl.score}/100 — ${dep.pvl.band.toUpperCase()}` },
+          ...dep.pvl.factors.map((f) => ({ label: '·', value: f })),
+        ],
+      });
+    }
+
     sections.push({
       title: 'Calcification',
       rows: [
@@ -2284,6 +2405,21 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
     if (session.notes) {
       sections.push({ title: 'Comments', rows: [{ label: '', value: session.notes }] });
+    }
+
+    // Valve-in-Valve planning summary (only when ViV data is present).
+    const vivRecs = session.vivRecommendations();
+    if (session.viv.surgicalName || session.viv.innerDiameterMm != null) {
+      sections.push({
+        title: 'Valve-in-Valve Planning',
+        rows: [
+          ...(session.viv.surgicalName ? [{ label: 'Surgical Valve', value: `${session.viv.surgicalName}${session.viv.surgicalLabelMm != null ? ` ${session.viv.surgicalLabelMm}mm` : ''}` }] : []),
+          ...(session.viv.innerDiameterMm != null ? [{ label: 'True Inner Diameter', value: fmt(session.viv.innerDiameterMm), unit: `mm (${session.viv.measured ? 'CT' : 'DB'})` }] : []),
+          ...(session.vivBvfAssessment() ? [{ label: 'BVF', value: `${session.vivBvfAssessment()!.feasible ? 'Feasible' : 'Not reported'}${session.vivBvfAssessment()!.estimatedIdGainMm > 0 ? ` (+${fmt(session.vivBvfAssessment()!.estimatedIdGainMm)}mm)` : ''}` }] : []),
+          ...(vivRecs ? vivRecs.map((rec) => ({ label: `→ ${rec.familyName} ${rec.sizeMm}mm`, value: `CI ${fmt(rec.coverIndexPct)}% — ${rec.fitStatus.toUpperCase()}` })) : []),
+          ...(session.viv.selectedTavi ? [{ label: 'Selected ViV TAVI', value: `${session.viv.selectedTavi.familyName} ${fmt(session.viv.selectedTavi.sizeMm, session.viv.selectedTavi.sizeMm % 1 === 0 ? 0 : 1)}mm` }] : []),
+        ],
+      });
     }
 
     const pdf = await buildPdfReport({
@@ -2427,8 +2563,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
   const renderAsAortCards = () => (
     <div className="tavi-card">
       <div className="tavi-checklist">
-        <Section num="1" title="Ascending Aorta">
-          {session.ascendingAortaGeometry ? (
+        <Section num="1" title="Ascending Aorta">          {session.ascendingAortaGeometry ? (
             <div>
               <div className="tavi-report-grid" style={{ marginBottom: 4 }}>
                 <Row label="Min ø" value={`${fmt(session.ascendingAortaGeometry.minimumDiameterMm)} mm`} />
@@ -2526,6 +2661,259 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             </div>
           )}
         </Section>
+        <Section num="4" title="3D Aortic Root Surface">
+          {!session.annulusPlaneCentroid ? (
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              Capture the annulus plane (VALVE tab) to seed the root segmentation.
+            </div>
+          ) : rootSurface.building ? (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              Building 3D surface… segmenting the aortic lumen.
+            </div>
+          ) : (
+            <div>
+              {rootSurface.error && (
+                <div style={{ fontSize: '0.7rem', color: '#f85149', marginBottom: 4 }}>⚠ {rootSurface.error}</div>
+              )}
+              {rootSurface.mesh ? (
+                <>
+                  <div className="tavi-report-grid" style={{ marginBottom: 6 }}>
+                    <Row label="Volume" value={`${fmt(rootSurface.volumeCm3 ?? 0)} cm³`} />
+                    <Row label="Triangles" value={`${rootSurface.mesh.triangleCount.toLocaleString()}`} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      onClick={() => {
+                        if (session.annulusPlaneCentroid) rootSurface.build(session.annulusPlaneCentroid);
+                      }}
+                      className="tavi-button tavi-button-cancel"
+                      style={{ flex: 1, fontSize: '0.7rem', padding: '4px' }}
+                    >↻ Rebuild</button>
+                    <button
+                      onClick={() => {
+                        if (rootSurface.mesh) {
+                          const blob = meshToBinarySTL(rootSurface.mesh, 'Aortic root — antidicom');
+                          const a = document.createElement('a');
+                          a.href = URL.createObjectURL(blob);
+                          a.download = 'aortic-root.stl';
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                        }
+                      }}
+                      className="tavi-button tavi-button-capture"
+                      style={{ flex: 1, fontSize: '0.7rem', padding: '4px' }}
+                    >⤓ STL</button>
+                    <button
+                      onClick={() => rootSurface.clear()}
+                      className="tavi-button tavi-button-cancel"
+                      style={{ fontSize: '0.7rem', padding: '4px' }}
+                    >✕</button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    if (session.annulusPlaneCentroid) rootSurface.build(session.annulusPlaneCentroid);
+                  }}
+                  className="tavi-button tavi-button-capture"
+                  style={{ width: '100%', fontSize: '0.72rem', padding: '5px 8px' }}
+                >Build 3D Root Surface</button>
+              )}
+              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.3 }}>
+                Seeds from the annulus centroid; shown in the deployment view (VALVE tab).
+              </div>
+            </div>
+          )}
+        </Section>
+      </div>
+    </div>
+  );
+
+  const renderVivCards = () => (
+    <div className="tavi-card">
+      <div className="tavi-checklist">
+        <Section num="1" title="Failing Surgical Bioprosthesis">
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: 4 }}>
+            Select the existing surgical valve — its true inner diameter drives sizing.
+          </div>
+          <select
+            className="tavi-select"
+            value={session.viv.surgicalName ?? ''}
+            onChange={(e) => {
+              const name = e.target.value || null;
+              session.viv.surgicalName = name;
+              // Reset label + measured flag when family changes; re-derive ID from DB.
+              session.viv.surgicalLabelMm = null;
+              session.viv.measured = false;
+              session.viv.innerDiameterMm = null;
+              forceUpdate();
+            }}
+            style={{ width: '100%', fontSize: '0.72rem', marginBottom: 4 }}
+          >
+            <option value="">— Select surgical valve —</option>
+            {SURGICAL_BIOPROSTHESES.map((bp) => (
+              <option key={bp.name} value={bp.name}>{bp.name}</option>
+            ))}
+          </select>
+          {session.viv.surgicalName && (() => {
+            const bp = resolveSurgicalBioprosthesis(session.viv.surgicalName);
+            if (!bp) return null;
+            return (
+              <>
+                <select
+                  className="tavi-select"
+                  value={session.viv.surgicalLabelMm ?? ''}
+                  onChange={(e) => {
+                    session.viv.surgicalLabelMm = e.target.value ? Number(e.target.value) : null;
+                    // Adopt the DB true ID unless a CT measurement overrides it.
+                    if (!session.viv.measured && session.viv.surgicalLabelMm != null) {
+                      session.viv.innerDiameterMm = bp.trueInnerDiameterMm[session.viv.surgicalLabelMm] ?? null;
+                    }
+                    forceUpdate();
+                  }}
+                  style={{ width: '100%', fontSize: '0.72rem' }}
+                >
+                  <option value="">— Label size —</option>
+                  {Object.keys(bp.trueInnerDiameterMm).map((s) => (
+                    <option key={s} value={s}>{s} mm</option>
+                  ))}
+                </select>
+                {session.viv.surgicalLabelMm != null && !session.viv.measured && session.viv.innerDiameterMm != null && (
+                  <div className="tavi-report-grid" style={{ marginTop: 4 }}>
+                    <Row label="True ID (DB)" value={`${fmt(session.viv.innerDiameterMm)} mm`} />
+                    <Row label="BVF" value={bp.bvfFeasible ? 'Feasible' : 'N/R'} />
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </Section>
+
+        <Section num="2" title="Inner Diameter (CT measurement overrides DB)">
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 4 }}>
+            Optionally measure the stent inner diameter on CT for this patient.
+          </div>
+          <div className="tavi-report-grid">
+            <label style={{ fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+              ID
+              <input
+                type="number" step={0.5} min={10} max={35}
+                value={session.viv.innerDiameterMm ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value ? Number(e.target.value) : null;
+                  session.viv.innerDiameterMm = v;
+                  session.viv.measured = v != null;
+                  forceUpdate();
+                }}
+                style={{ width: 64, fontSize: '0.72rem' }}
+              />
+              mm
+            </label>
+            {session.viv.measured && (
+              <span style={{ fontSize: '0.65rem', color: 'var(--accent-green)' }}>✓ CT-measured</span>
+            )}
+          </div>
+        </Section>
+
+        <Section num="3" title="Recommended TAVI-in-Valve">
+          {(() => {
+            const recs = session.vivRecommendations();
+            if (!recs || recs.length === 0) {
+              return <p className="tavi-empty">Select a surgical valve or measure its ID for ViV recommendations.</p>;
+            }
+            const fitColor = (f: string) => f === 'fits' ? '#3fb950' : f === 'tight' ? '#d29922' : f === 'easy' ? '#d29922' : '#f85149';
+            return (
+              <div className="tavi-valve-sizing">
+                {recs.map((rec) => {
+                  const isSel = session.viv.selectedTavi?.familyName === rec.familyName && session.viv.selectedTavi?.sizeMm === rec.sizeMm;
+                  return (
+                    <div key={rec.familyName} className={`tavi-valve-family ${isSel ? 'tavi-valve-family--selected' : ''}`}>
+                      <div className="tavi-valve-family-header">
+                        <span className="tavi-valve-name">{rec.familyName}</span>
+                        <span className={`tavi-valve-type tavi-valve-type--${rec.type}`}>{rec.type === 'balloon-expandable' ? 'BE' : 'SE'}</span>
+                      </div>
+                      <div className="tavi-valve-sizes">
+                        <div className={`tavi-valve-size tavi-valve-size--primary ${rec.fitStatus === 'no' ? 'tavi-valve-size--warning' : ''} ${isSel ? 'tavi-valve-size--selected' : ''}`}>
+                          <div className="tavi-valve-size-row">
+                            <span className="tavi-valve-size-num">{rec.sizeMm}mm</span>
+                            <span className="tavi-valve-size-label" style={{ color: fitColor(rec.fitStatus) }}>{rec.fitStatus.toUpperCase()}</span>
+                            <button
+                              type="button"
+                              className={`tavi-select-btn ${isSel ? 'tavi-select-btn--active' : ''}`}
+                              disabled={rec.fitStatus === 'no'}
+                              onClick={() => {
+                                session.viv.selectedTavi = { familyName: rec.familyName, sizeMm: rec.sizeMm };
+                                forceUpdate();
+                              }}
+                            >{isSel ? '✓' : 'Select'}</button>
+                          </div>
+                          <span className="tavi-valve-size-range">CI: {fmt(rec.coverIndexPct, 1)}%</span>
+                          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{rec.note}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </Section>
+
+        {(() => {
+          const bvf = session.vivBvfAssessment();
+          if (!bvf) return null;
+          return (
+            <Section num="4" title="Bioprosthetic Valve Fracture (BVF)">
+              <div className="tavi-report-grid">
+                <Row label="Feasible" value={bvf.feasible ? 'Yes' : 'No'} />
+                {bvf.estimatedIdGainMm > 0 && <Row label="Est. ID gain" value={`${fmt(bvf.estimatedIdGainMm)} mm`} />}
+              </div>
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.35 }}>{bvf.note}</div>
+            </Section>
+          );
+        })()}
+
+        {session.viv.selectedTavi && session.viv.innerDiameterMm != null && (
+          <Section num="5" title="Nested Frame Simulation">
+            <ValveDeploy3D
+              layers={(() => {
+                // Surgical outer frame + TAVI inner frame, both in annulus space.
+                if (!session.annulusPlaneCentroid || !session.annulusPlaneNormal) return [];
+                const origin = session.annulusPlaneCentroid;
+                const axisRaw = session.aorticAxisDirection ?? session.annulusPlaneNormal;
+                const len = Math.hypot(axisRaw.x, axisRaw.y, axisRaw.z) || 1;
+                const axis = { x: axisRaw.x / len, y: axisRaw.y / len, z: axisRaw.z / len };
+                const helper = Math.abs(axis.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 0, y: 1, z: 0 };
+                const lx = TAVIGeometry.vectorNormalize(TAVIGeometry.vectorCross(helper, axis));
+                const ly = TAVIGeometry.vectorNormalize(TAVIGeometry.vectorCross(axis, lx));
+                const layers: MeshLayer[] = [];
+                if (rootSurface.mesh) layers.push({ mesh: rootSurface.mesh, color: [0.9, 0.55, 0.35], alpha: 0.2 });
+                // Surgical bioprosthesis outer frame
+                const bp = session.viv.surgicalName ? resolveSurgicalBioprosthesis(session.viv.surgicalName) : null;
+                if (bp && session.viv.surgicalLabelMm != null) {
+                  const sProfile = surgicalFrameProfile(bp.frameProfile, session.viv.surgicalLabelMm, session.viv.innerDiameterMm, bp.frameHeightMm);
+                  const sRings = positionFrame(sProfile, 0, '80/20');
+                  layers.push({ mesh: buildFrameMesh(sRings, { origin, axis, localX: lx, localY: ly }, 36), color: [0.75, 0.7, 0.65], alpha: 0.4 });
+                }
+                // TAVI inner frame (the new valve inside)
+                const taviEntry = resolveSelectedValve(session.viv.selectedTavi.familyName, session.viv.selectedTavi.sizeMm);
+                if (taviEntry) {
+                  const tProfile = frameProfileFor(taviEntry.family.name, taviEntry.family.type === 'self-expanding', taviEntry.size.size);
+                  const tRings = positionFrame(tProfile, session.implantDepthMm, session.deploymentRatio);
+                  layers.push({ mesh: buildFrameMesh(tRings, { origin, axis, localX: lx, localY: ly }, 36), color: [0.38, 0.78, 1.0], alpha: 0.92 });
+                }
+                return layers;
+              })()}
+              refreshKey={`viv-${session.viv.surgicalName}-${session.viv.surgicalLabelMm}-${session.viv.innerDiameterMm}-${session.viv.selectedTavi?.familyName}-${session.viv.selectedTavi?.sizeMm}-${refresh}`}
+              height={320}
+            />
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              <span><span style={{ color: '#5ec9ff' }}>■</span> New TAVI valve</span>
+              <span><span style={{ color: '#bfb3a6' }}>■</span> Surgical bioprosthesis</span>
+              {rootSurface.mesh && <span><span style={{ color: '#e68c59' }}>■</span> Aortic root</span>}
+            </div>
+          </Section>
+        )}
       </div>
     </div>
   );
@@ -2541,6 +2929,7 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
               {([
                 ['valve', 'VALVE'],
                 ['as-aort', 'AS.AORT'],
+                ['viv', 'ViV'],
               ] as [TAVISubtitle, string][]).map(([id, label]) => (
                 <button
                   key={id}
@@ -2554,6 +2943,8 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             </div>
 
             {activeSubtitle === 'as-aort' && renderAsAortCards()}
+
+            {activeSubtitle === 'viv' && renderVivCards()}
 
             {activeSubtitle === 'valve' && (
             <div className="tavi-card">
@@ -3830,11 +4221,15 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
 
             {/* ── 2. Valve Sizing Recommendations ── */}
             <div className="tavi-card">
-              <h3 className="tavi-card-title">Valve Sizing</h3>
+              <h3 className="tavi-card-title">Valve Sizing {selectedValveEntry && <span className="tavi-card-subtitle">· Selected: {selectedValveEntry.family.name} {fmt(session.selectedValve!.sizeMm, session.selectedValve!.sizeMm % 1 === 0 ? 0 : 1)}mm</span>}</h3>
               {valveRecs.length > 0 ? (
                 <div className="tavi-valve-sizing">
-                  {valveRecs.map((rec) => (
-                    <div key={rec.family.name} className="tavi-valve-family">
+                  {valveRecs.map((rec) => {
+                    const isSelFamily = selectedValveEntry?.family.name === rec.family.name;
+                    const isSelPrimary = isSelFamily && session.selectedValve?.sizeMm === rec.primarySize?.size;
+                    const isSelAlt = isSelFamily && session.selectedValve?.sizeMm === rec.alternativeSize?.size;
+                    return (
+                    <div key={rec.family.name} className={`tavi-valve-family ${isSelFamily ? 'tavi-valve-family--selected' : ''}`}>
                       <div className="tavi-valve-family-header">
                         <span className="tavi-valve-name">{rec.family.name}</span>
                         <span className="tavi-valve-mfr">{rec.family.manufacturer}</span>
@@ -3844,11 +4239,22 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                       </div>
                       {rec.primarySize && (
                         <div className="tavi-valve-sizes">
-                          <div className={`tavi-valve-size tavi-valve-size--primary ${rec.fitStatus !== 'in-range' ? 'tavi-valve-size--warning' : ''}`}>
-                            <span className="tavi-valve-size-num">{rec.primarySize.size}mm</span>
-                            <span className="tavi-valve-size-label">
-                              {rec.fitStatus === 'in-range' ? 'Recommended' : rec.fitStatus === 'oversized' ? 'Max available' : 'Min available'}
-                            </span>
+                          <div className={`tavi-valve-size tavi-valve-size--primary ${rec.fitStatus !== 'in-range' ? 'tavi-valve-size--warning' : ''} ${isSelPrimary ? 'tavi-valve-size--selected' : ''}`}>
+                            <div className="tavi-valve-size-row">
+                              <span className="tavi-valve-size-num">{rec.primarySize.size}mm</span>
+                              <span className="tavi-valve-size-label">
+                                {rec.fitStatus === 'in-range' ? 'Recommended' : rec.fitStatus === 'oversized' ? 'Max available' : 'Min available'}
+                              </span>
+                              <button
+                                type="button"
+                                className={`tavi-select-btn ${isSelPrimary ? 'tavi-select-btn--active' : ''}`}
+                                onClick={() => {
+                                  session.selectedValve = { familyName: rec.family.name, sizeMm: rec.primarySize!.size };
+                                  session.recompute();
+                                  forceUpdate();
+                                }}
+                              >{isSelPrimary ? '✓ Selected' : 'Select'}</button>
+                            </div>
                             <span className="tavi-valve-size-range">
                               ø {fmt(rec.primarySize.perimeterDiameterMin)}-{fmt(rec.primarySize.perimeterDiameterMax)} mm
                             </span>
@@ -3859,9 +4265,20 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                             )}
                           </div>
                           {rec.alternativeSize && (
-                            <div className="tavi-valve-size tavi-valve-size--alt">
-                              <span className="tavi-valve-size-num">{rec.alternativeSize.size}mm</span>
-                              <span className="tavi-valve-size-label">Alternative</span>
+                            <div className={`tavi-valve-size tavi-valve-size--alt ${isSelAlt ? 'tavi-valve-size--selected' : ''}`}>
+                              <div className="tavi-valve-size-row">
+                                <span className="tavi-valve-size-num">{rec.alternativeSize.size}mm</span>
+                                <span className="tavi-valve-size-label">Alternative</span>
+                                <button
+                                  type="button"
+                                  className={`tavi-select-btn tavi-select-btn--alt ${isSelAlt ? 'tavi-select-btn--active' : ''}`}
+                                  onClick={() => {
+                                    session.selectedValve = { familyName: rec.family.name, sizeMm: rec.alternativeSize!.size };
+                                    session.recompute();
+                                    forceUpdate();
+                                  }}
+                                >{isSelAlt ? '✓ Selected' : 'Select'}</button>
+                              </div>
                               <span className="tavi-valve-size-range">
                                 ø {fmt(rec.alternativeSize.perimeterDiameterMin)}-{fmt(rec.alternativeSize.perimeterDiameterMax)} mm
                               </span>
@@ -3875,20 +4292,40 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
                         </div>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                   <div className="tavi-valve-deployment">
                     <span className="tavi-row-label">Deployment Ratio</span>
                     <div className="tavi-deployment-btns">
                       <button
-                        className={`tavi-deploy-btn ${deploymentRatio === '80/20' ? 'active' : ''}`}
+                        className={`tavi-deploy-btn ${session.deploymentRatio === '80/20' ? 'active' : ''}`}
                         onClick={() => setDeploymentRatio('80/20')}
                       >80/20</button>
                       <button
-                        className={`tavi-deploy-btn ${deploymentRatio === '90/10' ? 'active' : ''}`}
+                        className={`tavi-deploy-btn ${session.deploymentRatio === '90/10' ? 'active' : ''}`}
                         onClick={() => setDeploymentRatio('90/10')}
                       >90/10</button>
                     </div>
                   </div>
+                  {selectedValveEntry && (
+                    <div className="tavi-valve-deployment">
+                      <span className="tavi-row-label">Implant Depth</span>
+                      <div className="tavi-deployment-btns" style={{ flex: 1 }}>
+                        <input
+                          type="range" min={0} max={12} step={0.5}
+                          value={session.implantDepthMm}
+                          onChange={(e) => {
+                            session.implantDepthMm = Number(e.target.value);
+                            session.recompute();
+                            forceUpdate();
+                          }}
+                          style={{ flex: 1, accentColor: 'var(--nd-accent, #58a6ff)' }}
+                          aria-label="Implant depth below annulus"
+                        />
+                        <span className="tavi-deploy-depth-val">{fmt(session.implantDepthMm)} mm</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="tavi-empty">Capture annulus contour for valve recommendations</p>
@@ -3973,19 +4410,82 @@ export const TAVIPanel: React.FC<TAVIPanelProps> = ({
             {/* ── 3c. 3D Valve Visualization ── */}
             {session.annulusPlaneCentroid && (
               <div className="tavi-card">
-                <ValveVisualization3D
-                  annulusContour={session.annulusSnapshot?.worldPoints}
-                  annulusNormal={session.annulusPlaneNormal}
-                  annulusCentroid={session.annulusPlaneCentroid}
-                  cuspLCC={session.cuspLCC}
-                  cuspNCC={session.cuspNCC}
-                  cuspRCC={session.cuspRCC}
-                  axisDirection={session.aorticAxisDirection ?? undefined}
-                  minDiameter={annulus?.minimumDiameterMm}
-                  maxDiameter={annulus?.maximumDiameterMm}
-                  width={0}
-                  height={320}
-                />
+                <h3 className="tavi-card-title">
+                  Virtual Deployment
+                  {deploymentView && selectedValveEntry && (
+                    <span className="tavi-card-subtitle">· {selectedValveEntry.family.name} {fmt(session.selectedValve!.sizeMm, session.selectedValve!.sizeMm % 1 === 0 ? 0 : 1)}mm · frame {fmt(deploymentView.frameHeightMm, 0)}mm · depth {fmt(session.implantDepthMm)}mm</span>
+                  )}
+                </h3>
+                {deploymentView ? (
+                  <>
+                    <ValveDeploy3D
+                      layers={deploymentView.layers}
+                      landmarks={deploymentView.landmarks}
+                      refreshKey={`${session.selectedValve?.familyName}-${session.selectedValve?.sizeMm}-${session.implantDepthMm}-${session.deploymentRatio}-${refresh}`}
+                      height={340}
+                    />
+                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                      <span><span style={{ color: '#5ec9ff' }}>■</span> Stent frame</span>
+                      <span><span style={{ color: '#cccccc' }}>■</span> Annulus plane</span>
+                      <span><span style={{ color: '#59f272' }}>●</span> LCC</span>
+                      <span><span style={{ color: '#fae034' }}>●</span> NCC</span>
+                      <span><span style={{ color: '#fa6666' }}>●</span> RCC</span>
+                      <span><span style={{ color: '#ff8c1a' }}>●</span> LCO</span>
+                      <span><span style={{ color: '#b266ff' }}>●</span> RCO</span>
+                    </div>
+                    {deploymentView.deploymentResult && (() => {
+                      const dr = deploymentView.deploymentResult;
+                      const ciColor = dr.coverIndexPct < 0 || dr.coverIndexPct > 25 ? '#f85149' : dr.coverIndexPct < 5 ? '#d29922' : '#3fb950';
+                      return (
+                        <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                          <div className="tavi-deploy-metric">
+                            <span className="tavi-deploy-metric-label">Cover Index</span>
+                            <span className="tavi-deploy-metric-val" style={{ color: ciColor }}>{fmt(dr.coverIndexPct, 1)}%</span>
+                          </div>
+                          <div className="tavi-deploy-metric">
+                            <span className="tavi-deploy-metric-label">Oversizing ({dr.oversizingMetric === 'area' ? 'area' : 'perim'})</span>
+                            <span className="tavi-deploy-metric-val">{fmt(dr.oversizingPct, 0)}%</span>
+                          </div>
+                          {dr.coronary.map((c) => {
+                            const clr = c.risk === 'high' ? '#f85149' : c.risk === 'moderate' ? '#d29922' : '#3fb950';
+                            return (
+                              <div className="tavi-deploy-metric" key={c.side}>
+                                <span className="tavi-deploy-metric-label">{c.side === 'left' ? 'LCO' : 'RCO'} clearance</span>
+                                <span className="tavi-deploy-metric-val" style={{ color: clr }}>{fmt(c.clearanceMm)} mm {riskBadge(c.risk)}</span>
+                              </div>
+                            );
+                          })}
+                          <div className="tavi-deploy-metric" style={{ gridColumn: '1 / -1' }}>
+                            <span className="tavi-deploy-metric-label">Paravalvular Leak risk {riskBadge(dr.pvl.band)}</span>
+                            <span className="tavi-deploy-metric-val">{dr.pvl.score}/100</span>
+                          </div>
+                          {dr.pvl.factors.length > 0 && (
+                            <div style={{ gridColumn: '1 / -1', fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                              {dr.pvl.factors.join(' · ')}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                ) : (
+                  <>
+                    <ValveVisualization3D
+                      annulusContour={session.annulusSnapshot?.worldPoints}
+                      annulusNormal={session.annulusPlaneNormal}
+                      annulusCentroid={session.annulusPlaneCentroid}
+                      cuspLCC={session.cuspLCC}
+                      cuspNCC={session.cuspNCC}
+                      cuspRCC={session.cuspRCC}
+                      axisDirection={session.aorticAxisDirection ?? undefined}
+                      minDiameter={annulus?.minimumDiameterMm}
+                      maxDiameter={annulus?.maximumDiameterMm}
+                      width={0}
+                      height={320}
+                    />
+                    <p className="tavi-empty" style={{ marginTop: 6 }}>Select a prosthesis above to simulate its deployment in 3D.</p>
+                  </>
+                )}
               </div>
             )}
 

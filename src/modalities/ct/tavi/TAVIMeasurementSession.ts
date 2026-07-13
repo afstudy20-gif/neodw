@@ -13,8 +13,15 @@ import {
   AccessVesselResult,
   AccessRoute,
   PigtailAccessRoute,
+  TAVISelectedValve,
+  TAVIDeploymentRatio,
+  TAVIVivState,
 } from './TAVITypes';
 import { TAVIGeometry } from './TAVIGeometry';
+import { resolveSelectedValve, VALVE_FAMILIES } from './TAVIValveDatabase';
+import { computeDeploymentResult, type DeploymentResult } from './ValveDeployment';
+import { frameProfileFor, positionFrame } from './ValveFrameGeometry';
+import { recommendVivValveSizes, resolveSurgicalBioprosthesis, assessBvf, type VivValveRecommendation } from './VivProsthesisDatabase';
 
 export const TAVIStructureAorticAxis = 'aortic-axis';
 export const TAVIStructureAnnulus = 'annulus';
@@ -130,6 +137,31 @@ export class TAVIMeasurementSession {
   public plannedAccess: AccessRoute = 'Unknown';
   public plannedPigtailAccess: PigtailAccessRoute = 'Unknown';
 
+  // ── Virtual valve deployment (selection state) ──
+  //
+  // The user-chosen prosthesis drives the 3D deployment visualization and the
+  // device-type-aware risk scoring (e.g. self-expanding vs balloon-expandable
+  // pacemaker risk). When null, only sizing *recommendations* are shown and
+  // risk models fall back to conservative defaults.
+  public selectedValve: TAVISelectedValve | null = null;
+  /** Implant depth below the annular plane toward the LVOT, mm (default 5mm). */
+  public implantDepthMm = 5;
+  /** Sub/supra-annular split of the frame. Default 80% supra / 20% sub. */
+  public deploymentRatio: TAVIDeploymentRatio = '80/20';
+
+  // ── Valve-in-Valve (redo-TAVI) planning state ──
+  //
+  // Independent of the native-valve selection above. Populated only when the
+  // operator uses the ViV subtab. Drives the nested-frame 3D view (surgical
+  // bioprosthesis outer frame + TAVI inner frame) and the ViV sizing report.
+  public viv: TAVIVivState = {
+    surgicalName: null,
+    surgicalLabelMm: null,
+    innerDiameterMm: null,
+    measured: false,
+    selectedTavi: null,
+  };
+
   /** Reset all captured measurements and computed results */
   public reset(): void {
     this.aorticAxisPointSnapshots = [];
@@ -192,6 +224,16 @@ export class TAVIMeasurementSession {
     this.cuspCalcificationGradeNCC = 0;
     this.annulusCalcificationGrade = 0;
     this.notes = '';
+    this.selectedValve = null;
+    this.implantDepthMm = 5;
+    this.deploymentRatio = '80/20';
+    this.viv = {
+      surgicalName: null,
+      surgicalLabelMm: null,
+      innerDiameterMm: null,
+      measured: false,
+      selectedTavi: null,
+    };
   }
 
   private applyMetadataFromContour(snapshot?: TAVIContourSnapshot) {
@@ -492,7 +534,11 @@ export class TAVIMeasurementSession {
       const rawAngle = TAVIGeometry.angleBetweenVectors(angleVector, { x: 0, y: 0, z: 1 });
       this.horizontalAortaAngleDegrees = rawAngle > 90 ? 180 - rawAngle : rawAngle;
       if (!this.hasManualVirtualValveDiameter) {
-        this.virtualValveDiameterMm = TAVIRoundToHalfMillimeter(planningAnnulus.equivalentDiameterMm);
+        // When a prosthesis is selected, mirror its nominal diameter so the
+        // legacy scalar stays consistent with the deployment visualization.
+        this.virtualValveDiameterMm = this.selectedValve?.sizeMm
+          ? TAVIRoundToHalfMillimeter(this.selectedValve.sizeMm)
+          : TAVIRoundToHalfMillimeter(planningAnnulus.equivalentDiameterMm);
       }
     }
 
@@ -705,6 +751,59 @@ export class TAVIMeasurementSession {
     lines.push(`Planned Pigtail Access: ${this.plannedPigtailAccess}`);
     lines.push('');
 
+    // Selected prosthesis / virtual deployment
+    if (this.selectedValve) {
+      lines.push('SELECTED PROSTHESIS');
+      lines.push('───────────────────────────────────────────');
+      lines.push(`Valve:            ${this.selectedValve.familyName} ${r(this.selectedValve.sizeMm, this.selectedValve.sizeMm % 1 === 0 ? 0 : 1)} mm`);
+      lines.push(`Implant depth:    ${r(this.implantDepthMm)} mm sub-annular`);
+      lines.push(`Deployment ratio: ${this.deploymentRatio} (supra/sub)`);
+      const dep = this.deploymentResult();
+      if (dep) {
+        lines.push('');
+        lines.push('VIRTUAL DEPLOYMENT (advisory)');
+        lines.push(`  Cover index:        ${r(dep.coverIndexPct)}%  (oversizing ${r(dep.oversizingPct, 0)}% by ${dep.oversizingMetric})`);
+        for (const c of dep.coronary) {
+          const tag = c.side === 'left' ? 'LCO' : 'RCO';
+          lines.push(`  ${tag} clearance:      ${r(c.clearanceMm)} mm  [${c.risk.toUpperCase()} obstruction risk]`);
+        }
+        lines.push(`  PVL indicator:      ${dep.pvl.score}/100  [${dep.pvl.band.toUpperCase()}]`);
+        if (dep.pvl.factors.length > 0) {
+          for (const f of dep.pvl.factors) lines.push(`    · ${f}`);
+        }
+      }
+      lines.push('');
+    }
+
+    // Valve-in-Valve / redo-TAVI planning
+    const vivRecs = this.vivRecommendations();
+    if (this.viv.surgicalName || this.viv.innerDiameterMm != null) {
+      lines.push('VALVE-IN-VALVE PLANNING');
+      lines.push('───────────────────────────────────────────');
+      if (this.viv.surgicalName) {
+        lines.push(`Surgical valve:   ${this.viv.surgicalName}${this.viv.surgicalLabelMm != null ? ` ${this.viv.surgicalLabelMm}mm` : ''}`);
+      }
+      if (this.viv.innerDiameterMm != null) {
+        lines.push(`True inner ø:     ${r(this.viv.innerDiameterMm)} mm  (${this.viv.measured ? 'CT-measured' : 'database'})`);
+      }
+      const bvf = this.vivBvfAssessment();
+      if (bvf) {
+        lines.push(`BVF:              ${bvf.feasible ? 'feasible' : 'not reported'}${bvf.estimatedIdGainMm > 0 ? ` (~+${r(bvf.estimatedIdGainMm)} mm ID gain)` : ''}`);
+      }
+      if (vivRecs && vivRecs.length > 0) {
+        lines.push('');
+        lines.push('Recommended TAVI-in-valve (by fit):');
+        for (const rec of vivRecs) {
+          lines.push(`  ${rec.familyName} ${rec.sizeMm}mm — CI ${r(rec.coverIndexPct)}% [${rec.fitStatus.toUpperCase()}] · ${rec.note}`);
+        }
+      }
+      if (this.viv.selectedTavi) {
+        lines.push('');
+        lines.push(`Selected ViV TAVI: ${this.viv.selectedTavi.familyName} ${r(this.viv.selectedTavi.sizeMm, this.viv.selectedTavi.sizeMm % 1 === 0 ? 0 : 1)}mm`);
+      }
+      lines.push('');
+    }
+
     // Access vessels (ilio-femoral runoff)
     if (this.accessVessels.size > 0) {
       lines.push('ACCESS VESSELS');
@@ -738,6 +837,7 @@ export class TAVIMeasurementSession {
   /** Generate a CSV export of key measurements */
   public csvReport(): string {
     const annulus = this.activeAnnulusGeometry();
+    const vivRecsCsv = this.vivRecommendations();
     const rows: string[][] = [];
 
     rows.push(['Parameter', 'Value', 'Unit']);
@@ -813,6 +913,49 @@ export class TAVIMeasurementSession {
     rows.push(['Planned Access', this.plannedAccess, '']);
     rows.push(['Planned Pigtail Access', this.plannedPigtailAccess, '']);
 
+    if (this.selectedValve) {
+      rows.push(['Selected Valve Family', this.selectedValve.familyName, '']);
+      rows.push(['Selected Valve Size', this.selectedValve.sizeMm.toString(), 'mm']);
+      rows.push(['Implant Depth', this.implantDepthMm.toFixed(1), 'mm']);
+      rows.push(['Deployment Ratio', this.deploymentRatio, '']);
+      const dep = this.deploymentResult();
+      if (dep) {
+        rows.push(['Cover Index', dep.coverIndexPct.toFixed(1), '%']);
+        rows.push(['Oversizing', dep.oversizingPct.toFixed(0), '%']);
+        rows.push(['Oversizing Metric', dep.oversizingMetric, '']);
+        for (const c of dep.coronary) {
+          const tag = c.side === 'left' ? 'LCO' : 'RCO';
+          rows.push([`${tag} Clearance`, c.clearanceMm.toFixed(1), 'mm']);
+          rows.push([`${tag} Obstruction Risk`, c.risk, '']);
+        }
+        rows.push(['PVL Score', String(dep.pvl.score), '/100']);
+        rows.push(['PVL Band', dep.pvl.band, '']);
+      }
+    }
+
+    // Valve-in-Valve
+    if (this.viv.surgicalName) {
+      rows.push(['ViV Surgical Valve', this.viv.surgicalName, '']);
+      if (this.viv.surgicalLabelMm != null) rows.push(['ViV Surgical Size', this.viv.surgicalLabelMm.toString(), 'mm']);
+    }
+    if (this.viv.innerDiameterMm != null) {
+      rows.push(['ViV True Inner Diameter', this.viv.innerDiameterMm.toFixed(1), 'mm']);
+      rows.push(['ViV ID Source', this.viv.measured ? 'CT-measured' : 'database', '']);
+    }
+    const bvf = this.vivBvfAssessment();
+    if (bvf) {
+      rows.push(['ViV BVF Feasible', bvf.feasible ? 'yes' : 'no', '']);
+      rows.push(['ViV BVF ID Gain', bvf.estimatedIdGainMm.toFixed(1), 'mm']);
+    }
+    if (vivRecsCsv && vivRecsCsv.length > 0) {
+      for (const rec of vivRecsCsv) {
+        rows.push([`ViV Rec ${rec.familyName}`, rec.sizeMm.toString(), `mm CI ${rec.coverIndexPct.toFixed(1)}% ${rec.fitStatus}`]);
+      }
+    }
+    if (this.viv.selectedTavi) {
+      rows.push(['ViV Selected TAVI', `${this.viv.selectedTavi.familyName} ${this.viv.selectedTavi.sizeMm}`, 'mm']);
+    }
+
     const vesselCsvNames: Record<AccessVesselId, string> = {
       'thoracic-aorta': 'Thoracic Aorta',
       'abdominal-aorta': 'Abdominal Aorta',
@@ -873,6 +1016,68 @@ export class TAVIMeasurementSession {
 
     const escapeCell = (cell: string) => `"${cell.split('"').join('""')}"`;
     return rows.map(row => row.map(escapeCell).join(',')).join('\n');
+  }
+
+  /**
+   * Compute the post-deployment metrics for the selected prosthesis against the
+   * measured annulus. Returns null until both a prosthesis is selected and an
+   * annulus geometry exists. Used by the report and the 3D deployment view.
+   */
+  public deploymentResult(): DeploymentResult | null {
+    if (!this.selectedValve) return null;
+    const entry = resolveSelectedValve(this.selectedValve.familyName, this.selectedValve.sizeMm);
+    const annulus = this.activeAnnulusGeometry();
+    if (!entry || !annulus) return null;
+    const profile = frameProfileFor(
+      entry.family.name,
+      entry.family.type === 'self-expanding',
+      entry.size.size,
+    );
+    const rings = positionFrame(profile, this.implantDepthMm, this.deploymentRatio);
+    return computeDeploymentResult({
+      family: entry.family,
+      size: entry.size,
+      annulus: {
+        perimeterMm: annulus.perimeterMm,
+        areaMm2: annulus.areaMm2,
+        minimumDiameterMm: annulus.minimumDiameterMm,
+        maximumDiameterMm: annulus.maximumDiameterMm,
+      },
+      frameOutflowHeightMm: rings[rings.length - 1].heightAboveAnnulusMm,
+      coronaryHeights: { left: this.leftCoronaryHeightMm, right: this.rightCoronaryHeightMm },
+      calciumGrades: { annulus: this.annulusCalcificationGrade, cusp: this.cuspCalcificationGrade },
+    });
+  }
+
+  /**
+   * Compute ViV sizing recommendations for the current surgical bioprosthesis
+   * state. Returns null when no inner diameter is available. Uses the measured
+   * diameter when present, otherwise the DB true ID for the selected surgical
+   * valve + label size.
+   */
+  public vivRecommendations(): VivValveRecommendation[] | null {
+    const inner = this.viv.measured && this.viv.innerDiameterMm != null
+      ? this.viv.innerDiameterMm
+      : (() => {
+          if (!this.viv.surgicalName || this.viv.surgicalLabelMm == null) return null;
+          const bp = resolveSurgicalBioprosthesis(this.viv.surgicalName);
+          return bp?.trueInnerDiameterMm[this.viv.surgicalLabelMm] ?? null;
+        })();
+    if (inner == null) return null;
+    const families = VALVE_FAMILIES.map((f) => ({
+      name: f.name,
+      type: f.type,
+      sizes: f.sizes.map((s) => s.size),
+    }));
+    return recommendVivValveSizes(inner, families);
+  }
+
+  /** BVF assessment for the currently-selected surgical bioprosthesis. */
+  public vivBvfAssessment(): { feasible: boolean; estimatedIdGainMm: number; note: string } | null {
+    if (!this.viv.surgicalName || this.viv.surgicalLabelMm == null) return null;
+    const bp = resolveSurgicalBioprosthesis(this.viv.surgicalName);
+    if (!bp) return null;
+    return assessBvf(bp, this.viv.surgicalLabelMm);
   }
 
   public workflowChecklistSummary(): string {
