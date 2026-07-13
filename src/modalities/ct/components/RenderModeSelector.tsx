@@ -1,14 +1,32 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import {
   addScaled,
   buildViewRay,
   collectPolygonRaySamples,
+  firstHitT,
   marchRangeAlongRay,
   shouldEraseVoxel,
   eraseValueForScalarType,
 } from './scalpelRayMarch';
+import {
+  buildAttenuationOpacity,
+  buildRadiographColor,
+  exposureToDensity,
+} from './drr';
+import { buildThresholdMask } from './isoMask';
+import { marchingCubesBinary } from '../la/marchingCubes';
+import { meshToBinarySTL, downloadBlob } from '../la/stlExport';
+import {
+  computeValue,
+  formatMeasurement,
+  deserializeRecord,
+  serializeRecord,
+  storageKey,
+  type Measurement,
+  type Vec3,
+} from './measure3d';
 
 type ScalpelMode = 'off' | 'draw' | 'erase-rect';
 type RenderMode =
@@ -312,15 +330,40 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
   // ── Scalpel Tool: remove structures by painting on 3D viewport ──
   const [scalpelMode, setScalpelMode] = useState<ScalpelMode>('off');
-  // HU Crop range for 3D isolation
+  // HU Crop range for 3D isolation (KaloLumen-style live HU window)
   const [huCropEnabled, setHuCropEnabled] = useState(false);
   const [huCropMin, setHuCropMin] = useState(100);
   const [huCropMax, setHuCropMax] = useState(500);
+  // Gamma shapes the opacity ramp inside the HU window: >1 fills structures in
+  // (denser, cinematic look); <1 keeps only the densest surfaces (thin).
+  const [huGamma, setHuGamma] = useState(1.5);
+  // rAF handle so dragging the window sliders re-renders live without flooding
+  // the mapper with a transfer-function rebuild on every input event.
+  const huCropRafRef = useRef<number | null>(null);
+
+  // DRR — X-ray fluoroscopy simulation (attenuation line integral, additive GPU
+  // ray-cast). Rotating the 3D camera changes the projection direction, so this
+  // is arbitrary-angle fluoroscopy.
+  const [drrEnabled, setDrrEnabled] = useState(false);
+  const [drrExposure, setDrrExposure] = useState(0.5);
+  const drrRafRef = useRef<number | null>(null);
+
+  // STL export of the thresholded / cropped region (marching cubes → binary STL).
+  const [stlStatus, setStlStatus] = useState('');
+  const [stlBusy, setStlBusy] = useState(false);
+
+  // 3D surface measurement + annotation (points picked by ray-march first-hit).
+  const [measureMode, setMeasureMode] = useState<'off' | 'distance' | 'angle'>('off');
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  const measurePendingRef = useRef<Vec3[]>([]);
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [scalpelHasBackup, setScalpelHasBackup] = useState(false);
 
-  // Clipping Box — 6 planes to clip the volume
+  // Clipping Box — 6 planes to crop the volume to a bounding box (hide chest
+  // wall / spine / ribs and focus on the heart + coronaries, KaloLumen-style)
   const [clipEnabled, setClipEnabled] = useState(false);
   const [clipBox, setClipBox] = useState({ xMin: 0, xMax: 100, yMin: 0, yMax: 100, zMin: 0, zMax: 100 }); // percentages
+  const clipRafRef = useRef<number | null>(null);
 
   // Region Growing — flood fill from seed point within HU range
   const [regionGrowMode, setRegionGrowMode] = useState<'off' | 'picking'>('off');
@@ -971,11 +1014,23 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       } catch {
         viewport.render();
       }
-      console.log(`[ClipBox] ${enabled ? 'ON' : 'OFF'}`);
     } catch (e) {
       console.warn('[ClipBox] Error:', e);
     }
   }, [volumeId]);
+
+  // Throttle live bounding-box dragging to one clip-plane rebuild per frame.
+  const scheduleClipBox = useCallback((box: typeof clipBox) => {
+    if (clipRafRef.current !== null) cancelAnimationFrame(clipRafRef.current);
+    clipRafRef.current = requestAnimationFrame(() => {
+      clipRafRef.current = null;
+      applyClipBox(true, box);
+    });
+  }, [applyClipBox]);
+
+  useEffect(() => () => {
+    if (clipRafRef.current !== null) cancelAnimationFrame(clipRafRef.current);
+  }, []);
 
   // ── Region Growing: 3D flood fill from seed within HU range ──
   // Picks a seed from the 3D viewport click, runs BFS to find all connected
@@ -1081,8 +1136,14 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       return null;
     };
 
-    // Erase everything OUTSIDE the region
-    const AIR_HU = -1024;
+    // Erase everything OUTSIDE the region.
+    // The erase value must be in the array's STORED units, not raw HU: writing
+    // −1024 into an UNSIGNED (Uint16) CT array wraps to a huge dense value, so
+    // the "erased" background turns bright instead of transparent. Mirror the
+    // scalpel and use eraseValueForScalarType via getTransparentVoxelValue.
+    // shouldEraseVoxel() then skips air / already-transparent voxels so we don't
+    // rewrite (and on unsigned data, corrupt) the background.
+    const ERASE_VALUE = getTransparentVoxelValue(volume);
     let erased = 0;
     const modifiedSlices = new Set<number>();
     const vm = volume.voxelManager;
@@ -1090,15 +1151,15 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
           const idx = toIdx(i, j, k);
-          if (!mask[idx] && scalarData[idx] > -200) {
-            scalarData[idx] = AIR_HU;
-            vm.setAtIJK(i, j, k, AIR_HU); // Dual-write!
-            
+          if (!mask[idx] && shouldEraseVoxel(scalarData[idx], ERASE_VALUE)) {
+            scalarData[idx] = ERASE_VALUE;
+            vm.setAtIJK(i, j, k, ERASE_VALUE); // Dual-write!
+
             const sliceData = getSliceData(k);
             if (sliceData) {
-              sliceData[j * nx + i] = AIR_HU;
+              sliceData[j * nx + i] = ERASE_VALUE;
             }
-            
+
             modifiedSlices.add(k);
             erased++;
           }
@@ -1140,7 +1201,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     } catch { /* ignore */ }
 
     setRegionGrowStatus(`Isolated ${regionSize.toLocaleString()} voxels (${modifiedSlices.size} slices)`);
-  }, [volumeId, saveVolumeBackup, renderingEngineId]);
+  }, [volumeId, saveVolumeBackup, renderingEngineId, getTransparentVoxelValue]);
 
   // Handle seed picking from 3D viewport click
   useEffect(() => {
@@ -1157,21 +1218,69 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
 
-      const worldPoint = (viewport as any).canvasToWorld?.([cx, cy]);
-      if (!worldPoint) { setRegionGrowStatus('Could not map click to world'); return; }
+      const worldTarget = (viewport as any).canvasToWorld?.([cx, cy]) as number[] | undefined;
+      if (!worldTarget) { setRegionGrowStatus('Could not map click to world'); return; }
 
       const volume = cornerstone.cache.getVolume(volumeId) as any;
       if (!volume?.imageData) return;
-      const ijk = volume.imageData.worldToIndex(worldPoint);
-      const seed: [number, number, number] = [Math.round(ijk[0]), Math.round(ijk[1]), Math.round(ijk[2])];
+      const imageData = volume.imageData;
+      const vm = volume.voxelManager;
+      const dims = imageData.getDimensions();
+
+      const toIJK = (world: number[]): [number, number, number] => {
+        const ijk = imageData.worldToIndex(world);
+        return [Math.round(ijk[0]), Math.round(ijk[1]), Math.round(ijk[2])];
+      };
+      const huAt = (seedIJK: [number, number, number]): number | null => {
+        const [i, j, k] = seedIJK;
+        if (i < 0 || i >= dims[0] || j < 0 || j >= dims[1] || k < 0 || k >= dims[2]) return null;
+        const v = vm?.getAtIJK?.(i, j, k);
+        return typeof v === 'number' ? v : null;
+      };
+
+      // Turn the 2D pick into an accurate 3D seed by marching the view ray
+      // front-to-back and taking the FIRST voxel inside the contrast window.
+      // canvasToWorld on a volume viewport only yields the focal-plane depth, so
+      // a naive seed lands at an arbitrary depth (usually air) and the grow fails
+      // — this is the long-standing "region grow never works on 3D" cause.
+      let seed: [number, number, number] | null = null;
+      const cam = viewport.getCamera();
+      const viewRay = buildViewRay(cam as any, worldTarget as [number, number, number]);
+      if (viewRay) {
+        const bounds = imageData.getBounds();
+        const spacing = imageData.getSpacing();
+        const step = Math.min(spacing[0], spacing[1], spacing[2]) * 0.5;
+        const range = marchRangeAlongRay(
+          viewRay.origin, viewRay.dir, bounds, cam as any, worldTarget as [number, number, number],
+        );
+        if (range) {
+          const tHit = firstHitT(
+            range,
+            step,
+            (t) => huAt(toIJK(addScaled(viewRay.origin, viewRay.dir, t))),
+            regionGrowHuMin,
+            regionGrowHuMax,
+          );
+          if (tHit !== null) seed = toIJK(addScaled(viewRay.origin, viewRay.dir, tHit));
+        }
+      }
+      // Fallback to the focal-plane point (previous behaviour) if the ray missed.
+      if (!seed) seed = toIJK(worldTarget);
       regionGrowSeedRef.current = seed;
 
-      const hu = volume.voxelManager?.getAtIJK(seed[0], seed[1], seed[2]);
-      setRegionGrowStatus(`Seed: [${seed.join(',')}] HU=${hu}`);
+      const hu = huAt(seed);
+      if (hu === null || hu < regionGrowHuMin || hu > regionGrowHuMax) {
+        setRegionGrowStatus(
+          `No contrast voxel under cursor (HU=${hu ?? 'n/a'}). Aim at the blood pool / aorta, or widen the HU range.`,
+        );
+        setRegionGrowMode('off');
+        return;
+      }
+      setRegionGrowStatus(`Seed [${seed.join(',')}] HU=${Math.round(hu)} — growing…`);
       setRegionGrowMode('off');
 
       // Auto-run grow
-      setTimeout(() => applyRegionGrow(seed, regionGrowHuMin, regionGrowHuMax), 50);
+      setTimeout(() => applyRegionGrow(seed!, regionGrowHuMin, regionGrowHuMax), 50);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1202,7 +1311,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
 
   const BASE_COLOR = '20 -3024 0 0 0 67.0106 0.54902 0.25098 0.14902 251.105 0.882353 0.603922 0.290196 439.291 1 0.937033 0.954531 3071 0.827451 0.658824 1';
 
-  const applyHuCrop = useCallback((enabled: boolean, minHU: number, maxHU: number) => {
+  const applyHuCrop = useCallback((enabled: boolean, minHU: number, maxHU: number, gamma: number) => {
     const viewport = getViewport3d();
     if (!viewport) return;
     try {
@@ -1210,14 +1319,24 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       if (!enabled) {
         opacityStr = '10 -3024 0 67.0106 0 251.105 0.446429 439.291 0.625 3071 0.616071';
       } else {
-        const ramp = 20;
-        const pts: [number, number][] = [
-          [-3024, 0], [minHU - ramp, 0], [minHU, 0.05], [minHU + ramp, 0.4],
-          [(minHU + maxHU) / 2, 0.6],
-          [maxHU - ramp, 0.5], [maxHU, 0.05], [maxHU + ramp, 0], [3071, 0],
+        // Guarantee a valid window even if the handles cross.
+        const lo = Math.min(minHU, maxHU);
+        const hi = Math.max(minHU, maxHU);
+        const ramp = Math.max(1, Math.min(20, (hi - lo) / 4));
+        const basePts: [number, number][] = [
+          [-3024, 0], [lo - ramp, 0], [lo, 0.05], [lo + ramp, 0.4],
+          [(lo + hi) / 2, 0.6],
+          [hi - ramp, 0.5], [hi, 0.05], [hi + ramp, 0], [3071, 0],
         ];
+        // Gamma bends the normalized opacity: exponent = 1/gamma, so gamma > 1
+        // raises low opacities (fills structures in, cinematic), gamma < 1 keeps
+        // only the densest core (surface-only). This is the tweet's live "gamma".
+        const exp = 1 / Math.max(0.1, gamma);
+        const pts = basePts.map(
+          ([h, o]) => [h, Math.max(0, Math.min(1, Math.pow(o, exp)))] as [number, number],
+        );
         const count = pts.length * 2;
-        opacityStr = count + ' ' + pts.map(([h, o]) => `${h} ${o}`).join(' ');
+        opacityStr = count + ' ' + pts.map(([h, o]) => `${h} ${o.toFixed(4)}`).join(' ');
       }
 
       viewport.setProperties({
@@ -1230,12 +1349,315 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           ambient: '0.1', diffuse: '0.9', interpolation: '1',
         } as any,
       });
-
-      console.log(`[HUCrop] ${enabled ? `${minHU}→${maxHU} HU` : 'disabled'}`);
     } catch (e) {
       console.warn('[HUCrop] Error:', e);
     }
   }, []);
+
+  // Throttle live window/gamma dragging to one transfer-function rebuild per
+  // animation frame — keeps the 3D render responsive during a drag.
+  const scheduleHuCrop = useCallback((minHU: number, maxHU: number, gamma: number) => {
+    if (huCropRafRef.current !== null) cancelAnimationFrame(huCropRafRef.current);
+    huCropRafRef.current = requestAnimationFrame(() => {
+      huCropRafRef.current = null;
+      applyHuCrop(true, minHU, maxHU, gamma);
+    });
+  }, [applyHuCrop]);
+
+  useEffect(() => () => {
+    if (huCropRafRef.current !== null) cancelAnimationFrame(huCropRafRef.current);
+  }, []);
+
+  // Switch the 3D viewport between the cinematic composite VR and a DRR (X-ray
+  // fluoroscopy simulation). DRR uses VTK's additive-intensity blend so the GPU
+  // ray-cast accumulates ∫μ dl — a physically-grounded attenuation projection.
+  const applyDrr = useCallback((enabled: boolean, exposure: number) => {
+    const viewport = getViewport3d();
+    if (!viewport) return;
+    try {
+      if (!enabled) {
+        // Restore composite VR and re-apply the active preset + shading.
+        // NOTE: VolumeViewport3D.setBlendMode is a no-op, so reset the blend on
+        // the vtk mapper directly or the restored preset renders additively.
+        const actor = viewport.getDefaultActor()?.actor;
+        const mapper = actor?.getMapper?.() as {
+          setBlendModeToComposite?: () => void;
+          setBlendMode?: (m: number) => void;
+        } | undefined;
+        if (mapper?.setBlendModeToComposite) mapper.setBlendModeToComposite();
+        else mapper?.setBlendMode?.(0); // VTK COMPOSITE_BLEND = 0
+        const presetInfo = PRESETS.find((p) => p.key === mode);
+        if (presetInfo) viewport.setProperties({ preset: presetInfo.preset });
+        viewport.render();
+        applyShading(ambient, diffuse, specular, specularPower);
+        return;
+      }
+
+      const density = exposureToDensity(exposure);
+      viewport.setProperties({
+        preset: {
+          name: `drr-${Date.now()}`,
+          scalarOpacity: buildAttenuationOpacity(density),
+          colorTransfer: buildRadiographColor(),
+          gradientOpacity: '4 0 1 255 1',
+          // An X-ray has no surface lighting — flat emission only.
+          shade: '0', ambient: '1', diffuse: '0', specular: '0',
+          interpolation: '1',
+        } as any,
+      });
+
+      // VTK ADDITIVE_INTENSITY_BLEND = 4. Cornerstone's BlendModes enum does not
+      // expose it, so set it on the underlying vtk mapper directly.
+      const actor = viewport.getDefaultActor()?.actor;
+      const mapper = actor?.getMapper?.() as {
+        setBlendModeToAdditiveIntensity?: () => void;
+        setBlendMode?: (m: number) => void;
+      } | undefined;
+      if (mapper?.setBlendModeToAdditiveIntensity) mapper.setBlendModeToAdditiveIntensity();
+      else mapper?.setBlendMode?.(4);
+
+      viewport.render();
+    } catch (e) {
+      console.warn('[DRR] Error:', e);
+    }
+  }, [mode, ambient, diffuse, specular, specularPower, applyShading]);
+
+  // Throttle live exposure dragging to one rebuild per frame.
+  const scheduleDrr = useCallback((exposure: number) => {
+    if (drrRafRef.current !== null) cancelAnimationFrame(drrRafRef.current);
+    drrRafRef.current = requestAnimationFrame(() => {
+      drrRafRef.current = null;
+      applyDrr(true, exposure);
+    });
+  }, [applyDrr]);
+
+  useEffect(() => () => {
+    if (drrRafRef.current !== null) cancelAnimationFrame(drrRafRef.current);
+  }, []);
+
+  // Export the currently-thresholded / cropped region as a binary STL surface.
+  // Uses the live HU window when enabled (else a bone+contrast default) and the
+  // clip box when enabled — i.e. exactly what the 3D view is showing.
+  const exportStl = useCallback(async () => {
+    const volume = cornerstone.cache.getVolume(volumeId) as any;
+    if (!volume?.imageData) { setStlStatus('No volume loaded'); return; }
+    setStlBusy(true);
+    setStlStatus('Building surface…');
+    try {
+      const imageData = volume.imageData;
+      const [dx, dy, dz] = imageData.getDimensions();
+      const scalar: ArrayLike<number> | null =
+        imageData.getPointData?.()?.getScalars?.()?.getData?.()
+        ?? volume.voxelManager?.getCompleteScalarDataArray?.()
+        ?? null;
+      if (!scalar) { setStlStatus('Scalar data not ready'); setStlBusy(false); return; }
+
+      // Threshold window: the live HU crop if on, otherwise contrast+bone.
+      const minHU = huCropEnabled ? huCropMin : 150;
+      const maxHU = huCropEnabled ? huCropMax : 3071;
+      const { mask, count } = buildThresholdMask(
+        scalar, { dx, dy, dz }, minHU, maxHU, clipEnabled ? clipBox : null,
+      );
+      if (count === 0) { setStlStatus('Nothing in the current window to export'); setStlBusy(false); return; }
+
+      // Let the "Building surface…" paint before the synchronous marching cubes.
+      await new Promise((r) => setTimeout(r, 20));
+      const voxelToWorld = (i: number, j: number, k: number): [number, number, number] => {
+        const w = imageData.indexToWorld([i, j, k]);
+        return [w[0], w[1], w[2]];
+      };
+      const mesh = marchingCubesBinary(mask, { dx, dy, dz }, voxelToWorld);
+      if (mesh.triangleCount === 0) { setStlStatus('Surface was empty'); setStlBusy(false); return; }
+
+      const blob = meshToBinarySTL(mesh, `NeoDW ${minHU}-${maxHU}HU`);
+      downloadBlob(blob, `neodw-mesh-${minHU}-${maxHU}HU.stl`);
+      setStlStatus(`Exported ${mesh.triangleCount.toLocaleString()} triangles`);
+    } catch (e) {
+      console.warn('[STL] export failed:', e);
+      setStlStatus('Export failed — see console');
+    } finally {
+      setStlBusy(false);
+    }
+  }, [volumeId, huCropEnabled, huCropMin, huCropMax, clipEnabled, clipBox]);
+
+  // Stable per-series key so measurements persist and reload with the same study
+  // (including on another machine). Prefer SeriesInstanceUID; fall back to volumeId.
+  const seriesKey = useMemo(() => {
+    try {
+      const volume = cornerstone.cache.getVolume(volumeId) as any;
+      const uid = volume?.metadata?.SeriesInstanceUID
+        ?? volume?.imageIds?.[0]?.split('/').find((s: string) => /^\d+(\.\d+)+$/.test(s));
+      return String(uid || volumeId);
+    } catch {
+      return volumeId;
+    }
+  }, [volumeId]);
+
+  // Load persisted measurements for this series.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(storageKey(seriesKey));
+      setMeasurements(deserializeRecord(seriesKey, raw).measurements);
+    } catch { setMeasurements([]); }
+  }, [seriesKey]);
+
+  // Persist on change (measurements only; annotations reuse the same record).
+  const persistMeasurements = useCallback((next: Measurement[]) => {
+    try {
+      const raw = window.localStorage.getItem(storageKey(seriesKey));
+      const record = deserializeRecord(seriesKey, raw);
+      window.localStorage.setItem(
+        storageKey(seriesKey),
+        serializeRecord({ ...record, seriesKey, measurements: next }),
+      );
+    } catch { /* storage full / unavailable — keep in-memory */ }
+  }, [seriesKey]);
+
+  // Pick a 3D surface point under the cursor via ray-march first-hit (same
+  // technique as region-grow seeding). Returns world coords or null.
+  const pickSurfacePoint = useCallback((cx: number, cy: number): Vec3 | null => {
+    const viewport = getViewport3d();
+    const volume = cornerstone.cache.getVolume(volumeId) as any;
+    if (!viewport || !volume?.imageData) return null;
+    const imageData = volume.imageData;
+    const vm = volume.voxelManager;
+    const dims = imageData.getDimensions();
+    const worldTarget = (viewport as any).canvasToWorld?.([cx, cy]) as number[] | undefined;
+    if (!worldTarget) return null;
+    const cam = viewport.getCamera();
+    const viewRay = buildViewRay(cam as any, worldTarget as [number, number, number]);
+    if (!viewRay) return null;
+    const spacing = imageData.getSpacing();
+    const step = Math.min(spacing[0], spacing[1], spacing[2]) * 0.5;
+    const range = marchRangeAlongRay(
+      viewRay.origin, viewRay.dir, imageData.getBounds(), cam as any, worldTarget as [number, number, number],
+    );
+    if (!range) return null;
+    // Surface = first voxel above the current window's lower edge (or tissue).
+    const surfMin = huCropEnabled ? huCropMin : -200;
+    const surfMax = huCropEnabled ? huCropMax : 3071;
+    const huAt = (t: number): number | null => {
+      const w = addScaled(viewRay.origin, viewRay.dir, t);
+      const ijk = imageData.worldToIndex(w);
+      const i = Math.round(ijk[0]); const j = Math.round(ijk[1]); const k = Math.round(ijk[2]);
+      if (i < 0 || i >= dims[0] || j < 0 || j >= dims[1] || k < 0 || k >= dims[2]) return null;
+      const v = vm?.getAtIJK?.(i, j, k);
+      return typeof v === 'number' ? v : null;
+    };
+    const tHit = firstHitT(range, step, huAt, surfMin, surfMax);
+    if (tHit === null) return null;
+    return addScaled(viewRay.origin, viewRay.dir, tHit) as Vec3;
+  }, [volumeId, huCropEnabled, huCropMin, huCropMax]);
+
+  const clearMeasurements = useCallback(() => {
+    measurePendingRef.current = [];
+    setMeasurements([]);
+    persistMeasurements([]);
+  }, [persistMeasurements]);
+
+  // Overlay: draw all measurements + the in-progress pick, projecting each world
+  // point to canvas every frame so markers track the camera. Also captures the
+  // pick click while a measure mode is active. Mounted whenever there is
+  // something to show or a mode is active.
+  useEffect(() => {
+    const active = measureMode !== 'off';
+    if (!active && measurements.length === 0) {
+      if (measureCanvasRef.current) { measureCanvasRef.current.remove(); measureCanvasRef.current = null; }
+      return;
+    }
+    const viewport = getViewport3d();
+    if (!viewport?.element) return;
+    const el = viewport.element;
+
+    let canvas = measureCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;z-index:56;pointer-events:${active ? 'auto' : 'none'};cursor:${active ? 'crosshair' : 'default'};`;
+      el.style.position = 'relative';
+      el.appendChild(canvas);
+      measureCanvasRef.current = canvas;
+    }
+    canvas.style.pointerEvents = active ? 'auto' : 'none';
+    canvas.style.cursor = active ? 'crosshair' : 'default';
+
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d')!;
+    const toCanvas = (p: Vec3): [number, number] | null => {
+      const c = (viewport as any).worldToCanvas?.(p);
+      return c ? [c[0], c[1]] : null;
+    };
+
+    let raf = 0;
+    const draw = () => {
+      const w = el.clientWidth; const h = el.clientHeight;
+      if (canvas!.width !== w * dpr || canvas!.height !== h * dpr) {
+        canvas!.width = w * dpr; canvas!.height = h * dpr;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const drawPoints = (pts: Vec3[], color: string, valueText?: string) => {
+        const cpts = pts.map(toCanvas);
+        ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let started = false;
+        for (const c of cpts) {
+          if (!c) { started = false; continue; }
+          if (!started) { ctx.moveTo(c[0], c[1]); started = true; } else ctx.lineTo(c[0], c[1]);
+        }
+        ctx.stroke();
+        for (const c of cpts) {
+          if (!c) continue;
+          ctx.beginPath(); ctx.arc(c[0], c[1], 3, 0, Math.PI * 2); ctx.fill();
+        }
+        if (valueText) {
+          const last = cpts.filter(Boolean).pop() as [number, number] | undefined;
+          if (last) {
+            ctx.font = 'bold 12px -apple-system, sans-serif';
+            ctx.fillStyle = '#000'; ctx.fillText(valueText, last[0] + 7, last[1] - 5);
+            ctx.fillStyle = color; ctx.fillText(valueText, last[0] + 6, last[1] - 6);
+          }
+        }
+      };
+
+      for (const m of measurements) drawPoints(m.points, '#4fc3f7', formatMeasurement(m));
+      if (measurePendingRef.current.length) drawPoints(measurePendingRef.current, '#ffb74d');
+
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+
+    const onClick = (e: MouseEvent) => {
+      if (measureMode === 'off' || e.target !== canvas) return;
+      e.preventDefault(); e.stopPropagation();
+      const rect = canvas!.getBoundingClientRect();
+      const pt = pickSurfacePoint(e.clientX - rect.left, e.clientY - rect.top);
+      if (!pt) return;
+      const pending = [...measurePendingRef.current, pt];
+      const need = measureMode === 'distance' ? 2 : 3;
+      if (pending.length >= need) {
+        const value = computeValue(measureMode, pending);
+        if (value !== null) {
+          const m: Measurement = {
+            id: `${seriesKey}:${measurements.length}:${pending.map((p) => p.map(Math.round).join('_')).join('|')}`,
+            kind: measureMode, points: pending, value,
+          };
+          const next = [...measurements, m];
+          setMeasurements(next);
+          persistMeasurements(next);
+        }
+        measurePendingRef.current = [];
+      } else {
+        measurePendingRef.current = pending;
+      }
+    };
+    canvas.addEventListener('click', onClick, true);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      canvas?.removeEventListener('click', onClick, true);
+    };
+  }, [measureMode, measurements, pickSurfacePoint, persistMeasurements, seriesKey]);
 
   const zoom3d = (factor: number) => {
     const viewport = getViewport3d();
@@ -1473,45 +1895,74 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         ))}
       </div>
 
-      {/* HU Crop — isolate structures by HU range */}
+      {/* DRR — X-ray fluoroscopy simulation (attenuation projection) */}
       <div style={{ padding: '4px 0', borderTop: '1px solid var(--border)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: huCropEnabled ? 4 : 0 }}>
-          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>Crop:</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: drrEnabled ? 4 : 0, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>X-ray (DRR):</span>
+          <button
+            className={`render-mode-btn ${drrEnabled ? 'active' : ''}`}
+            onClick={() => { const next = !drrEnabled; setDrrEnabled(next); applyDrr(next, drrExposure); }}
+            style={{ fontSize: '10px', padding: '2px 8px', fontWeight: 600 }}
+            title="Simulated X-ray fluoroscopy — attenuation projection (∫μ·dl). Rotate the 3D view for any angle."
+          >
+            {drrEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        {drrEnabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 52 }}>Exposure</span>
+            <input type="range" min={0} max={1} step={0.01} value={drrExposure}
+              onChange={(e) => { const v = Number(e.target.value); setDrrExposure(v); scheduleDrr(v); }}
+              style={{ flex: 1, height: 3 }} />
+            <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 30, textAlign: 'right' }}>{drrExposure.toFixed(2)}</span>
+          </div>
+        )}
+      </div>
+
+      {/* HU Window — KaloLumen-style live threshold isolation */}
+      <div style={{ padding: '4px 0', borderTop: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: huCropEnabled ? 4 : 0, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>HU Window:</span>
           <button
             className={`render-mode-btn ${huCropEnabled ? 'active' : ''}`}
-            onClick={() => { const next = !huCropEnabled; setHuCropEnabled(next); applyHuCrop(next, huCropMin, huCropMax); }}
+            onClick={() => { const next = !huCropEnabled; setHuCropEnabled(next); applyHuCrop(next, huCropMin, huCropMax, huGamma); }}
             style={{ fontSize: '10px', padding: '2px 8px', fontWeight: 600 }}
-            title="Enable HU crop to isolate structures"
+            title="Live HU threshold window — isolate structures and drag to update the 3D render in real time"
           >
             {huCropEnabled ? 'ON' : 'OFF'}
           </button>
           {/* Quick presets */}
-          <button className="render-mode-btn" onClick={() => { setHuCropMin(100); setHuCropMax(500); setHuCropEnabled(true); applyHuCrop(true, 100, 500); }}
+          <button className="render-mode-btn" onClick={() => { setHuCropMin(100); setHuCropMax(500); setHuCropEnabled(true); applyHuCrop(true, 100, 500, huGamma); }}
             title="Heart only (contrast 100-500 HU)" style={{ fontSize: '10px', padding: '2px 6px' }}>Heart</button>
-          <button className="render-mode-btn" onClick={() => { setHuCropMin(150); setHuCropMax(600); setHuCropEnabled(true); applyHuCrop(true, 150, 600); }}
+          <button className="render-mode-btn" onClick={() => { setHuCropMin(150); setHuCropMax(600); setHuCropEnabled(true); applyHuCrop(true, 150, 600, huGamma); }}
             title="Vessels (150-600 HU)" style={{ fontSize: '10px', padding: '2px 6px' }}>Vessels</button>
-          <button className="render-mode-btn" onClick={() => { setHuCropMin(200); setHuCropMax(1500); setHuCropEnabled(true); applyHuCrop(true, 200, 1500); }}
+          <button className="render-mode-btn" onClick={() => { setHuCropMin(200); setHuCropMax(1500); setHuCropEnabled(true); applyHuCrop(true, 200, 1500, huGamma); }}
             title="Bone (200-1500 HU)" style={{ fontSize: '10px', padding: '2px 6px' }}>Bone</button>
-          <button className="render-mode-btn" onClick={() => { setHuCropEnabled(false); applyHuCrop(false, 0, 0); }}
+          <button className="render-mode-btn" onClick={() => { setHuCropEnabled(false); applyHuCrop(false, 0, 0, huGamma); }}
             title="Reset — show all" style={{ fontSize: '10px', padding: '2px 6px' }}>Reset</button>
         </div>
         {huCropEnabled && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 30 }}>Min</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 42 }}>Lower</span>
               <input type="range" min={-1024} max={2000} value={huCropMin}
-                onChange={(e) => setHuCropMin(Number(e.target.value))}
-                onMouseUp={(e) => applyHuCrop(true, Number((e.target as HTMLInputElement).value), huCropMax)}
+                onChange={(e) => { const v = Number(e.target.value); setHuCropMin(v); scheduleHuCrop(v, huCropMax, huGamma); }}
                 style={{ flex: 1, height: 3 }} />
-              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 45, textAlign: 'right' }}>{huCropMin} HU</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 52, textAlign: 'right' }}>{huCropMin} HU</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 30 }}>Max</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 42 }}>Upper</span>
               <input type="range" min={-500} max={3071} value={huCropMax}
-                onChange={(e) => setHuCropMax(Number(e.target.value))}
-                onMouseUp={(e) => applyHuCrop(true, huCropMin, Number((e.target as HTMLInputElement).value))}
+                onChange={(e) => { const v = Number(e.target.value); setHuCropMax(v); scheduleHuCrop(huCropMin, v, huGamma); }}
                 style={{ flex: 1, height: 3 }} />
-              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 45, textAlign: 'right' }}>{huCropMax} HU</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 52, textAlign: 'right' }}>{huCropMax} HU</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 42 }}>Gamma</span>
+              <input type="range" min={0.3} max={5} step={0.1} value={huGamma}
+                onChange={(e) => { const v = Number(e.target.value); setHuGamma(v); scheduleHuCrop(huCropMin, huCropMax, v); }}
+                style={{ flex: 1, height: 3 }} />
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', width: 52, textAlign: 'right' }}>{huGamma.toFixed(1)}</span>
             </div>
           </div>
         )}
@@ -1579,10 +2030,10 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         )}
       </div>
 
-      {/* Clipping Box */}
+      {/* Crop — bounding box to hide chest wall / spine / ribs */}
       <div style={{ padding: '4px 0', borderTop: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: clipEnabled ? 4 : 0 }}>
-          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>Clip:</span>
+          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>Crop:</span>
           <button
             className={`render-mode-btn ${clipEnabled ? 'active' : ''}`}
             onClick={() => { const next = !clipEnabled; setClipEnabled(next); applyClipBox(next, clipBox); }}
@@ -1610,12 +2061,72 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
               <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ fontSize: '9px', color: 'var(--text-muted)', width: 28, textAlign: 'right' }}>{key}</span>
                 <input type="range" min={0} max={100} value={clipBox[key]}
-                  onChange={(e) => setClipBox(prev => ({ ...prev, [key]: Number(e.target.value) }))}
-                  onMouseUp={() => applyClipBox(true, clipBox)}
+                  onChange={(e) => {
+                    const next = { ...clipBox, [key]: Number(e.target.value) };
+                    setClipBox(next);
+                    scheduleClipBox(next);
+                  }}
                   style={{ flex: 1, height: 2 }} />
                 <span style={{ fontSize: '9px', color: 'var(--text-muted)', width: 24 }}>{clipBox[key]}%</span>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Export STL — surface of the thresholded / cropped region */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 0', borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>Mesh:</span>
+        <button
+          className="render-mode-btn"
+          onClick={exportStl}
+          disabled={stlBusy}
+          title="Export the current HU window / cropped region as a binary STL surface (marching cubes)"
+          style={{ fontSize: '10px', padding: '2px 8px', fontWeight: 600 }}
+        >
+          {stlBusy ? 'Exporting…' : 'Export STL'}
+        </button>
+        {stlStatus && (
+          <span style={{ fontSize: '10px', color: stlStatus.startsWith('Exported') ? '#4caf50' : 'var(--text-muted)' }}>
+            {stlStatus}
+          </span>
+        )}
+      </div>
+
+      {/* 3D surface measurement */}
+      <div style={{ padding: '4px 0', borderTop: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>Measure:</span>
+          <button
+            className={`render-mode-btn ${measureMode === 'distance' ? 'active' : ''}`}
+            onClick={() => { measurePendingRef.current = []; setMeasureMode(measureMode === 'distance' ? 'off' : 'distance'); }}
+            title="Click two points on the 3D surface to measure distance (mm)"
+            style={{ fontSize: '10px', padding: '2px 8px', fontWeight: 600, color: measureMode === 'distance' ? '#4fc3f7' : undefined }}
+          >
+            {measureMode === 'distance' ? '[ Pick 2… ]' : 'Distance'}
+          </button>
+          <button
+            className={`render-mode-btn ${measureMode === 'angle' ? 'active' : ''}`}
+            onClick={() => { measurePendingRef.current = []; setMeasureMode(measureMode === 'angle' ? 'off' : 'angle'); }}
+            title="Click three points (A, vertex, B) to measure angle (°)"
+            style={{ fontSize: '10px', padding: '2px 8px', fontWeight: 600, color: measureMode === 'angle' ? '#4fc3f7' : undefined }}
+          >
+            {measureMode === 'angle' ? '[ Pick 3… ]' : 'Angle'}
+          </button>
+          <button className="render-mode-btn" onClick={clearMeasurements}
+            title="Clear all measurements for this series" style={{ fontSize: '10px', padding: '2px 6px' }}
+            disabled={measurements.length === 0}>Clear</button>
+        </div>
+        {measurements.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 3 }}>
+            {measurements.map((m, i) => (
+              <div key={m.id} style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'flex', gap: 6 }}>
+                <span style={{ color: '#4fc3f7' }}>{m.kind === 'distance' ? '↔' : '∠'}</span>
+                <span>{formatMeasurement(m)}</span>
+                <span style={{ opacity: 0.5 }}>#{i + 1}</span>
+              </div>
+            ))}
+            <span style={{ fontSize: '9px', color: 'var(--text-muted)', opacity: 0.6 }}>Saved with this series</span>
           </div>
         )}
       </div>
