@@ -406,23 +406,24 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-top: 14px;
-  margin-bottom: 14px;
+  gap: 16px;
+  margin-top: 18px;
+  margin-bottom: 12px;
 }
 
 .nd-modalities-head .cap { color: var(--nd-ink-3); }
 .nd-modalities-count { font-size: 11px; color: var(--nd-ink-3); }
 
-.nd-mode-group { margin-bottom: 16px; }
+.nd-mode-group { margin-bottom: 18px; }
 
 .nd-mode-group-title {
   color: var(--nd-primary);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .nd-modes {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 .nd-modes.cols-1 { grid-template-columns: 1fr; }
@@ -433,11 +434,12 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 }
 
 @media (max-width: 520px) {
-  .nd-mode-card { padding: 8px 10px; }
-  .nd-mode-title { font-size: 13px; }
-  .nd-mode-blurb { font-size: 11px; }
-  .nd-mode-tag { font-size: 9.5px; padding: 1px 5px; }
-  .nd-mode-btn { padding: 3px 8px; font-size: 11.5px; }
+  .nd-modalities-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .nd-mode-card { padding: 14px; }
+  .nd-mode-title { font-size: 15px; }
+  .nd-mode-blurb { font-size: 12.5px; }
+  .nd-mode-tag { font-size: 10px; padding: 3px 7px; }
+  .nd-mode-btn { min-height: 36px; padding: 7px 10px; font-size: 12px; }
   .nd-mode-actions { flex-wrap: wrap; }
 }
 
@@ -445,10 +447,10 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   background: var(--nd-panel);
   border: 1px solid var(--nd-line);
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 12px;
   position: relative;
   transition: all 0.15s;
 }
@@ -460,15 +462,15 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 
 .nd-mode-head {
   display: flex;
-  align-items: center;
-  gap: 9px;
+  align-items: flex-start;
+  gap: 11px;
 }
 
 .nd-mode-icon {
-  width: 26px;
-  height: 26px;
+  width: 34px;
+  height: 34px;
   border-radius: 6px;
-  background: var(--nd-panel-2);
+  background: color-mix(in oklch, var(--nd-primary) 9%, var(--nd-panel));
   border: 1px solid var(--nd-line);
   display: grid;
   place-items: center;
@@ -476,19 +478,25 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   flex-shrink: 0;
 }
 
-.nd-mode-icon svg { width: 13px; height: 13px; }
+.nd-mode-icon svg { width: 16px; height: 16px; }
+
+.nd-mode-copy {
+  flex: 1;
+  min-width: 0;
+}
 
 .nd-mode-title {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
   color: var(--nd-ink);
+  line-height: 1.25;
 }
 
 .nd-mode-sub {
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--nd-ink-3);
-  margin-top: 1px;
-  letter-spacing: 0.04em;
+  margin-top: 4px;
+  letter-spacing: 0.03em;
 }
 
 .nd-mode-badge {
@@ -500,24 +508,24 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 }
 
 .nd-mode-blurb {
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--nd-ink-2);
-  line-height: 1.35;
+  line-height: 1.45;
 }
 
 .nd-mode-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px;
 }
 
 .nd-mode-tag {
-  font-size: 9.5px;
+  font-size: 10.5px;
   color: var(--nd-ink-2);
   background: var(--nd-panel-2);
   border: 1px solid var(--nd-line);
-  padding: 1px 5px;
-  border-radius: 3px;
+  padding: 3px 7px;
+  border-radius: 5px;
 }
 
 .nd-mode-divider {
@@ -526,7 +534,7 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
 
 .nd-mode-actions {
   display: flex;
-  gap: 5px;
+  gap: 8px;
   align-items: center;
   margin-top: 2px;
 }
@@ -535,13 +543,16 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   background: var(--nd-panel);
   color: var(--nd-ink);
   border: 1px solid var(--nd-line);
-  padding: 4px 10px;
-  border-radius: 5px;
-  font-size: 11.5px;
-  font-weight: 500;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
+  flex: 1;
   transition: all 0.12s;
 }
 
@@ -600,11 +611,11 @@ button { font: inherit; border: 0; cursor: pointer; background: transparent; col
   display: flex;
   align-items: center;
   gap: 5px;
-  margin-top: 3px;
-  padding: 1px 2px;
-  font-size: 9.5px;
+  margin-top: -2px;
+  padding: 0;
+  font-size: 10.5px;
   color: var(--nd-ink-3);
-  opacity: 0.55;
+  opacity: 0.72;
   letter-spacing: 0.02em;
 }
 .nd-mode-drop-hint svg {
