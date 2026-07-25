@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
+import { applyLinearInterpolation } from '../../../shared/core/cornerstone';
 import {
   addScaled,
   buildViewRay,
@@ -157,6 +158,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     return engine?.getViewport('volume3d') as cornerstone.Types.IVolumeViewport | undefined;
   };
 
+  // Cornerstone's applyPreset() sets FAST_LINEAR interpolation on every
+  // viewport.setProperties({ preset }) call, silently overriding the true
+  // LINEAR + fine-sampling actor config applyLinearInterpolation() sets up.
+  // Every code path that re-applies a preset/appearance to the 3D viewport
+  // must re-call this afterward so quality doesn't regress.
+  const reassert3dQuality = useCallback(() => {
+    const viewport = getViewport3d();
+    if (viewport) applyLinearInterpolation(viewport);
+  }, []);
+
   // Apply VTK.js shading properties directly on the volume actor
   const applyShading = useCallback((amb: number, diff: number, spec: number, specPow: number) => {
     const viewport = getViewport3d();
@@ -186,6 +197,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       viewport.setProperties({ preset: presetInfo.preset });
     }
 
+    reassert3dQuality();
     viewport.render();
     setMode(newMode);
 
@@ -301,6 +313,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           ambient: '0.1', diffuse: '0.9', interpolation: '1',
         } as any,
       });
+      reassert3dQuality();
 
       const visibleList = Object.keys(visibility).filter(k => visibility[k]);
       console.log('[TissueVis] Opacity updated, visible:', visibleList.join(', '));
@@ -430,16 +443,16 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       mapper?.modified?.();
     } catch { /* ignore */ }
 
-    // THE FIX: setUpdatedFrame only FLAGS frames dirty — the streaming texture
-    // re-uploads them to the GPU inside update3DFromRaw(), which a plain
-    // viewport.render() after an off-render edit does NOT reach (observed: 546
-    // frames left pending, so the carve never appeared). Prime a render so the
-    // GL context is current, push the dirty frames to the GPU explicitly, then
-    // redraw. This replaces the old setVolumesForViewports re-bind hammer (which
-    // also failed to upload and reset the user's preset/shading).
+    // setUpdatedFrame only FLAGS frames dirty; the actual GPU upload happens in
+    // vtkStreamingOpenGLTexture.update3DFromRaw() during the next render pass,
+    // driven by the MTime bumps above. Calling update3DFromRaw() by hand here
+    // is wrong: it clears the dirty-frame flags outside a render pass, so the
+    // real render finds nothing left to upload. Just flag + render, and let the
+    // mapper do the upload.
+    //
+    // Re-render every viewport, not just the 3D one — the MPR views read the
+    // same per-image cache and must show the same edit.
     const engine = cornerstone.getRenderingEngine(renderingEngineId);
-    viewport.render();
-    try { texture?.update3DFromRaw?.(); } catch { /* ignore */ }
     viewport.render();
     try { engine?.render(); } catch { /* ignore */ }
   }, [renderingEngineId]);
@@ -801,11 +814,6 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       try {
         if (viewport?.canvas) viewport.canvas.style.pointerEvents = '';
       } catch { /* ignore */ }
-      try {
-        const renderer = (viewport as any)?.getRenderer?.();
-        const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
-        if (interactor) interactor.setEnabled(true);
-      } catch { /* ignore */ }
       setVolume3dPrimaryToolsActive(true);
       return;
     }
@@ -817,17 +825,18 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     setVolume3dPrimaryToolsActive(false);
 
     // Keep VTK from stealing drags; overlay canvas receives the stroke.
+    //
+    // Do NOT disable the VTK render-window interactor here. That was the cause
+    // of "scalpel says Erasing… but nothing happens": with the interactor
+    // disabled the 3D volume mapper is no longer traversed by the render pass,
+    // so vtkStreamingOpenGLTexture.update3DFromRaw() never runs and the erased
+    // voxels are never re-uploaded to the GPU texture — the carve only became
+    // visible after leaving scalpel mode. Cornerstone3D routes interaction
+    // through its own tools (deactivated just above), so the VTK interactor
+    // does not need to be touched at all.
     try {
       if (viewport.canvas) viewport.canvas.style.pointerEvents = 'none';
     } catch { /* ignore */ }
-    try {
-      const renderer = (viewport as any).getRenderer?.();
-      const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
-      if (interactor) {
-        interactor.setEnabled(false);
-        console.log('[Scalpel] VTK interactor disabled');
-      }
-    } catch (e) { console.warn('[Scalpel] Could not disable interactor:', e); }
 
     // Create drawing canvas
     let canvas = scalpelCanvasRef.current;
@@ -1007,13 +1016,12 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       }
 
       mapper.modified();
-      // Use VTK native render to bypass Cornerstone's resetCameraClippingRange
-      try {
-        const renderer = (viewport as any).getRenderer?.();
-        renderer?.getRenderWindow?.()?.render?.();
-      } catch {
-        viewport.render();
-      }
+      // Cornerstone's viewport.render() runs the VTK render AND copies the
+      // offscreen buffer to the on-screen canvas. A raw
+      // renderWindow.render() only updates the offscreen buffer, so the crop
+      // wouldn't appear until the next Cornerstone render (e.g. a camera
+      // interaction) — that was the "crop only shows after clicking" bug.
+      viewport.render();
     } catch (e) {
       console.warn('[ClipBox] Error:', e);
     }
@@ -1287,12 +1295,9 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       if (e.key === 'Escape') { setRegionGrowMode('off'); setRegionGrowStatus('Cancelled'); }
     };
 
-    // Temporarily disable VTK interactor
-    try {
-      const renderer = (viewport as any).getRenderer?.();
-      const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
-      if (interactor) interactor.setEnabled(false);
-    } catch {}
+    // NOTE: the VTK interactor is deliberately left enabled — disabling it
+    // stops the 3D volume mapper from being traversed, which silently freezes
+    // the GPU texture (see the scalpel setup effect for the full explanation).
 
     el.addEventListener('click', onClick, true);
     document.addEventListener('keydown', onKeyDown);
@@ -1300,12 +1305,6 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
     return () => {
       el.removeEventListener('click', onClick, true);
       document.removeEventListener('keydown', onKeyDown);
-      // Re-enable VTK interactor
-      try {
-        const renderer = (viewport as any).getRenderer?.();
-        const interactor = renderer?.getRenderWindow?.()?.getInteractor?.();
-        if (interactor) interactor.setEnabled(true);
-      } catch {}
     };
   }, [regionGrowMode, volumeId, regionGrowHuMin, regionGrowHuMax, applyRegionGrow]);
 
@@ -1349,6 +1348,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
           ambient: '0.1', diffuse: '0.9', interpolation: '1',
         } as any,
       });
+      reassert3dQuality();
     } catch (e) {
       console.warn('[HUCrop] Error:', e);
     }
@@ -1388,6 +1388,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         else mapper?.setBlendMode?.(0); // VTK COMPOSITE_BLEND = 0
         const presetInfo = PRESETS.find((p) => p.key === mode);
         if (presetInfo) viewport.setProperties({ preset: presetInfo.preset });
+        reassert3dQuality();
         viewport.render();
         applyShading(ambient, diffuse, specular, specularPower);
         return;
@@ -1416,6 +1417,7 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
       if (mapper?.setBlendModeToAdditiveIntensity) mapper.setBlendModeToAdditiveIntensity();
       else mapper?.setBlendMode?.(4);
 
+      reassert3dQuality();
       viewport.render();
     } catch (e) {
       console.warn('[DRR] Error:', e);
@@ -2057,9 +2059,18 @@ export function RenderModeSelector({ renderingEngineId, volumeId }: Props) {
         </div>
         {clipEnabled && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {(['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'] as const).map(key => (
+            {/* Anatomical labels (LPS): +X = Left, +Y = Posterior, +Z = Superior.
+                Min bound = the low-coordinate anatomical side, Max = the high side. */}
+            {([
+              { key: 'xMin', label: 'Right →' },
+              { key: 'xMax', label: '→ Left' },
+              { key: 'yMin', label: 'Ant →' },
+              { key: 'yMax', label: '→ Post' },
+              { key: 'zMin', label: 'Inf →' },
+              { key: 'zMax', label: '→ Sup' },
+            ] as const).map(({ key, label }) => (
               <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: '9px', color: 'var(--text-muted)', width: 28, textAlign: 'right' }}>{key}</span>
+                <span style={{ fontSize: '9px', color: 'var(--text-muted)', width: 40, textAlign: 'right' }} title={key}>{label}</span>
                 <input type="range" min={0} max={100} value={clipBox[key]}
                   onChange={(e) => {
                     const next = { ...clipBox, [key]: Number(e.target.value) };
