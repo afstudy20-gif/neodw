@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import { OrientationOverlay } from './OrientationOverlay';
 import { centerViewportsOnCrosshairs } from '../core/toolManager';
@@ -32,8 +32,11 @@ interface Props {
   mode?: ViewportMode;
 }
 
+const RENDERING_ENGINE_ID = 'myRenderingEngine';
+
 export function ViewportGrid({ hide3d, mode = 'standard' }: Props) {
   const [expanded, setExpanded] = useState<ViewportName | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
 
   const toggle = useCallback((name: ViewportName) => {
     setExpanded((prev) => (prev === name ? null : name));
@@ -58,6 +61,52 @@ export function ViewportGrid({ hide3d, mode = 'standard' }: Props) {
     }, 80);
     return () => clearTimeout(timer);
   }, [expanded, hide3d, mode]);
+
+  // Timing-independent fix for the 3D canvas backing-store race: instead of
+  // guessing when the flex layout has settled (the fixed setTimeout above),
+  // watch the grid container (and the #viewport-3d cell specifically) and
+  // resize Cornerstone the moment they actually reach their final size. This
+  // also self-corrects for window resizes and panel open/close for free.
+  useEffect(() => {
+    const container = gridRef.current;
+    if (!container) return;
+
+    const lastSizes = new WeakMap<Element, { width: number; height: number }>();
+    const pendingTargets = new Set<Element>();
+    let rafId: number | null = null;
+
+    const flush = () => {
+      rafId = null;
+      let changed = false;
+      for (const target of pendingTargets) {
+        const { clientWidth, clientHeight } = target as HTMLElement;
+        const last = lastSizes.get(target);
+        if (!last || last.width !== clientWidth || last.height !== clientHeight) {
+          lastSizes.set(target, { width: clientWidth, height: clientHeight });
+          changed = true;
+        }
+      }
+      pendingTargets.clear();
+      if (!changed) return;
+      const engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
+      engine?.resize(true, false);
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) pendingTargets.add(entry.target);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(flush);
+    });
+
+    observer.observe(container);
+    const viewport3dEl = document.getElementById('viewport-3d');
+    if (viewport3dEl && viewport3dEl !== container) observer.observe(viewport3dEl);
+
+    return () => {
+      observer.disconnect();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, []);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -117,8 +166,6 @@ export function ViewportGrid({ hide3d, mode = 'standard' }: Props) {
     { id: 'viewport-3d', name: '3d', csId: 'volume3d' },
   ];
 
-  const RENDERING_ENGINE_ID = 'myRenderingEngine';
-
   const zoomViewport = (csId: string, factor: number) => {
     const engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
     if (!engine) return;
@@ -136,7 +183,7 @@ export function ViewportGrid({ hide3d, mode = 'standard' }: Props) {
   };
 
   return (
-    <div className={gridClass}>
+    <div className={gridClass} ref={gridRef}>
       {/* Stack 2D viewport — separate element for native slice viewing */}
       {mode === 'stack-2d' && (
         <div className="viewport-container">

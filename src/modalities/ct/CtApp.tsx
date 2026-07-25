@@ -41,6 +41,25 @@ const VOLUME_ID = 'cornerstoneStreamingImageVolume:myVolume';
 const VIEWPORT_IDS = ['axial', 'sagittal', 'coronal', 'volume3d'];
 const MPR_VIEWPORT_IDS = ['axial', 'sagittal', 'coronal'];
 
+/**
+ * Runs `callback` after the browser has laid out and painted the current
+ * frame (double requestAnimationFrame) instead of guessing with a wall-clock
+ * setTimeout — the mode-change/panel-resize handlers race a fixed timeout
+ * against the flex layout settling, which can fire before the viewport cell
+ * (in particular #viewport-3d) has its final size. Returns a cancel function
+ * mirroring clearTimeout.
+ */
+function scheduleAfterLayout(callback: () => void): () => void {
+  let innerFrame: number | null = null;
+  const outerFrame = requestAnimationFrame(() => {
+    innerFrame = requestAnimationFrame(callback);
+  });
+  return () => {
+    cancelAnimationFrame(outerFrame);
+    if (innerFrame !== null) cancelAnimationFrame(innerFrame);
+  };
+}
+
 function applyDefaultWindowLevelNow(series: DicomSeriesInfo, engine: cornerstone.RenderingEngine): boolean {
   const modality = series.modality?.toUpperCase() || '';
   if (modality === 'CT') {
@@ -216,12 +235,10 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
   useEffect(() => {
     if (rightPanel === 'la' || rightPanel === 'aorta' || rightPanel === 'vascular' || rightPanel === 'laa' || rightPanel === 'lv-adas') {
       setHide3dPanel(false);
-      const t = setTimeout(resizeViewports, 60);
-      return () => clearTimeout(t);
+      return scheduleAfterLayout(() => resizeViewports());
     }
     setHide3dPanel(true);
-    const t = setTimeout(resizeViewports, 60);
-    return () => clearTimeout(t);
+    return scheduleAfterLayout(() => resizeViewports());
   }, [rightPanel]);
 
   // Pending LA save/load: panel must be mounted before ref is valid.
@@ -605,6 +622,10 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
       if (viewport3d) {
         const preset3d = (series.modality?.toUpperCase() === 'MR') ? 'MR-Default' : 'CT-Chest-Contrast-Enhanced';
         viewport3d.setProperties({ preset: preset3d });
+        // applyPreset() sets FAST_LINEAR interpolation; reassert true LINEAR +
+        // fine sampling so the initial 3D render isn't left on the coarser
+        // fast-path filter.
+        applyLinearInterpolation(viewport3d);
       }
 
       // Modality-specific defaults
@@ -658,7 +679,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
     });
   }, []);
 
-  const resizeViewportsPreservingMprCameras = useCallback((delayMs = 180) => {
+  const resizeViewportsPreservingMprCameras = useCallback(() => {
     const engine = renderingEngineRef.current;
     const savedCameras: Record<string, cornerstone.Types.ICamera> = {};
     if (engine) {
@@ -668,7 +689,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
       }
     }
 
-    setTimeout(() => {
+    scheduleAfterLayout(() => {
       const nextEngine = renderingEngineRef.current;
       if (!nextEngine) return;
       nextEngine.resize(true, false);
@@ -679,7 +700,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
         vp.setCamera(cam);
         vp.render();
       }
-    }, delayMs);
+    });
   }, []);
 
   const setTaviReportMode = useCallback((expanded: boolean) => {
@@ -693,8 +714,9 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
   }, [resizeViewportsPreservingMprCameras]);
 
   const resizeViewports = useCallback((options: { resetCrosshairs?: boolean } = {}) => {
-    // Allow CSS layout to settle, then resize Cornerstone canvases + reset crosshairs
-    setTimeout(() => {
+    // Wait for the browser to lay out + paint the new mode/panel state, then
+    // resize Cornerstone canvases + reset crosshairs
+    scheduleAfterLayout(() => {
       const engine = renderingEngineRef.current;
       if (engine) {
         engine.resize(true, false);
@@ -702,7 +724,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
       if (options.resetCrosshairs !== false) {
         resetCrosshairsToCenter(RENDERING_ENGINE_ID);
       }
-    }, 150);
+    });
   }, []);
 
   const toggleRightPanel = useCallback((panel: RightPanel) => {
@@ -725,7 +747,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
         setViewportMode('tavi-crosshair');
 
         // After resize, restore saved cameras to preserve zoom/pan/position
-        setTimeout(() => {
+        scheduleAfterLayout(() => {
           if (engine) {
             engine.resize(true, false);
             for (const vpId of MPR_VIEWPORT_IDS) {
@@ -736,7 +758,7 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
               }
             }
           }
-        }, 150);
+        });
       } else if (prev === 'tavi' && (next as RightPanel) !== 'tavi') {
         setViewportMode((next as RightPanel) === 'hand-mr' ? 'hand-mr' : 'standard');
         setReportExpanded(false);
@@ -746,10 +768,10 @@ export default function App({ onBack, initialFiles, initialSeries, initialPanel 
       if (next === 'hand-mr') {
         setViewportMode('hand-mr');
         setReportExpanded(false);
-        setTimeout(() => {
+        scheduleAfterLayout(() => {
           const engine = renderingEngineRef.current;
           if (engine) engine.resize(true, false);
-        }, 150);
+        });
       } else if (prev === 'hand-mr' && (next as RightPanel) !== 'hand-mr' && (next as RightPanel) !== 'tavi') {
         setViewportMode('standard');
         resizeViewports();
